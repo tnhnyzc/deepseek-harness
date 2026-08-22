@@ -89,9 +89,22 @@ the untouched upstream at the pin is green across all keyless lanes.
 
 ## Desktop patches
 
-None. No upstream source file is modified by desktop commits yet. Any
-later upstream modification is recorded here and in the commit message.
+| File | Change | Stage |
+| --- | --- | --- |
+| `scripts/check-workspace-constraints.ts` | `privateAppDirectory` carve-out: `apps/desktop` and `apps/desktop-runtime` are private workspace members, exempt from the release-member publication rules and the app publication-files policy (fork-level gate amendment B1 from the upstream contract) | 1 |
+| `pnpm-workspace.yaml` | `allowBuilds.electron: true` (pinned Electron binary download); override pinning `@electron/rebuild` to 4.2.0 because the Forge packages' 3.x rebuild sub-dependency resolves node-gyp from a git repository, which `blockExoticSubdeps` rejects | 1 |
 
 ## Known incompatibilities
 
-None known.
+- `pnpm run hygiene` is red **at the pin itself**:
+  `pnpm run rescope-vendor:check` fails with two stale exact edits in
+  `scripts/rescope-vendor.ts` (`knip-logger-console`,
+  `vendoring-cookbook-name-invariant-zh`) that point at files that no longer
+  exist in the tree. Verified in a clean detached worktree of the pin.
+  Pre-existing upstream defect; fork-level fix deferred.
+- Electron Forge 7.11.2's CLI system check requires a hoisted pnpm layout
+  (or a custom hoist pattern), which this monorepo does not use;
+  `skipSystemCheck` no longer exists in Forge 7. Stage 1 therefore verifies
+  bundle assembly with `@electron/packager` 18.4.4 (the assembler Forge uses
+  internally) and keeps `forge.config.ts` as the stage 11 packaging
+  specification.

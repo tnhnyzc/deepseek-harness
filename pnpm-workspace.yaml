@@ -27,6 +27,12 @@ linkWorkspacePackages: true
 overrides:
   '@deepseek-ai/cosmokit': 'link:vendor/cosmokit'
   '@deepseek-ai/schemastery': 'link:vendor/schemastery'
+  # The Forge packages' rebuild sub-dependency resolves node-gyp from a git
+  # repository, which the pnpm exotic-subdependency policy blocks. Rebuild 4.x
+  # uses the npm-published node-gyp; the Electron shell itself carries no
+  # native modules to rebuild (the Harness runtime is a separate plain-Node
+  # process), so only the Forge tree references this package.
+  '@electron/rebuild': '4.2.0'
 
 peerDependencyRules:
   allowedVersions:
@@ -38,6 +44,8 @@ peerDependencyRules:
 # default and only allow scripts we need. esbuild (native binary) and lefthook
 # (git hooks) genuinely need theirs.
 allowBuilds:
+  # Desktop shell: the postinstall downloads the pinned Electron binary.
+  electron: true
   esbuild: true
   lefthook: true
   # Cross-platform boundary for the persistent PTY backend, including ConPTY on Windows.

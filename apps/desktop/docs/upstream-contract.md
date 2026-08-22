@@ -1457,3 +1457,10 @@ The SPEC's stage 0 exit criteria, answered from the pinned source:
    introduces it as its own convention (section 1.4 note).
 7. `apps/cli` carries no `engines` field; the Node floor is root-only
    (root `package.json:8-10`).
+8. `pnpm run rescope-vendor:check` (part of `pnpm run hygiene`) fails at the
+   pin itself, with two stale `EXACT_EDITS` in `scripts/rescope-vendor.ts`
+   (`knip-logger-console` pointing at a knip.json block for the long-gone
+   `packages/util/home` package, and `vendoring-cookbook-name-invariant-zh`
+   pointing at a moved docs/cookbook block). Verified by running the check
+   in a clean detached worktree of the pin. Pre-existing upstream defect;
+   out of desktop scope, fork-level fix deferred.
