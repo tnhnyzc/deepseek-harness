@@ -6,6 +6,16 @@
   "license": "MIT",
   "type": "module",
   "main": "dist/index.js",
+  "exports": {
+    ".": {
+      "types": "./lib/types/index.d.ts",
+      "default": "./dist/index.js"
+    },
+    "./transport": {
+      "types": "./lib/types/transport.d.ts",
+      "default": "./dist/transport.js"
+    }
+  },
   "scripts": {
     "build": "tsdown"
   },
@@ -17,6 +27,7 @@
     "@deepseek-ai/dsh-base": "workspace:^",
     "@deepseek-ai/dsh-cmdline": "workspace:^",
     "@deepseek-ai/dsh-home-paths": "workspace:^",
+    "@deepseek-ai/dsh-host-apiproxy": "workspace:^",
     "@deepseek-ai/dsh-launch-environment": "workspace:^",
     "@deepseek-ai/dsh-web-app": "workspace:^"
   }

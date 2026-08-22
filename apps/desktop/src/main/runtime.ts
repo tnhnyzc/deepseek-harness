@@ -9,6 +9,7 @@
 
 import { fork, spawnSync, type ChildProcess } from 'node:child_process'
 import { dirname } from 'node:path'
+import { fromOpaqueTransportWire, isTransportMessage, toOpaqueTransportWire } from '@deepseek-ai/dsh-desktop-runtime/transport'
 import type {
   RuntimeCapabilities,
   RuntimeReadyPayload,
@@ -36,6 +37,25 @@ export interface RuntimeSupervisorOptions {
   onStateChange?: (view: RuntimeStateView) => void
 }
 
+/**
+ * The supervisor's half of the transport channel. Node `child_process`
+ * cannot transfer a `MessagePort`, so the runtime child receives transport
+ * messages over the existing structured-clone IPC channel; this surface
+ * relays them. Handlers registered with `onMessage`/`onClose` stay installed
+ * until the current child exits (the broker's channel is per-generation: a
+ * restart ends it, and the renderer re-opens the transport).
+ */
+export interface RuntimeTransport {
+  /** Send one transport message to the live child; a no-op when not connected. */
+  send(value: object): void
+  /** Relay inbound transport messages (control messages are not included). */
+  onMessage(handler: (value: object) => void): void
+  /** Fired once when the current child exits, tearing the channel down. */
+  onClose(handler: () => void): void
+  /** Ask the runtime to end its transport operations (renderer side went away). */
+  closeChannel(): void
+}
+
 export interface RuntimeSupervisor {
   /** The current observable fact. */
   view(): RuntimeStateView
@@ -45,6 +65,8 @@ export interface RuntimeSupervisor {
   stop(): Promise<void>
   /** User-triggered relaunch from a failed state. */
   requestRestart(): void
+  /** The transport channel relay surface for the dumb broker. */
+  transport: RuntimeTransport
 }
 
 /** The legal state transitions; anything else throws (fail loud). */
@@ -131,6 +153,8 @@ export function createRuntimeSupervisor(options: RuntimeSupervisorOptions): Runt
   let forceTimer: ReturnType<typeof setTimeout> | undefined
   let stopResolve: (() => void) | undefined
   let stopPromise: Promise<void> | undefined
+  let transportMessageHandler: ((value: object) => void) | undefined
+  let transportCloseHandler: (() => void) | undefined
 
   const view = (): RuntimeStateView => ({
     state,
@@ -188,6 +212,11 @@ export function createRuntimeSupervisor(options: RuntimeSupervisorOptions): Runt
   }
 
   const handleExit = (code: number | null, signal: NodeJS.Signals | null): void => {
+    // The channel is per-generation: any exit ends it, whatever the state.
+    const close = transportCloseHandler
+    transportMessageHandler = undefined
+    transportCloseHandler = undefined
+    close?.()
     if (state === 'stopping') {
       finishStop()
       return
@@ -221,6 +250,12 @@ export function createRuntimeSupervisor(options: RuntimeSupervisorOptions): Runt
     wired.stdout?.on('data', (chunk: Buffer) => { diagnostics.push(chunk.toString()) })
     wired.stderr?.on('data', (chunk: Buffer) => { diagnostics.push(chunk.toString()) })
     wired.on('message', (message: { type?: unknown; runtimeVersion?: unknown; dshVersion?: unknown; capabilities?: unknown } | null) => {
+      if (message !== null && typeof message === 'object' && isTransportMessage(message)) {
+        // The child edge encodes byte fields; restore them for the broker.
+        const decoded = fromOpaqueTransportWire(message)
+        if (decoded !== null) transportMessageHandler?.(decoded)
+        return
+      }
       if (message === null || typeof message !== 'object' || message.type !== 'runtime.ready' || state !== 'starting') return
       ready = {
         runtimeVersion: String(message.runtimeVersion),
@@ -274,5 +309,19 @@ export function createRuntimeSupervisor(options: RuntimeSupervisorOptions): Runt
     start()
   }
 
-  return { view, start, stop, requestRestart }
+  const sendToChild = (value: object): void => {
+    const wired = child
+    if (wired === undefined || !wired.connected || wired.exitCode !== null) return
+    // The child edge drops typed arrays; encode byte fields before send.
+    wired.send(toOpaqueTransportWire(value))
+  }
+
+  const transport: RuntimeTransport = {
+    send: sendToChild,
+    onMessage: (handler) => { transportMessageHandler = handler },
+    onClose: (handler) => { transportCloseHandler = handler },
+    closeChannel: () => { sendToChild({ type: 'runtime.transport-closed' }) },
+  }
+
+  return { view, start, stop, requestRestart, transport }
 }

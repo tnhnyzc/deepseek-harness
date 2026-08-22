@@ -652,8 +652,7 @@
     },
     "apps/desktop-runtime": {
       "entry": [
-        "tests/**/*.spec.ts",
-        "src/index.ts"
+        "tests/**/*.spec.ts"
       ],
       "project": [
         "src/**/*.ts",

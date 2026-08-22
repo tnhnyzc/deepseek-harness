@@ -6,7 +6,7 @@
  */
 import { existsSync, mkdirSync } from 'node:fs'
 import { join } from 'node:path'
-import { app, BrowserWindow, ipcMain, session } from 'electron'
+import { app, BrowserWindow, ipcMain, MessageChannelMain, session } from 'electron'
 import { handleAppProtocol, registerAppScheme } from './protocol.ts'
 import {
   bundledNodeExecutable,
@@ -16,6 +16,7 @@ import {
 } from './runtime-paths.ts'
 import { createRuntimeSupervisor, type RuntimeSupervisor, type RuntimeStateView } from './runtime.ts'
 import { denySessionPermissions } from './security.ts'
+import { createTransportBroker, TRANSPORT_OPEN_CHANNEL, wrapMainPort, type BrokerChannel } from './transport-broker.ts'
 import { createAppWindow } from './window.ts'
 
 /** The renderer channels of the stage 2 supervision bridge. */
@@ -80,12 +81,26 @@ if (!singleInstance) {
       current.requestRestart()
       return true
     })
+    const broker = createTransportBroker({
+      runtime: supervisor.transport,
+      isRuntimeReady: () => supervisor?.view().state === 'ready',
+      // Only Electron's main-process channel ports can cross webContents IPC;
+      // Node worker_threads ports cannot.
+      channelFactory: (): BrokerChannel => {
+        const channel = new MessageChannelMain()
+        return { local: wrapMainPort(channel.port1), remote: channel.port2 }
+      },
+    })
+    ipcMain.on(TRANSPORT_OPEN_CHANNEL, (event) => {
+      broker.handleOpenRequest(event.sender)
+    })
     supervisor.start()
     createAppWindow()
     app.on('window-all-closed', () => {
       app.quit()
     })
     app.on('before-quit', (event) => {
+      broker.teardown()
       const current = supervisor
       if (current === undefined) return
       const state = current.view().state

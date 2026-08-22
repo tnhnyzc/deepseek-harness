@@ -35,6 +35,20 @@ export interface RuntimeStateView {
   autoRetried?: boolean
 }
 
+/**
+ * The renderer-side transport port surface. contextBridge cannot carry a
+ * live `MessagePort` object (it crosses as an inert object), so the preload
+ * keeps the real port in its isolated world and exposes these plain
+ * functions; the page drives the port through them.
+ */
+interface DesktopTransportPort {
+  addEventListener(type: string, listener: EventListenerOrEventListenerObject | null, options?: boolean | AddEventListenerOptions): void
+  removeEventListener(type: string, listener: EventListenerOrEventListenerObject | null, options?: boolean | AddEventListenerOptions): void
+  postMessage(message: object): void
+  start(): void
+  close(): void
+}
+
 /** The supervision bridge surface the preload exposes to the renderer. */
 export interface DshDesktopApi {
   /** The current supervisor fact. */
@@ -43,4 +57,11 @@ export interface DshDesktopApi {
   onRuntimeState(callback: (view: RuntimeStateView) => void): () => void
   /** Request the supervisor to relaunch a failed runtime. */
   requestRestart(): Promise<boolean>
+  /**
+   * Open the stage 3 transport: resolves the renderer half of a fresh
+   * channel. Rejects while the runtime is not ready or the open times out;
+   * a later channel loss surfaces as the port's `close` event, never as a
+   * rejection of a settled promise.
+   */
+  openTransport(): Promise<DesktopTransportPort>
 }

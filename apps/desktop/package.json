@@ -8,13 +8,14 @@
   "type": "module",
   "main": "dist/main/index.js",
   "scripts": {
-    "build": "npm run build:main && npm run build:renderer",
+    "build": "pnpm --filter @deepseek-ai/dsh-desktop-runtime run build && npm run build:main && npm run build:renderer",
     "build:main": "tsdown",
     "build:renderer": "vite build",
     "bundle:node": "tsx scripts/bundle-node.ts",
     "start": "electron ."
   },
   "devDependencies": {
+    "@deepseek-ai/dsh-desktop-runtime": "workspace:^",
     "@electron-forge/shared-types": "7.11.2",
     "@types/node": "^22.20.0",
     "electron": "43.4.1",

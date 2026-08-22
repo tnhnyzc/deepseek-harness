@@ -23,6 +23,8 @@ import { resolveDshHome } from '@deepseek-ai/dsh-home-paths'
 import { DSH_LAUNCH_ENVIRONMENT_KEY } from '@deepseek-ai/dsh-launch-environment'
 import { composeDesktopPatches, prepareDesktopProfile, PROFILE_ROOT_FILENAME } from './composition.ts'
 import { createProcessShutdown } from './shutdown.ts'
+import { attachTransportRuntime } from './transport-runtime.ts'
+import { createProcessTransportPort } from './transport-process.ts'
 
 const BIN_NAME = 'dsh-desktop-runtime'
 
@@ -73,10 +75,14 @@ async function main(): Promise<void> {
   let dispose: () => Promise<void> = () => Promise.resolve()
   const shutdown = createProcessShutdown(() => dispose())
   const stop = (code: number): void => { shutdown.interrupt(code) }
+  const transportPort = createProcessTransportPort()
+  let transportDispose: (() => void) | undefined
   process.on('SIGTERM', () => { stop(0) })
   process.on('SIGINT', () => { stop(130) })
   process.on('message', (message: { type?: unknown } | null) => {
-    if (message !== null && typeof message === 'object' && message.type === 'runtime.shutdown') stop(0)
+    if (message === null || typeof message !== 'object') return
+    if (message.type === 'runtime.shutdown') stop(0)
+    if (message.type === 'runtime.transport-closed') transportPort.close()
   })
   // The supervisor died: dispose the tree and exit cleanly instead of
   // orphaning the work, without the stop decision's forced exit.
@@ -93,9 +99,17 @@ async function main(): Promise<void> {
       hostCtx.provide(DSH_LAUNCH_ENVIRONMENT_KEY, environment)
       provideCmdline(hostCtx, { args: [], exit: (code) => { void shutdown.shutdown(code) } })
     })
-    dispose = () => ctx.fiber.dispose()
+    const apiProxy = ctx.get('apiProxy')
+    if (apiProxy === undefined) throw new Error('boot settled without the apiProxy service; the desktop runtime cannot serve transport')
+    transportDispose = attachTransportRuntime(transportPort, apiProxy)
+    dispose = () => {
+      transportDispose?.()
+      return ctx.fiber.dispose()
+    }
     // The entry refuses to run without an IPC channel (above), so the
-    // readiness fact goes over it unconditionally.
+    // readiness fact goes over it unconditionally. The transport listens
+    // before the fact: the supervisor relays only after it, and both go out
+    // on the same ordered channel.
     process.send(readyMessage(ctx))
   } catch (error) {
     uninstall()

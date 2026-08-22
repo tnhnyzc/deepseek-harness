@@ -513,6 +513,13 @@ What the desktop must provide so existing client code works unchanged:
    reconnect.
 3. Set `__DSH_TRANSPORT__` before the `connection` entry's `apply` runs.
 
+Stage 3 delivered the physical carrier behind items 1-2: the runtime
+serves both primitives over its process port, the main broker relays the
+frames to the renderer, and `window.dshDesktop.openTransport()` is the
+renderer entry point (Agent Note `2026-08-23-desktop-ipc-transport`).
+Stage 4 implements the desktop `AbstractApiClient` subclass and sets
+`__DSH_TRANSPORT__` on top of it.
+
 DESKTOP-CONSUMPTION: minimal generic extension in the sense of one new
 desktop-owned platform subclass of `AbstractApiClient`; zero upstream
 source edits. Narrowest existing boundary:
@@ -1376,7 +1383,7 @@ Classification of every anticipated desktop need:
 | --- | --- |
 | C1 | Electron shell: window, `dsh-app://` protocol, CSP, sender validation, new-window denial (stage 1) |
 | C2 | Process supervisor: state machine, bundled Node spawn, `DSH_HOME` ownership, restart-on-failure, bounded shutdown (stage 2) |
-| C3 | IPC transport bridge: the desktop `AbstractApiClient` subclass (`doFetch`/`openMux`/`openHost`) + the private process-IPC frame protocol (stages 3-4) |
+| C3 | IPC transport bridge: fetch/stream wire protocol, runtime adapter, dumb main broker, renderer client (stage 3), and the desktop `AbstractApiClient` subclass (`doFetch`/`openMux`/`openHost`) (stage 4) |
 | C4 | Electron `DirectoryPicker` provider package + composition override of the `directory-picker` row (stage 5) |
 | C5 | `external.open`, OS notifications, file picker (no upstream seams; stages 5-7) |
 | C6 | Menus, shortcuts, updater, diagnostics UI, packaging, signing (stages 7-14) |
@@ -1386,7 +1393,7 @@ Classification of every anticipated desktop need:
 | # | Question | Where proven |
 | --- | --- | --- |
 | D1 | `__DSH_BOOT__` provisioning mode: fetch rendered index over transport vs in-process graph export (decides B3) | stage 4 |
-| D2 | Backpressure/credit behavior of the process-IPC frame protocol under sustained token-rate streams (transport-internal; no upstream dependency) | stage 3 |
+| D2 | Backpressure/credit behavior of the process-IPC frame protocol under sustained token-rate streams (transport-internal; no upstream dependency) | resolved in stage 3: credit signaling with per-direction 256 KiB windows (Agent Note `2026-08-23-desktop-ipc-transport`) |
 | D3 | `isLoopback`-gated affordances under a `dsh-app://` URL with a loopback hostname (`packages/client/connection/src/loopback-hostname.ts:14-20`) | stages 1/4 |
 | D4 | Native-module ABI compatibility of the DSH dependency graph against the bundled standalone Node (mandatory packaging test, root `AGENTS.md` + SPEC stage 11) | stage 9/11 |
 

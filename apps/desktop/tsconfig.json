@@ -9,6 +9,9 @@
       "DOM.Iterable"
     ]
   },
+  "references": [
+    { "path": "../desktop-runtime" }
+  ],
   "include": [
     "src",
     "tests",

@@ -103,6 +103,62 @@ describe.skipIf(!guiAvailable() || !runtimeBuilt)('desktop runtime smoke', () =>
       const body = await win.evaluate(() => document.body.textContent ?? '')
       expect(body).toContain('Harness ready — runtime ')
       expect(body).toContain(', DSH ')
+
+      // The transport end-to-end: the preload hands the renderer half of a
+      // real MessagePort over Electron IPC; a keyless fetch round-trips
+      // through the main broker, the child IPC, and the runtime adapter.
+      const facts = await win.evaluate(async () => {
+        const port = await window.dshDesktop.openTransport()
+        try {
+          const requestId = 'smoke-fetch'
+          const payload = new TextEncoder().encode(
+            JSON.stringify({ type: 'client-request', rpcId: 'smoke-rpc', method: 'session.list', payload: {} }),
+          )
+          const result = await new Promise<{ status: number; body: string }>((resolve, reject) => {
+            let status = 0
+            const chunks: Uint8Array[] = []
+            const onClose = () => { reject(new Error('transport port closed mid-fetch')) }
+            port.addEventListener('close', onClose)
+            port.addEventListener('message', (event) => {
+              const data = (event as { data?: unknown }).data
+              const message = data as {
+                type: string
+                status?: number
+                data?: Uint8Array
+                code?: string
+                message?: string
+              } | undefined
+              if (message === undefined) return
+              if (message.type === 'fetch.response.head') status = message.status ?? 0
+              else if (message.type === 'fetch.response.chunk' && message.data !== undefined) chunks.push(message.data)
+              else if (message.type === 'fetch.response.end') {
+                port.removeEventListener('close', onClose)
+                const merged = new Uint8Array(chunks.reduce((total, chunk) => total + chunk.byteLength, 0))
+                let offset = 0
+                for (const chunk of chunks) {
+                  merged.set(chunk, offset)
+                  offset += chunk.byteLength
+                }
+                resolve({ status, body: new TextDecoder().decode(merged) })
+              } else if (message.type === 'fetch.error') {
+                port.removeEventListener('close', onClose)
+                reject(new Error(`fetch.error: ${String(message.code)} ${String(message.message)}`))
+              }
+            })
+            port.postMessage({ type: 'fetch.open', requestId, url: 'http://dsh.local/api/session.list', method: 'POST', headers: [['content-type', 'application/json']] })
+            port.postMessage({ type: 'fetch.request.chunk', requestId, sequence: 0, data: payload })
+            port.postMessage({ type: 'fetch.request.end', requestId })
+          })
+          return result
+        } finally {
+          port.close()
+        }
+      })
+      expect(facts.status).toBe(200)
+      const envelope = JSON.parse(facts.body) as { type: string; result: { ok: boolean; value: { items: unknown[] } } }
+      expect(envelope.type).toBe('server-response')
+      expect(envelope.result.ok).toBe(true)
+      expect(Array.isArray(envelope.result.value.items)).toBe(true)
     } finally {
       // app.close() triggers before-quit -> supervisor.stop(): graceful DSH
       // disposal, then a forced process-group kill if the runtime refused.

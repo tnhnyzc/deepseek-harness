@@ -359,6 +359,9 @@ importers:
 
   apps/desktop:
     devDependencies:
+      '@deepseek-ai/dsh-desktop-runtime':
+        specifier: workspace:^
+        version: link:../desktop-runtime
       '@electron-forge/shared-types':
         specifier: 7.11.2
         version: 7.11.2
@@ -404,6 +407,9 @@ importers:
       '@deepseek-ai/dsh-home-paths':
         specifier: workspace:^
         version: link:../../packages/util/home-paths
+      '@deepseek-ai/dsh-host-apiproxy':
+        specifier: workspace:^
+        version: link:../../packages/host/apiproxy
       '@deepseek-ai/dsh-launch-environment':
         specifier: workspace:^
         version: link:../../packages/util/launch-environment
