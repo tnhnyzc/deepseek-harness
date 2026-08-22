@@ -650,6 +650,20 @@
         "tests/**/*.ts"
       ]
     },
+    "apps/desktop-runtime": {
+      "entry": [
+        "tests/**/*.spec.ts",
+        "src/index.ts"
+      ],
+      "project": [
+        "src/**/*.ts",
+        "tests/**/*.ts"
+      ],
+      "ignoreDependencies": [
+        "@deepseek-ai/dsh-base",
+        "@deepseek-ai/dsh-web-app"
+      ]
+    },
     "packages/subagent/subagent-dsh-sdk": {
       "entry": [
         "tests/**/*.spec.ts",

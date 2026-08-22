@@ -13,8 +13,9 @@ const config: ForgeConfig = {
     name: 'DeepSeek Harness Desktop',
     asar: true,
     // Copied to resources/renderer (basename); the packaged dsh-app://
-    // handler serves from that directory.
-    extraResource: 'dist/renderer',
+    // handler serves from that directory. The `node` directory (built by
+    // `bundle:node`) carries the pinned Node executable per target.
+    extraResource: ['dist/renderer', 'node'],
   },
   rebuildConfig: {},
   makers: [],

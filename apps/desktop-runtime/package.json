@@ -1,0 +1,23 @@
+{
+  "name": "@deepseek-ai/dsh-desktop-runtime",
+  "description": "Standalone DeepSeek Harness runtime process for the desktop app: programmatic boot of the web profile composition without the HTTP serving rows, readiness and shutdown over fork IPC",
+  "version": "0.1.1-rc.2",
+  "private": true,
+  "license": "MIT",
+  "type": "module",
+  "main": "dist/index.js",
+  "scripts": {
+    "build": "tsdown"
+  },
+  "dependencies": {
+    "@deepseek-ai/cordis": "workspace:^",
+    "@deepseek-ai/cordis-plugin-include": "workspace:^",
+    "@deepseek-ai/cordis-plugin-loader": "workspace:^",
+    "@deepseek-ai/dsh-app-boot": "workspace:^",
+    "@deepseek-ai/dsh-base": "workspace:^",
+    "@deepseek-ai/dsh-cmdline": "workspace:^",
+    "@deepseek-ai/dsh-home-paths": "workspace:^",
+    "@deepseek-ai/dsh-launch-environment": "workspace:^",
+    "@deepseek-ai/dsh-web-app": "workspace:^"
+  }
+}

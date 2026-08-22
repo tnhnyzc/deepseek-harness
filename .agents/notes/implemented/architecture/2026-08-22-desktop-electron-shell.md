@@ -26,7 +26,7 @@ Verification is two-tier: `tests/protocol.spec.ts` unit-tests the path-confineme
 
 ## Consequences
 
-- The desktop delta touches repo-level gates: the constraints carve-out, both tsconfig aggregates (`apps/desktop` is referenced by the host face and the client face — a neutral single-config project), `knip.json`, `pnpm-workspace.yaml`, and `.gitignore`.
+- The desktop delta touches repo-level gates: the constraints carve-out, both tsconfig aggregates (`apps/desktop` is referenced by the host face and the client face — a neutral single-config project: the one package holds host code, its main process and preload, and client code, its renderer, so both faces must typecheck it; the arrangement is carried into stage 2 and later stages), `knip.json`, `pnpm-workspace.yaml`, and `.gitignore`.
 - The carve-out names `apps/desktop-runtime` before that package exists (stage 2), so the gate is ready when the second app lands.
 - `pnpm run hygiene` is red at the pin itself: `rescope-vendor:check` fails with two stale exact edits unrelated to desktop (verified in a clean worktree of the pin). Recorded in the contract's mismatch list; the fork-level fix is deferred.
 - D3 (`isLoopback` affordances under `dsh-app://`) is untouched: no DSH client code runs in the stage 1 renderer.

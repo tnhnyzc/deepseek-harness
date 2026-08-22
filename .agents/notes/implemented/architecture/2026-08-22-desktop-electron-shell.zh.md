@@ -26,7 +26,7 @@ pnpm 策略在 `pnpm-workspace.yaml` 里新增两条 desktop 项：`allowBuilds.
 
 ## Consequences
 
-- desktop 的 delta 触及 repo 级 gate：constraints 豁免、两个 tsconfig 聚合（`apps/desktop` 同时被 host face 与 client face 引用 —— 中性的单配置项目）、`knip.json`、`pnpm-workspace.yaml` 与 `.gitignore`。
+- desktop 的 delta 触及 repo 级 gate：constraints 豁免、两个 tsconfig 聚合（`apps/desktop` 同时被 host face 与 client face 引用 —— 中性的单配置项目：同一个包既装 host 代码（main 进程与 preload）又装 client 代码（renderer），两个 face 都必须对它做类型检查；该安排带入 stage 2 与后续阶段）、`knip.json`、`pnpm-workspace.yaml` 与 `.gitignore`。
 - 豁免提前写了 `apps/desktop-runtime`（stage 2 的包），第二个 app 落地时 gate 已就绪。
 - `pnpm run hygiene` 在 pin 本身处即为红：`rescope-vendor:check` 因两处与 desktop 无关的过期 exact edit 失败（已在 pin 的干净 worktree 中验证）。记入契约的 mismatch 清单；分叉级修复暂缓。
 - D3（`dsh-app://` 下的 `isLoopback` 行为）未触及：stage 1 的 renderer 不运行任何 DSH client 代码。

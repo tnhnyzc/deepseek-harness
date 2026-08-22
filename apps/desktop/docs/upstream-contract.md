@@ -84,22 +84,44 @@ mounts `@deepseek-ai/dsh-host-apiproxy` → `ApiProxyService`, which provides
 HTTP serving is a separate row: `webserver`
 (`packages/bundle/web-app/cordis.patch.yml:121-126`) mounting
 `@deepseek-ai/dsh-host-webserver`; `WebServer` listens inside `Service.init`
-(`packages/host/webserver/src/index.ts:231-239`). Two rows depend on it:
-`web-runtime` (`packages/bundle/web-app/cordis.patch.yml:137-144`, serves
-dist, prints the URL line) and `connection`
-(`packages/bundle/web-app/cordis.patch.yml:164-171`, registers `/api`
-routes and the WebSocket downlinks).
+(`packages/host/webserver/src/index.ts:231-239`). The rows that cannot
+activate without it, verified stage 2:
+
+- `web-runtime` (`cordis.patch.yml:137-144`, `inject: [webStartup]`):
+  serves the dist, prints the URL line, provides `webRuntime`.
+- `connection` (`cordis.patch.yml:164-171`, `inject: [webRuntime]`):
+  binds the `/api` routes and the WebSocket downlinks.
+- `modules` (`cordis.patch.yml:159-160`): `@deepseek-ai/dsh-client-modules`
+  declares `static inject = ['webServer', 'loader']`
+  (`packages/client/modules/src/index.ts:283`) and serves
+  `/plugins/<id>/client.js` off it (`:340`).
+- `client-hmr` (`cordis.patch.yml:150-151`): `@deepseek-ai/dsh-client-hmr`
+  declares `inject = ['clientModules', 'webServer']`
+  (`packages/client/hmr/src/index.ts:28`) and registers its reload route
+  on the web server (`:166`).
 
 An HTTP-free desktop host boots the same composition with a patch overlay
-disabling the `webserver`, `web-runtime`, and `connection` rows (the
-`disabled: true` patch mechanism the bundles themselves use,
-`packages/bundle/web-app/cordis.patch.yml:22-23`). `api-gateway` then
-composes standalone: its hard requirements are only `ApiProxyService`'s
-inject list (`packages/host/apiproxy/src/index.ts:70-73`), none of which
-involve `webServer`.
+disabling those five rows (the `disabled: true` patch mechanism the
+bundles themselves use, `packages/bundle/web-app/cordis.patch.yml:22-23`)
+and re-targets the directory picker: the `directory-picker` row
+(`cordis.patch.yml:96-97`) mounts the `auto` variant, which resolves the
+web bind host (`inject = ['webServer', 'loader']`,
+`packages/host/directory-picker-auto/src/index.ts:29`). The overlay
+disables that row and inserts
+`@deepseek-ai/dsh-host-directory-picker-native` — the same "mount -native
+in an overlay" treatment the web composition documents for deployments
+pinning the picker. The API gateway's `directoryPicker` hard requirement
+(`packages/host/apiproxy/src/index.ts:71`) then resolves without a web
+server. A `PatchOptions` row `name` is a verification guard, not a
+re-target, so the picker swap is a disable plus insert, not a name
+override. `api-gateway` composes standalone otherwise: its remaining hard
+requirements are `ApiProxyService`'s inject list
+(`packages/host/apiproxy/src/index.ts:70-73`), none of which involve
+`webServer`.
 
-DESKTOP-CONSUMPTION: consume unchanged — row disabling via a `--patch`-style
-overlay is the existing seam; no upstream edit.
+DESKTOP-CONSUMPTION: consume unchanged — row disabling plus a disable/insert
+re-target via a `--patch`-style overlay is the existing seam; no upstream
+edit.
 
 ### 1.3 Readiness / settled semantics
 
@@ -171,8 +193,10 @@ quiescence signal) in the child, and/or SIGTERM + process-exit when
 spawning a bin.
 
 DESKTOP-CONSUMPTION: consume unchanged — `ctx.fiber.dispose()` is the
-awaited disposal primitive; the desktop replaces the CLI's
-`createProcessShutdown` glue with its own supervisor controller.
+awaited disposal primitive; the runtime child mirrors the CLI's
+`createProcessShutdown` grace pattern (its own copy, since the bin glue is
+not an importable module), and the Electron supervisor adds the parent-side
+grace period plus forced process-group kill.
 
 ---
 
@@ -778,8 +802,10 @@ desktop overlay. Documented intent: "an Electron shell would provide the
 Related openers: `ApiProxyDefaults.openPath` / `openTextFile`
 (`packages/host/apiproxy/src/api-proxy.ts:596-601, 1840-1856`).
 
-DESKTOP-CONSUMPTION: desktop-only — a new provider package + composition
-override; no edits to the seam, gateway, or existing packages.
+DESKTOP-CONSUMPTION: desktop-only — stage 2 mounts the existing `-native`
+provider via a disable/insert overlay (§1.2); no new provider package, and
+an Electron dialog provider can take the same slot later. No edits to the
+seam, gateway, or existing packages.
 
 ### 6.2 openDocument flows
 
@@ -1461,6 +1487,7 @@ The SPEC's stage 0 exit criteria, answered from the pinned source:
    pin itself, with two stale `EXACT_EDITS` in `scripts/rescope-vendor.ts`
    (`knip-logger-console` pointing at a knip.json block for the long-gone
    `packages/util/home` package, and `vendoring-cookbook-name-invariant-zh`
-   pointing at a moved docs/cookbook block). Verified by running the check
-   in a clean detached worktree of the pin. Pre-existing upstream defect;
-   out of desktop scope, fork-level fix deferred.
+    pointing at a moved docs/cookbook block). Verified by running the check
+    in a clean detached worktree of the pin. Pre-existing upstream defect
+    in a gate the stage 0.2 pass did not exercise; out of desktop scope,
+    fork-level fix deferred.

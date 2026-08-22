@@ -1,15 +1,27 @@
 /**
  * Desktop shell entry. This process owns the application and window
- * lifecycle and, from stage 2 on, supervises the standalone Harness
- * runtime; it never hosts the Harness itself.
+ * lifecycle and supervises the standalone Harness runtime (stage 2); it
+ * never hosts the Harness itself.
  * @module @deepseek-ai/dsh-desktop/src/main/index
  */
-import { existsSync } from 'node:fs'
+import { existsSync, mkdirSync } from 'node:fs'
 import { join } from 'node:path'
-import { app, BrowserWindow, session } from 'electron'
+import { app, BrowserWindow, ipcMain, session } from 'electron'
 import { handleAppProtocol, registerAppScheme } from './protocol.ts'
+import {
+  bundledNodeExecutable,
+  dshHomeDirectory,
+  runtimeCwd,
+  runtimeEntryPath,
+} from './runtime-paths.ts'
+import { createRuntimeSupervisor, type RuntimeSupervisor, type RuntimeStateView } from './runtime.ts'
 import { denySessionPermissions } from './security.ts'
 import { createAppWindow } from './window.ts'
+
+/** The renderer channels of the stage 2 supervision bridge. */
+const STATE_CHANNEL = 'dsh-desktop:runtime-state'
+const GET_CHANNEL = 'dsh-desktop:runtime-get'
+const RESTART_CHANNEL = 'dsh-desktop:runtime-restart'
 
 /**
  * Resolve the packaged renderer distribution directory.
@@ -31,6 +43,7 @@ const singleInstance = app.requestSingleInstanceLock()
 if (!singleInstance) {
   app.quit()
 } else {
+  let supervisor: RuntimeSupervisor | undefined
   app.on('second-instance', () => {
     const [win] = BrowserWindow.getAllWindows()
     if (win !== undefined) {
@@ -41,9 +54,47 @@ if (!singleInstance) {
   void app.whenReady().then(() => {
     denySessionPermissions(session.defaultSession)
     handleAppProtocol(rendererDistRoot())
+    // The app package directory: development checkout layout or asar root.
+    const desktopDir = app.getAppPath()
+    const home = dshHomeDirectory(app.getPath('userData'))
+    mkdirSync(home, { recursive: true })
+    supervisor = createRuntimeSupervisor({
+      entry: runtimeEntryPath(app.isPackaged, process.resourcesPath, desktopDir),
+      nodeExecutable: bundledNodeExecutable(app.isPackaged, process.resourcesPath, desktopDir),
+      cwd: runtimeCwd(app.isPackaged, process.resourcesPath, desktopDir),
+      home,
+      onStateChange: (view: RuntimeStateView) => {
+        for (const win of BrowserWindow.getAllWindows()) {
+          win.webContents.send(STATE_CHANNEL, view)
+        }
+      },
+    })
+    ipcMain.handle(GET_CHANNEL, () => {
+      const current = supervisor
+      if (current === undefined) throw new Error('desktop shell: runtime supervisor not initialized')
+      return current.view()
+    })
+    ipcMain.handle(RESTART_CHANNEL, () => {
+      const current = supervisor
+      if (current === undefined) throw new Error('desktop shell: runtime supervisor not initialized')
+      current.requestRestart()
+      return true
+    })
+    supervisor.start()
     createAppWindow()
     app.on('window-all-closed', () => {
       app.quit()
+    })
+    app.on('before-quit', (event) => {
+      const current = supervisor
+      if (current === undefined) return
+      const state = current.view().state
+      // Nothing to stop (stopped/failed) or a stop already in flight.
+      if (state === 'stopping' || state === 'stopped' || state === 'failed') return
+      event.preventDefault()
+      void current.stop().then(() => {
+        app.quit()
+      })
     })
   })
 }

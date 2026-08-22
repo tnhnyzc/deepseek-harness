@@ -93,6 +93,8 @@ the untouched upstream at the pin is green across all keyless lanes.
 | --- | --- | --- |
 | `scripts/check-workspace-constraints.ts` | `privateAppDirectory` carve-out: `apps/desktop` and `apps/desktop-runtime` are private workspace members, exempt from the release-member publication rules and the app publication-files policy (fork-level gate amendment B1 from the upstream contract) | 1 |
 | `pnpm-workspace.yaml` | `allowBuilds.electron: true` (pinned Electron binary download); override pinning `@electron/rebuild` to 4.2.0 because the Forge packages' 3.x rebuild sub-dependency resolves node-gyp from a git repository, which `blockExoticSubdeps` rejects | 1 |
+| `tsdown.config.ts` | repo build workspace now includes `apps/desktop-runtime`, so the runtime's `dist/index.js` bundle is produced by `pnpm run build` (registration of the new private app; the app itself is fork-only) | 2 |
+| `tsconfig.host.json`, `knip.json`, `.gitignore` | workspace registration for `apps/desktop-runtime` (host-face reference, knip entry, build-output ignores) | 2 |
 
 ## Known incompatibilities
 
@@ -101,7 +103,9 @@ the untouched upstream at the pin is green across all keyless lanes.
   `scripts/rescope-vendor.ts` (`knip-logger-console`,
   `vendoring-cookbook-name-invariant-zh`) that point at files that no longer
   exist in the tree. Verified in a clean detached worktree of the pin.
-  Pre-existing upstream defect; fork-level fix deferred.
+  Pre-existing upstream defect in a gate the stage 0.2 baseline pass did not
+  exercise (recorded here on first discovery in stage 1); fork-level fix
+  deferred.
 - Electron Forge 7.11.2's CLI system check requires a hoisted pnpm layout
   (or a custom hoist pattern), which this monorepo does not use;
   `skipSystemCheck` no longer exists in Forge 7. Stage 1 therefore verifies

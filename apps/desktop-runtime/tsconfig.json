@@ -1,0 +1,39 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "rootDir": "src",
+    "outDir": "lib/types"
+  },
+  "include": [
+    "src"
+  ],
+  "references": [
+    {
+      "path": "../../vendor/cordis"
+    },
+    {
+      "path": "../../vendor/include"
+    },
+    {
+      "path": "../../vendor/loader"
+    },
+    {
+      "path": "../../packages/boot/app-boot"
+    },
+    {
+      "path": "../../packages/boot/cmdline"
+    },
+    {
+      "path": "../../packages/bundle/base"
+    },
+    {
+      "path": "../../packages/bundle/web-app"
+    },
+    {
+      "path": "../../packages/util/home-paths"
+    },
+    {
+      "path": "../../packages/util/launch-environment"
+    }
+  ]
+}
