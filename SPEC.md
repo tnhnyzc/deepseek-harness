@@ -2087,7 +2087,10 @@ For every stage:
 4. avoid duplicate concepts;
 5. add tests;
 6. run upstream tests and the repository gates (workspace checks,
-   TypeScript solution builds, lint, typecheck, GUI tests, hygiene);
+   TypeScript solution builds, lint, typecheck, GUI tests, hygiene)
+   through the repository's own commands, matched to the change's
+   surface; the aggregated CI matrix is exercised by CI, not by a local
+   full-suite rerun, per the pinned repository's AGENTS.md;
 7. document any unavoidable upstream modification.
 
 When existing DSH code and this specification disagree because upstream has changed, preserve these higher-level invariants:
