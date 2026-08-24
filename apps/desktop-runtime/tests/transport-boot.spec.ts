@@ -176,15 +176,27 @@ describe.skipIf(!existsSync(ENTRY))('desktop transport boot', () => {
   }, 45_000)
 
   it('opens the mux downlink, acks it, and closes it on request', async () => {
-    link.send({ type: 'stream.open', streamId: 'boot-mux', url: '/api/events.mux' })
+    link.send({ type: 'stream.open', streamId: 'boot-mux', url: 'http://dsh.local/api/events.mux' })
     const ack = await link.ofType('stream.open.ack')
     expect(ack.streamId).toBe('boot-mux')
     expect(ack.ok).toBe(true)
     link.send({ type: 'stream.close', streamId: 'boot-mux', reason: 'done' })
+    // A client-initiated close is not answered with a terminal; drain the
+    // frames the pump emitted (the carrier's own open comment is one) so
+    // later tests see a quiet channel.
+    let drained = 0
+    for (;;) {
+      const message = await link.next(500)
+      if (message === undefined) break
+      expect(message.type).toBe('stream.frame')
+      expect(message.streamId).toBe('boot-mux')
+      drained++
+    }
+    expect(drained).toBeGreaterThanOrEqual(1)
   }, 45_000)
 
   it('refuses an unknown stream url', async () => {
-    link.send({ type: 'stream.open', streamId: 'boot-unknown', url: '/api/unknown' })
+    link.send({ type: 'stream.open', streamId: 'boot-unknown', url: 'http://dsh.local/api/unknown' })
     const ack = await link.ofType('stream.open.ack')
     expect(ack.streamId).toBe('boot-unknown')
     expect(ack.ok).toBe(false)

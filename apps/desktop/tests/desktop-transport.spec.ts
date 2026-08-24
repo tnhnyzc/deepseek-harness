@@ -1,8 +1,11 @@
 /**
  * The renderer half of the stage 3 transport, tested in Node against a
  * reactive fake peer: fetch assembly (headers, body, status), streaming
- * request bodies, response credit return, abort and error propagation,
- * stream open/frame/credit/close/error lifecycle, and port-close teardown.
+ * request bodies, response credit return, sequence validation on both
+ * primitives, the full abort lifecycle (before the head, mid-body,
+ * consumer body cancel, stalled request-body production), uplink credit
+ * backpressure, stream open/frame/credit/close/error lifecycle, and
+ * port-close teardown.
  */
 
 import { MessageChannel, type MessagePort } from 'node:worker_threads'
@@ -299,12 +302,161 @@ describe('renderer transport: streams', () => {
       peer.send({ type: 'stream.open.ack', streamId: message.streamId, ok: true })
     })
     const stream = await transport.openStream('/api/events.host')
-    expect(() => { stream.send(new Uint8Array(TRANSPORT_MAX_FRAME_BYTES + 1)) }).toThrow(TransportError)
-    stream.send(new Uint8Array(4))
+    await expect(stream.send(new Uint8Array(TRANSPORT_MAX_FRAME_BYTES + 1))).rejects.toThrow(TransportError)
+    await stream.send(new Uint8Array(4))
     const frame = await peer.waitForType('stream.frame')
     expect(frame.sequence).toBe(0)
     transport.close()
     await expect(stream.outcome).rejects.toMatchObject({ name: 'TransportError', code: 'transport-closed' })
+  })
+
+  it('fails a fetch whose response sequence duplicates', async () => {
+    const { client, peer } = peerChannel()
+    const transport = createDesktopTransport(client)
+    peer.on('fetch.request.end', (message) => {
+      peer.send({ type: 'fetch.response.head', requestId: message.requestId, status: 200, statusText: '', headers: [] })
+      peer.send({ type: 'fetch.response.chunk', requestId: message.requestId, sequence: 0, data: new TextEncoder().encode('a') })
+      peer.send({ type: 'fetch.response.chunk', requestId: message.requestId, sequence: 0, data: new TextEncoder().encode('b') })
+    })
+    const response = await transport.fetch('/api/dup-seq', { method: 'GET' })
+    const reader = response.body?.getReader()
+    if (reader === undefined) throw new Error('missing body')
+    const first = await reader.read()
+    expect(new TextDecoder().decode(first.value)).toBe('a')
+    await expect(reader.read()).rejects.toMatchObject({ name: 'TransportError', code: 'bad-sequence' })
+    transport.close()
+  })
+
+  it('fails a stream whose downlink sequence skips', async () => {
+    const { client, peer } = peerChannel()
+    const transport = createDesktopTransport(client)
+    peer.on('stream.open', (message) => {
+      peer.send({ type: 'stream.open.ack', streamId: message.streamId, ok: true })
+      peer.send({ type: 'stream.frame', streamId: message.streamId, sequence: 0, data: new TextEncoder().encode('a') })
+      peer.send({ type: 'stream.frame', streamId: message.streamId, sequence: 2, data: new TextEncoder().encode('b') })
+    })
+    const stream = await transport.openStream('/api/events.mux')
+    await expect(stream.outcome).rejects.toMatchObject({ name: 'TransportError', code: 'bad-sequence' })
+    const iterator = stream.frames()[Symbol.asyncIterator]()
+    const first = await iterator.next()
+    if (first.done) throw new Error('stream ended before its first frame')
+    expect(new TextDecoder().decode(first.value)).toBe('a')
+    await expect(iterator.next()).rejects.toMatchObject({ name: 'TransportError', code: 'bad-sequence' })
+    transport.close()
+  })
+
+  it('sends fetch.abort when the signal fires while the body is streaming', async () => {
+    const { client, peer } = peerChannel()
+    const transport = createDesktopTransport(client)
+    const controller = new AbortController()
+    peer.on('fetch.request.end', (message) => {
+      peer.send({ type: 'fetch.response.head', requestId: message.requestId, status: 200, statusText: '', headers: [] })
+      peer.send({ type: 'fetch.response.chunk', requestId: message.requestId, sequence: 0, data: new TextEncoder().encode('part') })
+    })
+    const response = await transport.fetch('/api/abort-mid-body', { method: 'GET', signal: controller.signal })
+    const reader = response.body?.getReader()
+    if (reader === undefined) throw new Error('missing body')
+    const first = await reader.read()
+    expect(new TextDecoder().decode(first.value)).toBe('part')
+    controller.abort()
+    await expect(reader.read()).rejects.toMatchObject({ name: 'AbortError' })
+    const abort = await peer.waitForType('fetch.abort')
+    expect(abort.reason).toBe('aborted')
+    transport.close()
+  })
+
+  it('cancels the operation when the consumer cancels the response body', async () => {
+    const { client, peer } = peerChannel()
+    const transport = createDesktopTransport(client)
+    peer.on('fetch.request.end', (message) => {
+      peer.send({ type: 'fetch.response.head', requestId: message.requestId, status: 200, statusText: '', headers: [] })
+      peer.send({ type: 'fetch.response.chunk', requestId: message.requestId, sequence: 0, data: new TextEncoder().encode('part') })
+    })
+    const response = await transport.fetch('/api/consumer-cancel', { method: 'GET' })
+    expect(response.body).not.toBeNull()
+    await response.body?.cancel()
+    const abort = await peer.waitForType('fetch.abort')
+    expect(abort.reason).toBe('consumer-cancelled')
+    transport.close()
+  })
+
+  it('stops pumping the request body when the signal aborts mid-production', async () => {
+    const { client, peer } = peerChannel()
+    const transport = createDesktopTransport(client)
+    const controller = new AbortController()
+    let pulls = 0
+    const bodyStream = new ReadableStream<Uint8Array>({
+      pull(controller) {
+        pulls++
+        if (pulls === 1) {
+          controller.enqueue(new TextEncoder().encode('x'.repeat(10)))
+          return Promise.resolve()
+        }
+        // The producer stalls: it never yields again and never closes.
+        return new Promise<void>(() => undefined)
+      },
+    })
+    const pending = transport.fetch('/api/stall-body', { method: 'POST', body: bodyStream, signal: controller.signal })
+    await vi.waitFor(() => {
+      expect(peer.ofType('fetch.request.chunk').length).toBe(1)
+    })
+    controller.abort()
+    await expect(pending).rejects.toMatchObject({ name: 'AbortError' })
+    const abort = await peer.waitForType('fetch.abort')
+    expect(abort.reason).toBe('aborted')
+    // The operation was terminal before the body completed: no end claim.
+    expect(peer.ofType('fetch.request.end').length).toBe(0)
+    transport.close()
+  })
+
+  it('stalls uplink sends on the credit window and resumes on stream.credit', async () => {
+    const { client, peer } = peerChannel()
+    const transport = createDesktopTransport(client)
+    peer.on('stream.open', (message) => {
+      peer.send({ type: 'stream.open.ack', streamId: message.streamId, ok: true })
+    })
+    const stream = await transport.openStream('/api/events.mux')
+    const chunk = new Uint8Array(TRANSPORT_MAX_FRAME_BYTES)
+    const windowFrames = TRANSPORT_CREDIT_BYTES / TRANSPORT_MAX_FRAME_BYTES
+    for (let i = 0; i < windowFrames; i++) await stream.send(chunk)
+    // Port delivery is asynchronous: poll until the window's frames landed.
+    await vi.waitFor(() => {
+      expect(peer.ofType('stream.frame').length).toBe(windowFrames)
+    })
+    const pending = stream.send(chunk)
+    await new Promise<void>((resolve) => { setTimeout(resolve, 50) })
+    expect(peer.ofType('stream.frame').length).toBe(windowFrames) // parked on credit
+    peer.send({ type: 'stream.credit', streamId: stream.id, credit: TRANSPORT_MAX_FRAME_BYTES })
+    await pending
+    await vi.waitFor(() => {
+      expect(peer.ofType('stream.frame').length).toBe(windowFrames + 1)
+    })
+    const frames = peer.ofType('stream.frame')
+    expect(frames.at(-1)?.sequence).toBe(windowFrames)
+    transport.close()
+    await expect(stream.outcome).rejects.toMatchObject({ name: 'TransportError', code: 'transport-closed' })
+  })
+
+  it('wakes a parked uplink send when the stream terminates', async () => {
+    const { client, peer } = peerChannel()
+    const transport = createDesktopTransport(client)
+    peer.on('stream.open', (message) => {
+      peer.send({ type: 'stream.open.ack', streamId: message.streamId, ok: true })
+    })
+    const stream = await transport.openStream('/api/events.mux')
+    const chunk = new Uint8Array(TRANSPORT_MAX_FRAME_BYTES)
+    const windowFrames = TRANSPORT_CREDIT_BYTES / TRANSPORT_MAX_FRAME_BYTES
+    for (let i = 0; i < windowFrames; i++) await stream.send(chunk)
+    await vi.waitFor(() => {
+      expect(peer.ofType('stream.frame').length).toBe(windowFrames)
+    })
+    const pending = stream.send(chunk)
+    await new Promise<void>((resolve) => { setTimeout(resolve, 50) })
+    expect(peer.ofType('stream.frame').length).toBe(windowFrames)
+    peer.send({ type: 'stream.error', streamId: stream.id, code: 'downlink-only', message: 'server to client only' })
+    await expect(pending).rejects.toThrow(TransportError)
+    await expect(stream.outcome).rejects.toMatchObject({ name: 'TransportError', code: 'downlink-only' })
+    transport.close()
   })
 
   it('fails open and pending operations when the port closes', async () => {

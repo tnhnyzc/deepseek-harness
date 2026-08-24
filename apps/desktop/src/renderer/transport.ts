@@ -2,15 +2,22 @@
  * The renderer half of the stage 3 transport (SPEC §8 primitives A and B).
  * `desktopFetch` is a fetch-compatible surface that drives the wire protocol
  * on a MessagePort instead of a network; `openStream` exposes an opaque
- * ordered downlink stream with credit-based backpressure. Nothing here knows
+ * ordered stream whose frames flow in both directions. Nothing here knows
  * DSH semantics: urls and frames are opaque, and the host plane answers
  * through the dumb broker and the runtime adapter.
  *
- * Backpressure: the runtime may hold {@link TRANSPORT_CREDIT_BYTES} per
- * direction in flight; this side returns credit as bytes are consumed
- * (a response chunk when it enters the ReadableStream queue, a stream frame
- * when the consumer dequeues it). Abandoned consumers therefore stall the
- * runtime within one credit window instead of buffering unbounded.
+ * Backpressure is credit-based in both directions: the runtime may hold
+ * {@link TRANSPORT_CREDIT_BYTES} per direction in flight, and this side
+ * returns credit as bytes are consumed (a response chunk when it enters the
+ * ReadableStream queue, a stream frame when the consumer dequeues it);
+ * `send` is gated by the uplink window the runtime returns credit into.
+ * Abandoned consumers therefore stall the runtime within one credit window
+ * instead of buffering unbounded.
+ *
+ * Cancellation is terminal: an AbortSignal stays armed until the operation
+ * actually ends, `ReadableStream.cancel` on a response body posts
+ * `fetch.abort` too, and every terminal path (success, failure, abort,
+ * consumer cancel, channel loss) releases its operation entry exactly once.
  *
  * @module @deepseek-ai/dsh-desktop/src/renderer/transport
  */
@@ -18,6 +25,7 @@
 import {
   TRANSPORT_MAX_FRAME_BYTES,
   TransportErrorCode,
+  TransportSendWindow,
   parseTransportMessage,
 } from '@deepseek-ai/dsh-desktop-runtime/transport'
 
@@ -55,8 +63,13 @@ export interface DesktopStream {
   readonly outcome: Promise<void>
   /** The ordered downlink frames; ends on close, throws on error. */
   frames(): AsyncGenerator<Uint8Array, void>
-  /** Send one uplink frame; throws locally when the frame exceeds the bound. */
-  send(data: Uint8Array): void
+  /**
+   * Send one uplink frame; resolves once it is posted. Gated by the uplink
+   * credit window: it awaits credit the runtime returns as it consumes, so
+   * a producer cannot enqueue more than one window ahead of the consumer.
+   * @throws for an oversized frame or a terminal stream.
+   */
+  send(data: Uint8Array): Promise<void>
   /** Close after in-flight frames settle; terminal. */
   close(reason?: string): void
 }
@@ -131,18 +144,31 @@ class Channel<T> {
 
 interface FetchOp {
   requestId: string
+  signal: AbortSignal
   head: Deferred<{ status: number; statusText: string; headers: Array<[string, string]> }>
   body: Channel<Uint8Array>
   headResolved: boolean
+  /** Whether the abort path already settled the operation. */
+  aborted: boolean
+  /** The abort listener, removed when the operation actually terminates. */
+  onAbort: (() => void) | undefined
+  /** The sequence the next `fetch.response.chunk` must carry. */
+  expectedSequence: number
 }
 
 interface StreamOp {
   id: string
   ack: Deferred<void>
+  ackSettled: boolean
   frames: Channel<Uint8Array>
   outcome: Deferred<void>
   terminal: boolean
+  /** The sequence the next uplink `stream.frame` will carry. */
   uplinkSequence: number
+  /** The sequence the next downlink `stream.frame` must carry. */
+  expectedSequence: number
+  /** The uplink send window; the runtime returns credit into it. */
+  window: TransportSendWindow
 }
 
 /**
@@ -166,25 +192,64 @@ export function createDesktopTransport(port: TransportPortLike): DesktopTranspor
 
   const transportClosedError = (): TransportError => new TransportError(TransportErrorCode.transportClosed, 'the transport channel closed')
 
-  const terminateStream = (op: StreamOp): void => {
+  // ---- operation terminals: every path releases its entry exactly once ----
+
+  const releaseFetchOp = (op: FetchOp): void => {
+    if (!fetchOps.has(op.requestId)) return
+    fetchOps.delete(op.requestId)
+    if (op.onAbort !== undefined) op.signal.removeEventListener('abort', op.onAbort)
+  }
+
+  const endFetchOp = (op: FetchOp): void => {
+    releaseFetchOp(op)
+    if (!op.headResolved) {
+      // A protocol violation by the peer; the operation must still settle.
+      op.head.reject(new TransportError(TransportErrorCode.internal, 'response ended before the head'))
+      return
+    }
+    op.body.end()
+  }
+
+  const failFetchOp = (op: FetchOp, error: Error): void => {
+    releaseFetchOp(op)
+    if (!op.headResolved) op.head.reject(error)
+    op.body.fail(error)
+  }
+
+  const releaseStreamOp = (op: StreamOp): void => {
+    if (!streamOps.has(op.id)) return
+    streamOps.delete(op.id)
+  }
+
+  const endStreamOp = (op: StreamOp): void => {
     if (op.terminal) return
     op.terminal = true
+    releaseStreamOp(op)
+    op.window.cancel()
     op.frames.end()
     op.outcome.resolve()
   }
 
   const failStreamOp = (op: StreamOp, error: Error): void => {
-    streamOps.delete(op.id)
     if (op.terminal) return
     op.terminal = true
+    releaseStreamOp(op)
+    op.window.cancel()
+    if (!op.ackSettled) {
+      op.ackSettled = true
+      op.ack.reject(error)
+    }
     op.frames.fail(error)
     op.outcome.reject(error)
   }
 
-  const failFetchOp = (op: FetchOp, error: Error): void => {
-    fetchOps.delete(op.requestId)
-    if (!op.headResolved) op.head.reject(error)
-    op.body.fail(error)
+  const refuseStreamOp = (op: StreamOp, reason: string): void => {
+    if (op.terminal) return
+    op.terminal = true
+    releaseStreamOp(op)
+    op.window.cancel()
+    op.ackSettled = true
+    op.ack.reject(new TransportError(reason, `stream open refused: ${reason}`))
   }
 
   const teardownAll = (error: TransportError): void => {
@@ -212,13 +277,18 @@ export function createDesktopTransport(port: TransportPortLike): DesktopTranspor
       case 'fetch.response.chunk': {
         const op = fetchOps.get(message.requestId)
         if (op === undefined) return
+        if (message.sequence !== op.expectedSequence) {
+          failFetchOp(op, new TransportError(TransportErrorCode.badSequence, `expected response sequence ${String(op.expectedSequence)}, got ${String(message.sequence)}`))
+          return
+        }
+        op.expectedSequence++
         op.body.push(message.data)
         return
       }
       case 'fetch.response.end': {
         const op = fetchOps.get(message.requestId)
         if (op === undefined) return
-        op.body.end()
+        endFetchOp(op)
         return
       }
       case 'fetch.error': {
@@ -229,26 +299,30 @@ export function createDesktopTransport(port: TransportPortLike): DesktopTranspor
       }
       case 'stream.open.ack': {
         const op = streamOps.get(message.streamId)
-        if (op === undefined) return
+        if (op === undefined || op.terminal) return
         if (message.ok) {
+          op.ackSettled = true
           op.ack.resolve()
           return
         }
-        streamOps.delete(message.streamId)
-        op.ack.reject(new TransportError(message.reason ?? TransportErrorCode.unknownStream, `stream open refused: ${message.reason ?? 'unknown-stream'}`))
+        refuseStreamOp(op, message.reason ?? TransportErrorCode.unknownStream)
         return
       }
       case 'stream.frame': {
         const op = streamOps.get(message.streamId)
         if (op === undefined || op.terminal) return
+        if (message.sequence !== op.expectedSequence) {
+          failStreamOp(op, new TransportError(TransportErrorCode.badSequence, `expected stream sequence ${String(op.expectedSequence)}, got ${String(message.sequence)}`))
+          return
+        }
+        op.expectedSequence++
         op.frames.push(message.data)
         return
       }
       case 'stream.close': {
         const op = streamOps.get(message.streamId)
         if (op === undefined) return
-        streamOps.delete(message.streamId)
-        terminateStream(op)
+        endStreamOp(op)
         return
       }
       case 'stream.error': {
@@ -257,13 +331,18 @@ export function createDesktopTransport(port: TransportPortLike): DesktopTranspor
         failStreamOp(op, new TransportError(message.code, message.message))
         return
       }
+      case 'stream.credit': {
+        // The runtime returns uplink credit as it consumes client frames.
+        const op = streamOps.get(message.streamId)
+        if (op !== undefined) op.window.addCredit(message.credit)
+        return
+      }
       case 'fetch.open':
       case 'fetch.request.chunk':
       case 'fetch.request.end':
       case 'fetch.abort':
       case 'fetch.response.credit':
       case 'stream.open':
-      case 'stream.credit':
         // Renderer-direction messages never come back over this channel.
         return
     }
@@ -285,41 +364,79 @@ export function createDesktopTransport(port: TransportPortLike): DesktopTranspor
       ...(streamBody !== undefined ? { duplex: 'half' as const } : {}),
     })
     const requestId = crypto.randomUUID()
-    const op: FetchOp = { requestId, head: deferred(), body: new Channel<Uint8Array>(), headResolved: false }
-    fetchOps.set(requestId, op)
-    const onAbort = (): void => {
-      post({ type: 'fetch.abort', requestId, reason: 'aborted' })
-      failFetchOp(op, new DOMException('The operation was aborted.', 'AbortError'))
+    const op: FetchOp = {
+      requestId,
+      signal: request.signal,
+      head: deferred(),
+      body: new Channel<Uint8Array>(),
+      headResolved: false,
+      aborted: false,
+      onAbort: undefined,
+      expectedSequence: 0,
     }
+    fetchOps.set(requestId, op)
+    const abortError = (): DOMException => new DOMException('The operation was aborted.', 'AbortError')
+    // The listener stays armed until the operation is actually terminal —
+    // abort must reach DSH while the body is still streaming, not only until
+    // the head arrives.
+    const onAbort = (): void => {
+      if (op.aborted) return
+      op.aborted = true
+      post({ type: 'fetch.abort', requestId, reason: 'aborted' })
+      failFetchOp(op, abortError())
+    }
+    op.onAbort = onAbort
     if (request.signal.aborted) {
       onAbort()
-      throw new DOMException('The operation was aborted.', 'AbortError')
+      throw abortError()
     }
     request.signal.addEventListener('abort', onAbort, { once: true })
     post({ type: 'fetch.open', requestId, url: url.href, method: request.method, headers: Array.from(request.headers.entries()) })
-    try {
-      if (request.body !== null) {
-        const reader = request.body.getReader()
-        let sequence = 0
+    if (request.body !== null) {
+      // Pump the request body in bounded frames. The loop stops when the
+      // operation terminates (abort, or a transport refusal such as the
+      // request size bound) so production cannot run past the terminal.
+      const reader = request.body.getReader()
+      // An abort must stop production even if the producer never yields
+      // again: cancel the body stream so a parked read settles.
+      const stopOnAbort = (): void => {
+        void reader.cancel().catch(() => undefined)
+      }
+      request.signal.addEventListener('abort', stopOnAbort, { once: true })
+      let sequence = 0
+      try {
         for (;;) {
+          if (op.aborted || !fetchOps.has(requestId)) break
           const { done, value } = await reader.read()
           if (done) break
+          // The loop is synchronous: liveness cannot change inside it, so the
+          // check lives at the head where an await has passed.
           for (let offset = 0; offset < value.byteLength;) {
             const slice = value.subarray(offset, offset + TRANSPORT_MAX_FRAME_BYTES)
             offset += slice.byteLength
             post({ type: 'fetch.request.chunk', requestId, sequence: sequence++, data: slice })
           }
         }
+      } catch (error) {
+        if (!op.aborted) {
+          const detail = error instanceof Error ? error.message : String(error)
+          failFetchOp(op, new TransportError(TransportErrorCode.internal, `request body failed: ${detail}`))
+          throw new TransportError(TransportErrorCode.internal, `request body failed: ${detail}`)
+        }
+      } finally {
+        request.signal.removeEventListener('abort', stopOnAbort)
+        try {
+          reader.releaseLock()
+        } catch {
+          // The body stream released itself (cancellation raced the read).
+        }
       }
-    } catch (error) {
-      request.signal.removeEventListener('abort', onAbort)
-      const detail = error instanceof Error ? error.message : String(error)
-      failFetchOp(op, new TransportError(TransportErrorCode.internal, `request body failed: ${detail}`))
-      throw new TransportError(TransportErrorCode.internal, `request body failed: ${detail}`)
     }
-    post({ type: 'fetch.request.end', requestId })
+    // A terminal operation (abort or refusal) must not claim a completed body.
+    if (fetchOps.has(requestId)) {
+      post({ type: 'fetch.request.end', requestId })
+    }
     const head = await op.head.promise
-    request.signal.removeEventListener('abort', onAbort)
     const bodyIterator = op.body[Symbol.asyncIterator]()
     const body = new ReadableStream<Uint8Array>({
       pull: async (controller) => {
@@ -331,6 +448,14 @@ export function createDesktopTransport(port: TransportPortLike): DesktopTranspor
         post({ type: 'fetch.response.credit', requestId, credit: value.byteLength })
         controller.enqueue(value)
       },
+      cancel: () => {
+        // The consumer gave up on the body: cancel the still-active
+        // operation at DSH and release it — fetch.abort reaches the
+        // DSH-side AbortSignal for the lifetime of the stream.
+        op.aborted = true
+        post({ type: 'fetch.abort', requestId, reason: 'consumer-cancelled' })
+        failFetchOp(op, new TransportError(TransportErrorCode.transportClosed, 'response body cancelled'))
+      },
     })
     // 204/205/304 carry no body by spec; the transport sends an empty stream
     // for them, which the Response constructor refuses.
@@ -338,53 +463,59 @@ export function createDesktopTransport(port: TransportPortLike): DesktopTranspor
     return new Response(nullBody ? null : body, { status: head.status, statusText: head.statusText, headers: head.headers })
   }
 
-  const openStreamFn = (url: string): Promise<DesktopStream> => {
-    if (closed) return Promise.reject(transportClosedError())
+  const openStreamFn = async (url: string): Promise<DesktopStream> => {
+    if (closed) throw transportClosedError()
     const id = crypto.randomUUID()
     const op: StreamOp = {
       id,
       ack: deferred<void>(),
+      ackSettled: false,
       frames: new Channel<Uint8Array>(),
       outcome: deferred<void>(),
       terminal: false,
       uplinkSequence: 0,
+      expectedSequence: 0,
+      window: new TransportSendWindow(),
     }
     streamOps.set(id, op)
-    post({ type: 'stream.open', streamId: id, url })
-    return op.ack.promise
-      .then(() => {
-        const frames = (): AsyncGenerator<Uint8Array, void> => (async function* (): AsyncGenerator<Uint8Array, void> {
-          const iterator = op.frames[Symbol.asyncIterator]()
-          for (;;) {
-            const { done, value } = await iterator.next()
-            if (done) return
-            post({ type: 'stream.credit', streamId: id, credit: value.byteLength })
-            yield value
-          }
-        })()
-        const handle: DesktopStream = {
-          id,
-          outcome: op.outcome.promise,
-          frames,
-          send: (data: Uint8Array) => {
-            if (closed || op.terminal) return
-            if (data.byteLength > TRANSPORT_MAX_FRAME_BYTES) {
-              throw new TransportError(TransportErrorCode.frameTooLarge, `frame of ${data.byteLength} bytes exceeds the transport frame bound`)
-            }
-            post({ type: 'stream.frame', streamId: id, sequence: op.uplinkSequence++, data })
-          },
-          close: (reason?: string) => {
-            if (op.terminal) return
-            terminateStream(op)
-            post({ type: 'stream.close', streamId: id, ...(reason !== undefined ? { reason } : {}) })
-          },
+    post({ type: 'stream.open', streamId: id, url: new URL(url, TRANSPORT_BASE_URL).href })
+    const handle: DesktopStream = {
+      id,
+      outcome: op.outcome.promise,
+      frames: (): AsyncGenerator<Uint8Array, void> => (async function* (): AsyncGenerator<Uint8Array, void> {
+        const iterator = op.frames[Symbol.asyncIterator]()
+        for (;;) {
+          const { done, value } = await iterator.next()
+          if (done) return
+          post({ type: 'stream.credit', streamId: id, credit: value.byteLength })
+          yield value
         }
-        return handle
-      })
-      .catch((error: unknown) => {
-        streamOps.delete(id)
-        throw error
-      })
+      })(),
+      send: async (data: Uint8Array) => {
+        if (!streamOps.has(op.id)) {
+          throw new TransportError(TransportErrorCode.transportClosed, 'stream closed')
+        }
+        if (data.byteLength > TRANSPORT_MAX_FRAME_BYTES) {
+          throw new TransportError(TransportErrorCode.frameTooLarge, `frame of ${data.byteLength} bytes exceeds the transport frame bound`)
+        }
+        try {
+          // Bounded backpressure: at most one window ahead of the consumer.
+          await op.window.reserve(data.byteLength)
+        } catch {
+          // The window cancelled with the stream's terminal while we waited.
+        }
+        if (!streamOps.has(op.id)) {
+          throw new TransportError(TransportErrorCode.transportClosed, 'stream closed')
+        }
+        post({ type: 'stream.frame', streamId: id, sequence: op.uplinkSequence++, data })
+      },
+      close: (reason?: string) => {
+        if (op.terminal) return
+        endStreamOp(op)
+        post({ type: 'stream.close', streamId: id, ...(reason !== undefined ? { reason } : {}) })
+      },
+    }
+    return op.ack.promise.then(() => handle)
   }
 
   port.addEventListener('message', onMessage)

@@ -17,13 +17,26 @@
  * @module @deepseek-ai/dsh-desktop-runtime/transport
  */
 
-/** Fixed maximum chunk size for any `data` field (SPEC §10: fixed maximum chunk size). */
+/**
+ * Fixed maximum size for any `data` field of any data-bearing message, in
+ * either direction, at every edge (SPEC §10: fixed maximum chunk size). A
+ * larger logical body is split into several frames by its producer; a single
+ * oversized frame is a protocol violation that edges refuse locally.
+ */
 export const TRANSPORT_MAX_FRAME_BYTES = 64 * 1024
 
 /** Initial per-direction send credit; receivers return it as they consume. */
 export const TRANSPORT_CREDIT_BYTES = 256 * 1024
 
-/** Bounded buffer for a fetch request body; larger requests are refused. */
+/**
+ * The per-request high-water mark (SPEC §10): the runtime buffers a fetch
+ * request body whole because the in-process carrier materializes the body
+ * before it can answer (`req.json()`), and the buffer is refused once this
+ * total is exceeded. This is the request-direction bound — it is not the
+ * frame bound ({@link TRANSPORT_MAX_FRAME_BYTES}), and no request-direction
+ * credit exists: the producer pumps frame by frame with no queue of its
+ * own, and an over-bound request is a protocol refusal, not a stall.
+ */
 export const TRANSPORT_MAX_REQUEST_BYTES = 32 * 1024 * 1024
 
 /** Transport-level error codes (business error codes ride inside the payload, not here). */
@@ -178,7 +191,12 @@ export interface FetchError {
   message: string
 }
 
-/** Primitive B — open an opaque stream; `url` names the endpoint as the DSH client names it. */
+/**
+ * Primitive B — open an opaque stream. `url` is the endpoint as the DSH
+ * client names it, absolute: the renderer resolves it against the transport
+ * dummy origin before it goes on the wire, so the runtime's carrier sees the
+ * same url form a fetch would.
+ */
 export interface StreamOpen {
   type: 'stream.open'
   streamId: string
@@ -412,46 +430,101 @@ export function transportMessageDataBytes(message: DesktopTransportMessage): num
 }
 
 /**
- * Bounded send window: the sender may hold at most `window` bytes in flight
- * (sent but not yet credited back). The receiver returns credit as it
- * consumes; `note` is called by the sender before each send and awaits until
- * the bytes fit.
+ * Bounded send window: the sender may hold at most the configured window's
+ * bytes in flight (sent but not yet credited back). The receiver returns
+ * credit as it consumes; `reserve` is called by the sender before each send
+ * and awaits until the bytes fit. Returned credit can never push available
+ * credit above the configured maximum — the high-water mark is the window
+ * itself, so a malformed or excessive credit is clamped, not accumulated.
+ * `cancel` ends the window with its operation: parked reservations wake
+ * without credit and later reservations fail.
  */
+/** A parked reservation; woken by returned credit or by the operation's cancellation. */
+interface WindowWaiter {
+  wake(): void
+}
+
 export class TransportSendWindow {
+  private readonly max: number
   private free: number
-  private waiters: Array<() => void> = []
+  private waiters: Array<WindowWaiter> = []
+  private cancelled = false
 
   constructor(window: number = TRANSPORT_CREDIT_BYTES) {
+    if (typeof window !== 'number' || !Number.isInteger(window) || window <= 0) {
+      throw new TransportProtocolError(`send window: expected an integer window > 0, got ${String(window)}`)
+    }
+    this.max = window
     this.free = window
   }
 
-  /** Bytes of credit currently outstanding. */
+  /** The configured maximum (the high-water mark). */
+  get window(): number {
+    return this.max
+  }
+
+  /** Bytes of credit currently outstanding (never above the window). */
   available(): number {
     return this.free
   }
 
-  /** The receiver consumed (or refused to buffer) `bytes`; return the credit. */
+  /** The receiver consumed (or refused to buffer) `bytes`; return the credit, clamped at the window. */
   addCredit(bytes: number): void {
-    if (bytes <= 0) return
-    this.free += bytes
+    if (bytes <= 0 || this.cancelled) return
+    this.free = Math.min(this.max, this.free + bytes)
     const waiters = this.waiters
     this.waiters = []
-    for (const wake of waiters) wake()
+    for (const waiter of waiters) waiter.wake()
+  }
+
+  /**
+   * Cancel the window with its operation: wake every parked reservation
+   * without granting credit and fail every later reservation. Used when the
+   * owning operation reaches a terminal, so a parked `send` cannot hold on
+   * past the stream it was gating.
+   */
+  cancel(): void {
+    if (this.cancelled) return
+    this.cancelled = true
+    const waiters = this.waiters
+    this.waiters = []
+    for (const waiter of waiters) waiter.wake()
   }
 
   /**
    * Reserve `bytes` of send credit, awaiting returned credit if none is
-   * outstanding. A single frame can never exceed the window.
-   * @throws when `bytes` exceeds the window (a protocol violation by the peer).
+   * outstanding. A single frame can never exceed this window.
+   *
+   * @param bytes - bytes to reserve.
+   * @param signal - the owning operation's cancellation; when it aborts while
+   *   the reservation is parked, `reserve` returns without reserving so the
+   *   caller's liveness guard can end the operation instead of waiting on
+   *   credit that will never come.
+   * @throws when `bytes` exceeds this window (a protocol violation by the sender)
+   *   or the window was cancelled with its operation.
    */
-  async reserve(bytes: number): Promise<void> {
-    if (bytes > TRANSPORT_CREDIT_BYTES) throw new TransportProtocolError(`send window: ${bytes} bytes exceeds the credit window`)
+  async reserve(bytes: number, signal?: AbortSignal): Promise<void> {
+    if (bytes > this.max) throw new TransportProtocolError(`send window: ${bytes} bytes exceeds the window of ${String(this.max)}`)
     for (;;) {
+      if (this.cancelled) throw new TransportProtocolError('send window: cancelled')
       if (bytes <= this.free) {
         this.free -= bytes
         return
       }
-      await new Promise<void>((resolve) => { this.waiters.push(resolve) })
+      await new Promise<void>((resolve) => {
+        let onAbort: (() => void) | undefined
+        if (signal !== undefined && !signal.aborted) {
+          onAbort = (): void => { resolve() }
+          signal.addEventListener('abort', onAbort, { once: true })
+        }
+        this.waiters.push({
+          wake: (): void => {
+            if (onAbort !== undefined && signal !== undefined) signal.removeEventListener('abort', onAbort)
+            resolve()
+          },
+        })
+      })
+      if (signal?.aborted) return // cancelled while parked: the caller's guard takes over
     }
   }
 }

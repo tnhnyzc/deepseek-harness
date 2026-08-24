@@ -56,8 +56,9 @@ child over fork IPC and self-skips the same way.
   disposal.
 - `src/transport.ts` — the wire protocol (message types, parser, credit
   window, port surface), also exported as the `./transport` subpath.
-- `src/transport-runtime.ts` — the runtime adapter over `toFetchHandler`
-  and the pinned downlink streams.
+- `src/transport-runtime.ts` — the runtime adapter over the in-process
+  fetch carrier (`toFetchHandler`): fetch traffic as-is, streams as carrier
+  GETs pumped into ordered, credit-gated frames.
 - `src/transport-process.ts` — the fork-IPC `TransportPort` adapter.
 - `src/composition.ts` — the desktop patch stack (HTTP-free overlays).
 - `src/shutdown.ts` — the bounded process-exit controller.

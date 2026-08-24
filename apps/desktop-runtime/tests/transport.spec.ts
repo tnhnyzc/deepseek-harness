@@ -13,6 +13,7 @@ import { RpcId, type ApiProxy } from '@deepseek-ai/dsh-host-apiproxy'
 import {
   TRANSPORT_CREDIT_BYTES,
   TRANSPORT_MAX_FRAME_BYTES,
+  TRANSPORT_MAX_REQUEST_BYTES,
   TransportErrorCode,
   TransportProtocolError,
   TransportSendWindow,
@@ -109,6 +110,15 @@ class MessageReader {
     expect(message.type).toBe(type)
     return message
   }
+
+  /** The next message of exactly this type, skipping interleaved traffic. */
+  async untilType(type: string, timeoutMs = 5000): Promise<WireMessage> {
+    for (;;) {
+      const message = await this.next(timeoutMs)
+      if (message === undefined) throw new Error(`no ${type} message within ${String(timeoutMs)} ms`)
+      if (message.type === type) return message
+    }
+  }
 }
 
 const JSON_HEADERS: Array<[string, string]> = [['content-type', 'application/json']]
@@ -185,6 +195,40 @@ describe('transport protocol', () => {
     // 100 window − 110 reserved + 50 credited = 40 outstanding capacity.
     expect(window.available()).toBe(40)
     await expect(window.reserve(TRANSPORT_CREDIT_BYTES + 1)).rejects.toThrow(TransportProtocolError)
+  })
+
+  it('clamps returned credit at the configured window', async () => {
+    const window = new TransportSendWindow(100)
+    window.addCredit(1000)
+    expect(window.available()).toBe(100)
+    expect(window.window).toBe(100)
+    await window.reserve(100)
+    expect(window.available()).toBe(0)
+  })
+
+  it('cancels parked reservations and rejects later reservations', async () => {
+    const window = new TransportSendWindow(100)
+    await window.reserve(100)
+    expect(window.available()).toBe(0)
+    const parked = window.reserve(50)
+    window.cancel()
+    await expect(parked).rejects.toThrow(TransportProtocolError)
+    await expect(window.reserve(10)).rejects.toThrow(TransportProtocolError)
+    // Credit arriving with the operation's terminal is inert.
+    window.addCredit(100)
+    expect(window.available()).toBe(0)
+    await expect(window.reserve(10)).rejects.toThrow(TransportProtocolError)
+  })
+
+  it('returns without reserving when the operation aborts while parked', async () => {
+    const window = new TransportSendWindow(100)
+    const controller = new AbortController()
+    await window.reserve(100)
+    expect(window.available()).toBe(0)
+    const parked = window.reserve(50, controller.signal)
+    controller.abort()
+    await parked
+    expect(window.available()).toBe(0)
   })
 })
 
@@ -312,6 +356,37 @@ describe('transport runtime adapter', () => {
     expect(total).toBeLessThanOrEqual(600 * 1024 + 1024)
   })
 
+  it('refuses a request body that exceeds the total bound', async () => {
+    attach([], false)
+    const requestId = 'bigreq'
+    post({ type: 'fetch.open', requestId, url: 'http://dsh.local/api/session.list', method: 'POST', headers: JSON_HEADERS })
+    const total = TRANSPORT_MAX_REQUEST_BYTES / TRANSPORT_MAX_FRAME_BYTES + 1
+    for (let sequence = 0; sequence < total; sequence++) {
+      post({ type: 'fetch.request.chunk', requestId, sequence, data: new Uint8Array(TRANSPORT_MAX_FRAME_BYTES) })
+    }
+    const error = await reader?.untilType('fetch.error')
+    expect(error.requestId).toBe(requestId)
+    expect(error.code).toBe(TransportErrorCode.requestTooLarge)
+    // The operation is terminal: a late end must not start the request.
+    post({ type: 'fetch.request.end', requestId })
+    const r = reader
+    if (r === undefined) throw new Error('reader missing')
+    expect(await r.next(300)).toBeUndefined()
+  })
+
+  it('answers fetch.abort quietly: no terminal frame for the aborted request', async () => {
+    attach([], false)
+    const requestId = 'quiet'
+    post({ type: 'fetch.open', requestId, url: 'http://dsh.local/api/session.search', method: 'POST', headers: JSON_HEADERS })
+    post({ type: 'fetch.request.chunk', requestId, sequence: 0, data: clientRequest('rpc-q', 'session.search', { query: 'x' }) })
+    post({ type: 'fetch.request.end', requestId })
+    const r = reader
+    if (r === undefined) throw new Error('reader missing')
+    expect(await r.next(300)).toBeUndefined()
+    post({ type: 'fetch.abort', requestId, reason: 'user' })
+    expect(await r.next(300)).toBeUndefined()
+  })
+
   it('propagates fetch.abort to the plane as an AbortSignal', async () => {
     attach([], false)
     const signals = hungSignals
@@ -330,58 +405,104 @@ describe('transport runtime adapter', () => {
     })
   })
 
-  it('streams mux frames as pinned server-request envelopes and closes on end', async () => {
+  it('serves a stream open as the carrier GET body, framed, ordered, and bounded', async () => {
     const payloads = [
       { type: 'session/title', sessionId: 's1', title: 'one' },
       { type: 'session/log', sessionId: 's1', entry: { n: 1 } },
     ]
     attach(payloads, false)
-    post({ type: 'stream.open', streamId: 's1', url: '/api/events.mux' })
+    post({ type: 'stream.open', streamId: 's1', url: 'http://dsh.local/api/events.mux' })
     const ack = await reader?.ofType('stream.open.ack')
     expect(ack?.ok).toBe(true)
 
-    const frame0 = await reader?.ofType('stream.frame')
-    expect(frame0?.sequence).toBe(0)
-    const parsed0 = JSON.parse(Buffer.from(frame0?.data as Uint8Array).toString('utf8')) as { type: string; method: string; payload: unknown }
-    expect(parsed0.type).toBe('server-request')
-    expect(parsed0.method).toBe('session/title')
-    expect(parsed0.payload).toEqual(payloads[0])
+    const frames: Uint8Array[] = []
+    let expectedSequence = 0
+    for (;;) {
+      const message = await reader?.next()
+      if (message === undefined) throw new Error('stream ended without a terminal')
+      if (message.type === 'stream.close') {
+        expect(message.reason).toBe('ended')
+        break
+      }
+      expect(message.type).toBe('stream.frame')
+      expect(message.streamId).toBe('s1')
+      expect(message.sequence).toBe(expectedSequence++)
+      const data = message.data as Uint8Array
+      expect(data.byteLength).toBeLessThanOrEqual(TRANSPORT_MAX_FRAME_BYTES)
+      frames.push(data)
+    }
 
-    const frame1 = await reader?.ofType('stream.frame')
-    expect(frame1?.sequence).toBe(1)
-    const close = await reader?.ofType('stream.close')
-    expect(close?.reason).toBe('ended')
+    // The frames carry the carrier's raw bytes: its own framing stays intact
+    // inside the stream, the transport only chunks and sequences them.
+    const body = Buffer.concat(frames).toString('utf8')
+    expect(body.startsWith(': connected\n\n')).toBe(true)
+    const envelopes = body
+      .split('\n\n')
+      .filter(entry => entry.startsWith('data: '))
+      .map(entry => JSON.parse(entry.slice('data: '.length)) as { type: string; method: string; payload: Record<string, unknown> })
+    expect(envelopes.map(envelope => envelope.method)).toEqual(['session/title', 'session/log'])
+    expect(envelopes.every(envelope => envelope.type === 'server-request')).toBe(true)
+    expect(envelopes[0]?.payload).toEqual(payloads[0])
+    expect(envelopes[1]?.payload).toEqual(payloads[1])
+  })
+
+  it('splits an oversized downlink payload into ordered bounded frames', async () => {
+    const entry = 'y'.repeat(100 * 1024)
+    attach([{ type: 'session/log', sessionId: 's1', entry }], false)
+    post({ type: 'stream.open', streamId: 'big', url: 'http://dsh.local/api/events.mux' })
+    const ack = await reader?.ofType('stream.open.ack')
+    expect(ack?.ok).toBe(true)
+
+    const frames: Uint8Array[] = []
+    let expectedSequence = 0
+    for (;;) {
+      const message = await reader?.next()
+      if (message === undefined) throw new Error('stream ended without a terminal')
+      if (message.type === 'stream.close') break
+      expect(message.type).toBe('stream.frame')
+      expect(message.sequence).toBe(expectedSequence++)
+      const data = message.data as Uint8Array
+      expect(data.byteLength).toBeLessThanOrEqual(TRANSPORT_MAX_FRAME_BYTES)
+      frames.push(data)
+    }
+    const body = Buffer.concat(frames).toString('utf8')
+    expect(frames.length).toBeGreaterThan(1)
+    expect(body.startsWith(': connected\n\n')).toBe(true)
+    expect(body).toContain(`"entry":"${entry}"`)
   })
 
   it('refuses unknown stream urls and answers uplink frames downlink-only', async () => {
     attach([], true)
-    post({ type: 'stream.open', streamId: 'u1', url: '/api/nope' })
+    post({ type: 'stream.open', streamId: 'u1', url: 'http://dsh.local/api/nope' })
     const refused = await reader?.ofType('stream.open.ack')
     expect(refused?.ok).toBe(false)
     expect(refused?.reason).toBe(TransportErrorCode.unknownStream)
 
-    post({ type: 'stream.open', streamId: 'h1', url: '/api/events.host' })
-    await reader?.ofType('stream.open.ack')
+    post({ type: 'stream.open', streamId: 'h1', url: 'http://dsh.local/api/events.host' })
+    const ack = await reader?.untilType('stream.open.ack')
+    expect(ack.ok).toBe(true)
     post({ type: 'stream.frame', streamId: 'h1', sequence: 0, data: new TextEncoder().encode('up') })
-    const error = await reader?.ofType('stream.error')
-    expect(error?.streamId).toBe('h1')
-    expect(error?.code).toBe(TransportErrorCode.downlinkOnly)
+    const error = await reader?.untilType('stream.error')
+    expect(error.streamId).toBe('h1')
+    expect(error.code).toBe(TransportErrorCode.downlinkOnly)
   })
 
-  it('fails a stream whose frame exceeds the bound', async () => {
-    const oversized = { type: 'session/log', sessionId: 's1', entry: 'y'.repeat(TRANSPORT_MAX_FRAME_BYTES) }
-    attach([oversized], false)
-    post({ type: 'stream.open', streamId: 'big', url: '/api/events.mux' })
-    await reader?.ofType('stream.open.ack')
-    const error = await reader?.ofType('stream.error')
-    expect(error?.code).toBe(TransportErrorCode.frameTooLarge)
+  it('refuses an uplink frame with the wrong sequence before the downlink-only answer', async () => {
+    attach([], true)
+    post({ type: 'stream.open', streamId: 'u2', url: 'http://dsh.local/api/events.host' })
+    const ack = await reader?.untilType('stream.open.ack')
+    expect(ack.ok).toBe(true)
+    post({ type: 'stream.frame', streamId: 'u2', sequence: 3, data: new TextEncoder().encode('up') })
+    const error = await reader?.untilType('stream.error')
+    expect(error.code).toBe(TransportErrorCode.badSequence)
   })
 
   it('aborts in-flight operations when the port closes', async () => {
     attach([], true)
     const signalSlot = hostSignal
-    post({ type: 'stream.open', streamId: 'h2', url: '/api/events.host' })
-    await reader?.ofType('stream.open.ack')
+    post({ type: 'stream.open', streamId: 'h2', url: 'http://dsh.local/api/events.host' })
+    const ack = await reader?.untilType('stream.open.ack')
+    expect(ack.ok).toBe(true)
     await vi.waitFor(() => {
       expect(signalSlot.current).toBeDefined()
     })

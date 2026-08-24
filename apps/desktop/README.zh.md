@@ -46,9 +46,13 @@ pnpm test apps/desktop  # supervisor, smoke, and protocol tests
 - `tests/runtime.spec.ts` 总是运行：监督者对 fixture 运行时、经真实 fork IPC
   （状态机、死亡、ready 前恰一次自动重试、优雅与强杀进程树关闭、重启）。
 - `tests/desktop-transport.spec.ts` 总是运行：renderer 客户端对 fake port
-  （响应组装、流请求体、额度、abort、错误与打开/关闭的流生命周期）。
-- `tests/transport-broker.spec.ts` 总是运行：main broker 对 fake（双向
-  中继、尺寸护栏、就绪拒绝、通道替换、拆除）。
+  （响应组装、流请求体、双向额度、序号校验、完整的 abort 生命周期，以及
+  打开/关闭的流生命周期）。
+- `tests/transport-broker.spec.ts` 总是运行：main broker 对 fake（wire 门的
+  丢弃与合成尺寸拒绝、双向中继、就绪拒绝、通道替换、拆除）。
+- `tests/security.spec.ts` 与 `tests/boundary.spec.ts` 总是运行：IPC 发端
+  信任规则，以及 SPEC §31 架构边界扫描（main 无 DSH 产品导入、renderer 无
+  electron/Node、传输无业务字面量、无 HTTP 监听器）。
 - `tests/shell.spec.ts` 在缺少构建产物（端到端运行时块额外需要运行时 bundle
   与捆绑 Node）或没有 GUI 会话时自跳过；其 smoke 块现在还在活传输上完成
   一次 fetch 往返。`protocol.spec.ts` 总是运行。

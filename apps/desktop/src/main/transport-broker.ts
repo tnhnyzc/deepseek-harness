@@ -1,11 +1,12 @@
 /**
  * The stage 3 dumb broker (SPEC §11). It relays transport messages between
- * the renderer's port and the runtime child's transport surface: transparent
- * forwarding, a size guard that inspects only transport metadata (the `data`
- * byte length of a data-bearing frame) and synthesizes a `frame-too-large`
- * error back to the originator, and lifecycle glue that closes the pair when
- * either end goes away. It never interprets payload semantics and never
- * invents traffic.
+ * the renderer's port and the runtime child's transport surface. Every
+ * inbound value passes the wire gate: only well-formed transport messages
+ * are relayed (control vocabulary and malformed values are dropped), and
+ * data-bearing frames above the fixed per-frame bound are answered with a
+ * synthesized `frame-too-large` error back to the originator. Lifecycle glue
+ * closes the pair when either end goes away. It never interprets payload
+ * semantics and never invents traffic.
  *
  * Channels are per-generation: a relay is established only while the runtime
  * is ready; a runtime restart (or the renderer going away) ends the channel,
@@ -20,8 +21,9 @@ import type { MessagePortMain, WebContents } from 'electron'
 import { MessageChannel, type MessagePort } from 'node:worker_threads'
 import {
   TRANSPORT_MAX_FRAME_BYTES,
-  TRANSPORT_MAX_REQUEST_BYTES,
   TransportErrorCode,
+  parseTransportMessage,
+  transportMessageDataBytes,
 } from '@deepseek-ai/dsh-desktop-runtime/transport'
 import type { RuntimeTransport } from './runtime.ts'
 
@@ -114,36 +116,45 @@ export interface TransportBroker {
   teardown(): void
 }
 
-const DATA_TYPES: ReadonlySet<string> = new Set([
-  'fetch.request.chunk',
-  'fetch.response.chunk',
-  'stream.frame',
-])
+/** The broker's verdict on one inbound value. */
+type ScreenResult =
+  | { kind: 'relay'; message: object }
+  | { kind: 'reply'; reply: object }
+  | { kind: 'drop' }
 
 /**
- * The broker's only payload inspection: is this a data-bearing frame whose
- * `data` exceeds the limit? Such a frame is rejected before relaying because
- * the receiving edge would drop it anyway and the originator would stall on
- * credit instead of learning the fact.
+ * The broker's wire gate — the only inspection it performs. Every inbound
+ * value must parse as a well-formed transport message: the runtime-control
+ * vocabulary (`runtime.ready`, `runtime.shutdown`, ...) and malformed values
+ * are dropped, never relayed, so the renderer's port cannot inject child
+ * process control messages. A data-bearing frame whose `data` exceeds the
+ * fixed per-frame bound is answered with a synthetic error instead of being
+ * relayed (the far edge would drop it and the originator would stall on
+ * credit instead of learning the fact). The gate reads transport metadata
+ * only — the wire type, ids, and byte length — never payload semantics.
  *
  * @param value - a structured-cloned inbound message.
- * @returns the synthetic error reply, or undefined when the frame passes.
+ * @returns the verdict: relay the parsed message, answer with the synthetic
+ *   error, or drop the value.
  */
-function oversizeReply(value: unknown): object | undefined {
-  if (value === null || typeof value !== 'object') return undefined
-  const frame = value as { type?: unknown; data?: unknown }
-  if (typeof frame.type !== 'string' || !DATA_TYPES.has(frame.type)) return undefined
-  const data = frame.data
-  if (!(data instanceof Uint8Array)) return undefined
-  const limit = frame.type === 'fetch.request.chunk' ? TRANSPORT_MAX_REQUEST_BYTES : TRANSPORT_MAX_FRAME_BYTES
-  if (data.byteLength <= limit) return undefined
-  const message = 'frame exceeds the transport limit'
-  if (frame.type === 'stream.frame') {
-    const { streamId } = value as { streamId?: unknown }
-    return { type: 'stream.error', streamId: typeof streamId === 'string' ? streamId : '', code: TransportErrorCode.frameTooLarge, message }
+function screenMessage(value: unknown): ScreenResult {
+  let parsed
+  try {
+    parsed = parseTransportMessage(value)
+  } catch {
+    return { kind: 'drop' }
   }
-  const { requestId } = value as { requestId?: unknown }
-  return { type: 'fetch.error', requestId: typeof requestId === 'string' ? requestId : '', code: TransportErrorCode.frameTooLarge, message }
+  const bytes = transportMessageDataBytes(parsed)
+  if (bytes <= TRANSPORT_MAX_FRAME_BYTES) return { kind: 'relay', message: parsed }
+  const detail = `frame of ${String(bytes)} bytes exceeds the ${String(TRANSPORT_MAX_FRAME_BYTES)} byte transport bound`
+  if (parsed.type === 'stream.frame') {
+    return { kind: 'reply', reply: { type: 'stream.error', streamId: parsed.streamId, code: TransportErrorCode.frameTooLarge, message: detail } }
+  }
+  if (parsed.type === 'fetch.request.chunk' || parsed.type === 'fetch.response.chunk') {
+    return { kind: 'reply', reply: { type: 'fetch.error', requestId: parsed.requestId, code: TransportErrorCode.frameTooLarge, message: detail } }
+  }
+  // Unreachable: only the three data-bearing types carry bytes.
+  return { kind: 'drop' }
 }
 
 export function createTransportBroker(options: {
@@ -199,22 +210,24 @@ export function createTransportBroker(options: {
       options.runtime.closeChannel()
     })
     unsubscribeMessage = channel.local.subscribeMessage((value: unknown) => {
-      const reply = oversizeReply(value)
-      if (reply !== undefined) {
-        if (!rendererPortClosed) rendererPort?.postMessage(reply)
+      const screened = screenMessage(value)
+      if (screened.kind === 'drop') return
+      if (screened.kind === 'reply') {
+        if (!rendererPortClosed) rendererPort?.postMessage(screened.reply)
         return
       }
-      options.runtime.send(value as object)
+      options.runtime.send(screened.message)
     })
     options.runtime.onMessage((value: object) => {
       const port = rendererPort
       if (port === undefined || rendererPortClosed) return
-      const reply = oversizeReply(value)
-      if (reply !== undefined) {
-        port.postMessage(reply)
+      const screened = screenMessage(value)
+      if (screened.kind === 'drop') return
+      if (screened.kind === 'reply') {
+        port.postMessage(screened.reply)
         return
       }
-      port.postMessage(value)
+      port.postMessage(screened.message)
     })
     options.runtime.onClose(() => {
       rendererPortClosed = true

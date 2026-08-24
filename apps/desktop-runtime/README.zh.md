@@ -49,8 +49,9 @@ pnpm test apps/desktop-runtime
 - `src/index.ts` — 被 fork 的入口：IPC 协议、启动、传输挂载、处置。
 - `src/transport.ts` — wire 协议（消息类型、解析器、额度窗口、port
   表面），同时以 `./transport` 子路径导出。
-- `src/transport-runtime.ts` — 基于 `toFetchHandler` 与固定下行流的运行时
-  适配器。
+- `src/transport-runtime.ts` — 基于进程内 fetch 载体（`toFetchHandler`）的
+  运行时适配器：fetch 流量原样透传，流作为载体 GET 被泵成有序、按额度把关
+  的帧。
 - `src/transport-process.ts` — fork IPC 的 `TransportPort` 适配器。
 - `src/composition.ts` — 桌面 patch 栈（无 HTTP 覆盖层）。
 - `src/shutdown.ts` — 有界的进程退出控制器。

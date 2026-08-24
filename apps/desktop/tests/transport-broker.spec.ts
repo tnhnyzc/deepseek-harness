@@ -1,13 +1,15 @@
 /**
  * The stage 3 dumb broker, tested against a fake runtime relay surface and a
- * fake WebContents: transparent relaying in both directions, the size guard's
- * synthesized refusals, readiness denial, channel replacement, and the
- * lifecycle glue that closes the pair when either end goes away.
+ * fake WebContents: transparent relaying in both directions, the wire gate's
+ * drops (control vocabulary, malformed values) and synthesized refusals
+ * (oversized frames, either direction), readiness denial, channel
+ * replacement, and the lifecycle glue that closes the pair when either end
+ * goes away.
  */
 
 import type { MessagePort } from 'node:worker_threads'
 import { describe, expect, it, vi } from 'vitest'
-import { TRANSPORT_MAX_FRAME_BYTES, TRANSPORT_MAX_REQUEST_BYTES } from '@deepseek-ai/dsh-desktop-runtime/transport'
+import { TRANSPORT_MAX_FRAME_BYTES } from '@deepseek-ai/dsh-desktop-runtime/transport'
 import {
   createTransportBroker,
   TRANSPORT_DENIED_CHANNEL,
@@ -110,6 +112,28 @@ describe('transport broker', () => {
     expect(fake.channels).toContain(TRANSPORT_DENIED_CHANNEL)
   })
 
+  it('drops control-vocabulary and malformed renderer traffic instead of relaying it', async () => {
+    const runtime = fakeRuntime()
+    const broker = createTransportBroker({ runtime: runtime.runtime, isRuntimeReady: () => true })
+    const fake = fakeSender()
+    broker.handleOpenRequest(fake.sender as never)
+    const port = await rendererPort(fake)
+
+    // The renderer's port must not be able to inject child process control
+    // messages or malformed frames into the runtime.
+    port.postMessage({ type: 'runtime.shutdown' })
+    port.postMessage({ type: 'runtime.ready' })
+    port.postMessage({ type: 'runtime.transport-closed' })
+    port.postMessage({ type: 'fetch.open' })
+    port.postMessage({ type: 'stream.open', streamId: 's' })
+    port.postMessage({ type: 'totally.new' })
+    port.postMessage('not an object')
+    port.postMessage(null)
+    await new Promise<void>((resolve) => { setTimeout(resolve, 50) })
+    expect(runtime.sent).toEqual([])
+    broker.teardown()
+  })
+
   it('refuses oversized request chunks with a synthesized fetch.error', async () => {
     const runtime = fakeRuntime()
     const broker = createTransportBroker({ runtime: runtime.runtime, isRuntimeReady: () => true })
@@ -123,7 +147,7 @@ describe('transport broker', () => {
       type: 'fetch.request.chunk',
       requestId: 'big',
       sequence: 0,
-      data: new Uint8Array(TRANSPORT_MAX_REQUEST_BYTES + 1),
+      data: new Uint8Array(TRANSPORT_MAX_FRAME_BYTES + 1),
     })
     await vi.waitFor(() => {
       expect(received.length).toBe(1)
@@ -133,6 +157,47 @@ describe('transport broker', () => {
     expect(reply.code).toBe('frame-too-large')
     expect(reply.requestId).toBe('big')
     expect(runtime.sent).toEqual([])
+    broker.teardown()
+  })
+
+  it('relays a data frame of exactly the bound', async () => {
+    const runtime = fakeRuntime()
+    const broker = createTransportBroker({ runtime: runtime.runtime, isRuntimeReady: () => true })
+    const fake = fakeSender()
+    broker.handleOpenRequest(fake.sender as never)
+    const port = await rendererPort(fake)
+
+    const data = new Uint8Array(TRANSPORT_MAX_FRAME_BYTES)
+    port.postMessage({ type: 'fetch.request.chunk', requestId: 'edge', sequence: 0, data })
+    await vi.waitFor(() => {
+      expect(runtime.sent.length).toBe(1)
+    })
+    expect(runtime.sent[0]).toEqual({ type: 'fetch.request.chunk', requestId: 'edge', sequence: 0, data })
+    broker.teardown()
+  })
+
+  it('refuses an oversized downlink frame with a synthesized stream.error', async () => {
+    const runtime = fakeRuntime()
+    const broker = createTransportBroker({ runtime: runtime.runtime, isRuntimeReady: () => true })
+    const fake = fakeSender()
+    broker.handleOpenRequest(fake.sender as never)
+    const port = await rendererPort(fake)
+
+    const received: unknown[] = []
+    port.on('message', (value: unknown) => received.push(value))
+    runtime.deliver({
+      type: 'stream.frame',
+      streamId: 's9',
+      sequence: 0,
+      data: new Uint8Array(TRANSPORT_MAX_FRAME_BYTES + 1),
+    })
+    await vi.waitFor(() => {
+      expect(received.length).toBe(1)
+    })
+    const reply = received[0] as { type: string; code: string; streamId: string }
+    expect(reply.type).toBe('stream.error')
+    expect(reply.code).toBe('frame-too-large')
+    expect(reply.streamId).toBe('s9')
     broker.teardown()
   })
 

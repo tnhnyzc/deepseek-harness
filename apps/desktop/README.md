@@ -52,11 +52,16 @@ pnpm test apps/desktop  # supervisor, smoke, and protocol tests
   runtime over real fork IPC (state machine, death, exactly-one auto-retry
   before ready, graceful and forced process-tree shutdown, restart).
 - `tests/desktop-transport.spec.ts` always runs: the renderer client
-  against fake ports (response assembly, stream request bodies, credits,
-  aborts, errors, and the open/closed stream lifecycle).
+  against fake ports (response assembly, stream request bodies, credit in
+  both directions, sequence validation, the full abort lifecycle, and the
+  open/closed stream lifecycle).
 - `tests/transport-broker.spec.ts` always runs: the main broker against
-  fakes (bidirectional relay, size guards, readiness denial, channel
-  replacement, teardown).
+  fakes (the wire gate's drops and synthesized size refusals, bidirectional
+  relay, readiness denial, channel replacement, teardown).
+- `tests/security.spec.ts` and `tests/boundary.spec.ts` always run: the
+  IPC sender trust rule, and the SPEC §31 architectural boundary scans
+  (no DSH product imports in main, no electron/Node in the renderer, no
+  business literals in the transport, no HTTP listeners).
 - `tests/shell.spec.ts` self-skips without the build artifacts (the
   end-to-end runtime block additionally needs the runtime bundle and the
   bundled Node) or without a GUI session; its smoke block now also

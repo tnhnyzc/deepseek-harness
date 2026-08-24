@@ -51,3 +51,32 @@ export function denySessionPermissions(session: Session): void {
     callback(false)
   })
 }
+
+/**
+ * The sender surface of an IPC invocation that the trust check inspects.
+ * Electron's `IpcMainEvent` and `IpcMainInvokeEvent` satisfy it; tests fake
+ * it without importing Electron values into the Node test context.
+ */
+export interface IpcSender {
+  sender: { id: number }
+  senderFrame: { url: string; parent: unknown; isDestroyed(): boolean } | null
+}
+
+/**
+ * Whether an IPC invocation came from the trusted application main frame:
+ * the app windows are sandboxed with no node integration, so a legitimate
+ * caller is the main frame of a known application window. Subframes,
+ * destroyed senders, non-app origins, and unknown webContents are all
+ * refused.
+ *
+ * @param event - the IPC event (or its sender surface)
+ * @param windows - the current application windows
+ * @returns true only for a live main frame of a known window on the app protocol
+ */
+export function isTrustedIpcSender(event: IpcSender, windows: ReadonlyArray<{ webContents: { id: number } }>): boolean {
+  const frame = event.senderFrame
+  if (frame === null || frame.isDestroyed()) return false
+  if (frame.parent !== null) return false // a subframe, not the app page itself
+  if (!isAppUrl(frame.url)) return false
+  return windows.some(window => window.webContents.id === event.sender.id)
+}

@@ -15,7 +15,7 @@ import {
   runtimeEntryPath,
 } from './runtime-paths.ts'
 import { createRuntimeSupervisor, type RuntimeSupervisor, type RuntimeStateView } from './runtime.ts'
-import { denySessionPermissions } from './security.ts'
+import { denySessionPermissions, isTrustedIpcSender, type IpcSender } from './security.ts'
 import { createTransportBroker, TRANSPORT_OPEN_CHANNEL, wrapMainPort, type BrokerChannel } from './transport-broker.ts'
 import { createAppWindow } from './window.ts'
 
@@ -70,12 +70,18 @@ if (!singleInstance) {
         }
       },
     })
-    ipcMain.handle(GET_CHANNEL, () => {
+    // The renderer bridge is trusted-only: state reads, restarts, and
+    // transport opens come from the app's own main frame, never from
+    // subframes or other origins.
+    const trusted = (event: IpcSender): boolean => isTrustedIpcSender(event, BrowserWindow.getAllWindows())
+    ipcMain.handle(GET_CHANNEL, (event) => {
+      if (!trusted(event)) throw new Error('desktop shell: untrusted IPC sender')
       const current = supervisor
       if (current === undefined) throw new Error('desktop shell: runtime supervisor not initialized')
       return current.view()
     })
-    ipcMain.handle(RESTART_CHANNEL, () => {
+    ipcMain.handle(RESTART_CHANNEL, (event) => {
+      if (!trusted(event)) throw new Error('desktop shell: untrusted IPC sender')
       const current = supervisor
       if (current === undefined) throw new Error('desktop shell: runtime supervisor not initialized')
       current.requestRestart()
@@ -92,6 +98,7 @@ if (!singleInstance) {
       },
     })
     ipcMain.on(TRANSPORT_OPEN_CHANNEL, (event) => {
+      if (!trusted(event)) return
       broker.handleOpenRequest(event.sender)
     })
     supervisor.start()
