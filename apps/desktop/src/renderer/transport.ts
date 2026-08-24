@@ -20,6 +20,10 @@
  * actually ends, `ReadableStream.cancel` on a response body posts
  * `fetch.abort` too, and every terminal path (success, failure, abort,
  * consumer cancel, channel loss) releases its operation entry exactly once.
+ * An active request-body producer is part of that lifetime: the body pump
+ * arms a cancellation hook on the operation for its whole lifetime, and
+ * every terminal invokes it, so a producer stalled inside `reader.read()`
+ * cannot hold the fetch past the operation's death.
  *
  * @module @deepseek-ai/dsh-desktop/src/renderer/transport
  */
@@ -158,6 +162,13 @@ interface FetchOp {
   expectedSequence: number
   /** The request-body send window; the runtime returns credit into it. */
   requestWindow: TransportSendWindow
+  /**
+   * Cancels the active request-body producer; set while the body pump is
+   * live, cleared when it exits. Invoked by every terminal path so a
+   * producer blocked inside `reader.read()` can never hold the fetch past
+   * the operation's death.
+   */
+  cancelBody: (() => void) | undefined
 }
 
 interface StreamOp {
@@ -204,6 +215,10 @@ export function createDesktopTransport(port: TransportPortLike): DesktopTranspor
     // End the request window with the operation: a producer parked on
     // credit wakes instead of holding on past the terminal.
     op.requestWindow.cancel()
+    // Wake a producer parked inside the body stream: a terminal (remote
+    // error, channel loss, abort) must never leave the fetch held by a
+    // stalled reader.read().
+    op.cancelBody?.()
     if (op.onAbort !== undefined) op.signal.removeEventListener('abort', op.onAbort)
   }
 
@@ -387,6 +402,7 @@ export function createDesktopTransport(port: TransportPortLike): DesktopTranspor
       onAbort: undefined,
       expectedSequence: 0,
       requestWindow: new TransportSendWindow(),
+      cancelBody: undefined,
     }
     fetchOps.set(requestId, op)
     const abortError = (): DOMException => new DOMException('The operation was aborted.', 'AbortError')
@@ -413,12 +429,15 @@ export function createDesktopTransport(port: TransportPortLike): DesktopTranspor
       // operation terminates (abort, or a transport refusal such as the
       // request size bound) so production cannot run past the terminal.
       const reader = request.body.getReader()
-      // An abort must stop production even if the producer never yields
-      // again: cancel the body stream so a parked read settles.
-      const stopOnAbort = (): void => {
+      // Cancelling the body stream settles a parked read, so production
+      // cannot outlive the operation: the hook is armed on the op for the
+      // pump's lifetime (every terminal path cancels through it) and on the
+      // abort signal (the caller's cancellation, same settlement).
+      const cancelBody = (): void => {
         void reader.cancel().catch(() => undefined)
       }
-      request.signal.addEventListener('abort', stopOnAbort, { once: true })
+      op.cancelBody = cancelBody
+      request.signal.addEventListener('abort', cancelBody, { once: true })
       let sequence = 0
       try {
         for (;;) {
@@ -446,7 +465,10 @@ export function createDesktopTransport(port: TransportPortLike): DesktopTranspor
           failFetchOp(op, new TransportError(TransportErrorCode.internal, `request body failed: ${detail}`))
         }
       } finally {
-        request.signal.removeEventListener('abort', stopOnAbort)
+        // The pump is done: later terminals must not re-cancel a completed
+        // producer (and a normal completion never cancels at all).
+        op.cancelBody = undefined
+        request.signal.removeEventListener('abort', cancelBody)
         try {
           reader.releaseLock()
         } catch {

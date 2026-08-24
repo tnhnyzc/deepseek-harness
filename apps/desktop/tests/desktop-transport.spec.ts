@@ -3,9 +3,10 @@
  * reactive fake peer: fetch assembly (headers, body, status), streaming
  * request bodies, response credit return, sequence validation on both
  * primitives, the full abort lifecycle (before the head, mid-body,
- * consumer body cancel, stalled request-body production), uplink credit
- * backpressure, stream open/frame/credit/close/error lifecycle, and
- * port-close teardown.
+ * consumer body cancel, stalled request-body production), request-body
+ * credit gating, a stalled request-body reader settling on remote
+ * terminals and channel close, uplink credit backpressure, stream
+ * open/frame/credit/close/error lifecycle, and port-close teardown.
  */
 
 import { MessageChannel, type MessagePort } from 'node:worker_threads'
@@ -105,12 +106,16 @@ describe('renderer transport: fetch', () => {
     const { client, peer } = peerChannel()
     const transport = createDesktopTransport(client)
     const total = 300 * 1024
+    let cancelled = 0
     const bodyStream = new ReadableStream<Uint8Array>({
       start(controller) {
         for (let offset = 0; offset < total; offset += 64 * 1024) {
           controller.enqueue(new TextEncoder().encode('x'.repeat(Math.min(64 * 1024, total - offset))))
         }
         controller.close()
+      },
+      cancel() {
+        cancelled++
       },
     })
     // The body exceeds one credit window: the peer credits each accepted
@@ -136,6 +141,8 @@ describe('renderer transport: fetch', () => {
       bytes += (chunk.data as Uint8Array).byteLength
     }
     expect(bytes).toBe(total)
+    // Normal completion never cancels the producer.
+    expect(cancelled).toBe(0)
     transport.close()
   })
 
@@ -512,6 +519,66 @@ describe('renderer transport: streams', () => {
     expect(abort.requestId).toBe(open.requestId)
     expect(abort.reason).toBe('aborted')
     expect(peer.ofType('fetch.request.end').length).toBe(0)
+    transport.close()
+  })
+
+  /** A body whose pull never resolves: the pump parks inside reader.read(). */
+  function stalledBody(cancelled: { current: number }): ReadableStream<Uint8Array> {
+    return new ReadableStream<Uint8Array>({
+      pull() {
+        return new Promise<void>(() => undefined)
+      },
+      cancel() {
+        cancelled.current++
+      },
+    })
+  }
+
+  it('settles a stalled request-body reader when the operation fails remotely', async () => {
+    const { client, peer } = peerChannel()
+    const transport = createDesktopTransport(client)
+    const cancelled = { current: 0 }
+    const pending = transport.fetch('/api/stall-read-err', { method: 'POST', body: stalledBody(cancelled) })
+    const open = await peer.waitForType('fetch.open')
+    // Let the pump park inside reader.read() before the terminal arrives.
+    await new Promise<void>((resolve) => { setTimeout(resolve, 50) })
+    peer.send({ type: 'fetch.error', requestId: open.requestId, code: 'internal', message: 'runtime died' })
+    await expect(pending).rejects.toMatchObject({
+      name: 'TransportError',
+      code: 'internal',
+      message: 'runtime died',
+    })
+    // The terminal cancelled the stalled producer.
+    await vi.waitFor(() => {
+      expect(cancelled.current).toBe(1)
+    })
+    expect(peer.ofType('fetch.request.end').length).toBe(0)
+    expect(peer.ofType('fetch.request.chunk').length).toBe(0)
+    // The operation is fully released: a fresh fetch still completes.
+    peer.on('fetch.request.end', (message) => {
+      peer.send({ type: 'fetch.response.head', requestId: message.requestId, status: 200, statusText: 'OK', headers: [] })
+      peer.send({ type: 'fetch.response.end', requestId: message.requestId })
+    })
+    const next = await transport.fetch('/api/alive', { method: 'GET' })
+    expect(next.status).toBe(200)
+    transport.close()
+  })
+
+  it('settles a stalled request-body reader when the transport channel closes', async () => {
+    const { client, peer } = peerChannel()
+    const transport = createDesktopTransport(client)
+    const cancelled = { current: 0 }
+    const pending = transport.fetch('/api/stall-read-close', { method: 'POST', body: stalledBody(cancelled) })
+    await peer.waitForType('fetch.open')
+    // Let the pump park inside reader.read() before the channel dies.
+    await new Promise<void>((resolve) => { setTimeout(resolve, 50) })
+    peer.close()
+    await expect(pending).rejects.toMatchObject({ name: 'TransportError', code: 'transport-closed' })
+    await vi.waitFor(() => {
+      expect(cancelled.current).toBe(1)
+    })
+    expect(peer.ofType('fetch.request.end').length).toBe(0)
+    expect(peer.ofType('fetch.request.chunk').length).toBe(0)
     transport.close()
   })
 
