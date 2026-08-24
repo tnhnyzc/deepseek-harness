@@ -52,8 +52,8 @@ pnpm test apps/desktop  # supervisor, smoke, and protocol tests
   runtime over real fork IPC (state machine, death, exactly-one auto-retry
   before ready, graceful and forced process-tree shutdown, restart).
 - `tests/desktop-transport.spec.ts` always runs: the renderer client
-  against fake ports (response assembly, stream request bodies, credit in
-  both directions, sequence validation, the full abort lifecycle, and the
+  against fake ports (response assembly, streaming request bodies, credit on
+  every data path, sequence validation, the full abort lifecycle, and the
   open/closed stream lifecycle).
 - `tests/transport-broker.spec.ts` always runs: the main broker against
   fakes (the wire gate's drops and synthesized size refusals, bidirectional

@@ -46,8 +46,8 @@ pnpm test apps/desktop  # supervisor, smoke, and protocol tests
 - `tests/runtime.spec.ts` 总是运行：监督者对 fixture 运行时、经真实 fork IPC
   （状态机、死亡、ready 前恰一次自动重试、优雅与强杀进程树关闭、重启）。
 - `tests/desktop-transport.spec.ts` 总是运行：renderer 客户端对 fake port
-  （响应组装、流请求体、双向额度、序号校验、完整的 abort 生命周期，以及
-  打开/关闭的流生命周期）。
+  （响应组装、流式请求体、逐数据路径的额度、序号校验、完整的 abort
+  生命周期，以及打开/关闭的流生命周期）。
 - `tests/transport-broker.spec.ts` 总是运行：main broker 对 fake（wire 门的
   丢弃与合成尺寸拒绝、双向中继、就绪拒绝、通道替换、拆除）。
 - `tests/security.spec.ts` 与 `tests/boundary.spec.ts` 总是运行：IPC 发端

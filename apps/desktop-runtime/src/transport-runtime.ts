@@ -43,15 +43,27 @@ interface StreamState {
   window: TransportSendWindow
 }
 
+/** Adapter options. */
+export interface TransportRuntimeOptions {
+  /**
+   * The semantic total-request limit for this adapter (defaults to
+   * {@link TRANSPORT_MAX_REQUEST_BYTES}); the production wiring always uses
+   * the default, tests exercise the bound accounting at smaller totals.
+   */
+  maxRequestBytes?: number
+}
+
 /**
  * Attach the transport to the booted host plane on the given port.
  * @param port - the port the dumb broker relays to this runtime (a
  * `MessagePort` in tests; the child IPC adapter in the runtime entry).
  * @param api - the host communication plane (`ctx.apiProxy`).
+ * @param options - adapter options (the total-request limit).
  * @returns the disposer: aborts every in-flight operation and detaches.
  */
-export function attachTransportRuntime(port: TransportPort, api: ApiProxy): () => void {
+export function attachTransportRuntime(port: TransportPort, api: ApiProxy, options?: TransportRuntimeOptions): () => void {
   const handler = toFetchHandler(api)
+  const maxRequestBytes = options?.maxRequestBytes ?? TRANSPORT_MAX_REQUEST_BYTES
   const fetches = new Map<string, FetchState>()
   const streams = new Map<string, StreamState>()
   let disposed = false
@@ -286,9 +298,14 @@ export function attachTransportRuntime(port: TransportPort, api: ApiProxy): () =
         }
         state.chunks.push(message.data)
         state.bytes += message.data.byteLength
-        if (state.bytes > TRANSPORT_MAX_REQUEST_BYTES) {
-          failFetch(message.requestId, TransportErrorCode.requestTooLarge, `request body exceeds ${TRANSPORT_MAX_REQUEST_BYTES} bytes`)
+        if (state.bytes > maxRequestBytes) {
+          failFetch(message.requestId, TransportErrorCode.requestTooLarge, `request body exceeds ${String(maxRequestBytes)} bytes`)
+          return
         }
+        // The bytes have left the wire and entered the accumulator: return
+        // their credit so the sender's in-flight window frees them. The
+        // crossing chunk is not credited — the operation is already over.
+        post({ type: 'fetch.request.credit', requestId: message.requestId, credit: message.data.byteLength })
         return
       }
       case 'fetch.request.end': {
@@ -364,11 +381,12 @@ export function attachTransportRuntime(port: TransportPort, api: ApiProxy): () =
         endStream(message.streamId, message.message)
         return
       }
+      case 'fetch.request.credit':
       case 'fetch.response.head':
       case 'fetch.response.chunk':
       case 'fetch.response.end':
       case 'stream.open.ack':
-        // Renderer-direction-only messages; the runtime never receives them.
+        // Messages this side sends; the runtime never receives them.
         return
     }
   }

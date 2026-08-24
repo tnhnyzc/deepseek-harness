@@ -96,9 +96,13 @@ describe('transport broker', () => {
 
     const received: unknown[] = []
     port.on('message', (value: unknown) => received.push(value))
+    runtime.deliver({ type: 'fetch.request.credit', requestId: 'r1', credit: 1024 })
     runtime.deliver({ type: 'fetch.response.end', requestId: 'r1' })
     await vi.waitFor(() => {
-      expect(received).toEqual([{ type: 'fetch.response.end', requestId: 'r1' }])
+      expect(received).toEqual([
+        { type: 'fetch.request.credit', requestId: 'r1', credit: 1024 },
+        { type: 'fetch.response.end', requestId: 'r1' },
+      ])
     })
     broker.teardown()
   })

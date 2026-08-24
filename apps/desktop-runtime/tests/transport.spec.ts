@@ -159,6 +159,8 @@ describe('transport protocol', () => {
       { type: 'fetch.request.chunk', requestId: 'r', sequence: -1, data: new Uint8Array() },
       { type: 'fetch.request.chunk', requestId: 'r', sequence: 1.5, data: new Uint8Array() },
       { type: 'fetch.request.chunk', requestId: 'r', sequence: 0, data: 'not-bytes' },
+      { type: 'fetch.request.credit', requestId: 'r', credit: -1 },
+      { type: 'fetch.request.credit', requestId: '', credit: 1 },
       { type: 'fetch.response.credit', requestId: 'r', credit: -1 },
       { type: 'stream.open.ack', streamId: 's', ok: 'yes' },
       { type: 'runtime.ready' },
@@ -245,7 +247,12 @@ describe('transport runtime adapter', () => {
     channel?.close()
   })
 
-  const attach = (muxPayloads: Array<Record<string, unknown>>, hostRunsUntilAbort: boolean, listValue?: unknown): void => {
+  const attach = (
+    muxPayloads: Array<Record<string, unknown>>,
+    hostRunsUntilAbort: boolean,
+    listValue?: unknown,
+    maxRequestBytes?: number,
+  ): void => {
     hungSignals = new Map()
     hostSignal = {}
     const api = fakeApiProxy({ hungSignals, muxPayloads, hostRunsUntilAbort, hostSignal, listValue })
@@ -253,7 +260,7 @@ describe('transport runtime adapter', () => {
     channel = wire.port1
     remote = wire.port2
     reader = new MessageReader(wire.port2)
-    dispose = attachTransportRuntime(channel, api)
+    dispose = attachTransportRuntime(channel, api, maxRequestBytes === undefined ? undefined : { maxRequestBytes })
   }
 
   const post = (message: object): void => {
@@ -278,7 +285,7 @@ describe('transport runtime adapter', () => {
     post({ type: 'fetch.request.chunk', requestId: 'r1', sequence: 0, data: clientRequest('rpc-1', 'session.list', {}) })
     post({ type: 'fetch.request.end', requestId: 'r1' })
 
-    const head = await reader?.ofType('fetch.response.head')
+    const head = await reader?.untilType('fetch.response.head')
     expect(head?.status).toBe(200)
     // undici reports an empty reason phrase for custom responses.
     expect(head?.statusText).toBeTypeOf('string')
@@ -319,7 +326,7 @@ describe('transport runtime adapter', () => {
     post({ type: 'fetch.open', requestId: 'live', url: 'http://dsh.local/api/session.list', method: 'POST', headers: JSON_HEADERS })
     post({ type: 'fetch.request.chunk', requestId: 'live', sequence: 0, data: clientRequest('rpc-3', 'session.list', {}) })
     post({ type: 'fetch.request.end', requestId: 'live' })
-    const head = await reader?.ofType('fetch.response.head')
+    const head = await reader?.untilType('fetch.response.head')
     expect(head?.requestId).toBe('live')
   })
 
@@ -329,7 +336,7 @@ describe('transport runtime adapter', () => {
     post({ type: 'fetch.open', requestId: 'big', url: 'http://dsh.local/api/session.list', method: 'POST', headers: JSON_HEADERS })
     post({ type: 'fetch.request.chunk', requestId: 'big', sequence: 0, data: clientRequest('rpc-big', 'session.list', {}) })
     post({ type: 'fetch.request.end', requestId: 'big' })
-    await reader?.ofType('fetch.response.head')
+    await reader?.untilType('fetch.response.head')
 
     // The 256 KiB window admits exactly four 64 KiB frames, then stalls.
     const stalled = await chunksUntilStall()
@@ -357,16 +364,34 @@ describe('transport runtime adapter', () => {
   })
 
   it('refuses a request body that exceeds the total bound', async () => {
-    attach([], false)
+    const bound = 2 * TRANSPORT_MAX_FRAME_BYTES
+    attach([], false, undefined, bound)
     const requestId = 'bigreq'
     post({ type: 'fetch.open', requestId, url: 'http://dsh.local/api/session.list', method: 'POST', headers: JSON_HEADERS })
-    const total = TRANSPORT_MAX_REQUEST_BYTES / TRANSPORT_MAX_FRAME_BYTES + 1
-    for (let sequence = 0; sequence < total; sequence++) {
+    // Two frames fill the bound exactly (accepted); the third crosses it.
+    for (let sequence = 0; sequence < 3; sequence++) {
       post({ type: 'fetch.request.chunk', requestId, sequence, data: new Uint8Array(TRANSPORT_MAX_FRAME_BYTES) })
     }
-    const error = await reader?.untilType('fetch.error')
-    expect(error.requestId).toBe(requestId)
-    expect(error.code).toBe(TransportErrorCode.requestTooLarge)
+    // The accepted chunks are credited as they enter the accumulator,
+    // interleaved with the error the crossing chunk raises.
+    let creditTotal = 0
+    let creditCount = 0
+    let error: WireMessage | undefined
+    for (;;) {
+      const message = await reader?.next(300)
+      if (message === undefined) throw new Error('no refusal for the over-bound request')
+      if (message.type === 'fetch.request.credit') {
+        creditTotal += message.credit as number
+        creditCount++
+        continue
+      }
+      error = message
+      break
+    }
+    expect(error?.requestId).toBe(requestId)
+    expect(error?.code).toBe(TransportErrorCode.requestTooLarge)
+    expect(creditCount).toBe(2)
+    expect(creditTotal).toBe(bound)
     // The operation is terminal: a late end must not start the request.
     post({ type: 'fetch.request.end', requestId })
     const r = reader
@@ -374,14 +399,70 @@ describe('transport runtime adapter', () => {
     expect(await r.next(300)).toBeUndefined()
   })
 
+  // 33 MiB of frames, credits, and a full JSON round trip through the real
+  // carrier seam: give it room beyond the default test timeout.
+  it('transports a request above the old 32 MiB bound under the pinned carrier limit', async () => {
+    // The semantic total is the pinned DSH carrier default
+    // (packages/client/connection/src/http-bridge.ts:12), not the stage 3
+    // first-pass 32 MiB.
+    expect(TRANSPORT_MAX_REQUEST_BYTES).toBe(300 * 1024 * 1024)
+    attach([], false)
+    const total = 33 * 1024 * 1024
+    const body = clientRequest('rpc-bigreq', 'session.list', { blob: 'x'.repeat(total) })
+    expect(body.byteLength).toBeGreaterThan(32 * 1024 * 1024)
+    const requestId = 'bigreq'
+    post({ type: 'fetch.open', requestId, url: 'http://dsh.local/api/session.list', method: 'POST', headers: JSON_HEADERS })
+    for (let sequence = 0, offset = 0; offset < body.byteLength; sequence++, offset += TRANSPORT_MAX_FRAME_BYTES) {
+      post({ type: 'fetch.request.chunk', requestId, sequence, data: body.subarray(offset, offset + TRANSPORT_MAX_FRAME_BYTES) })
+    }
+    post({ type: 'fetch.request.end', requestId })
+
+    // The runtime credits every accepted chunk (528 full frames for 33 MiB)
+    // while a total far beyond one in-flight window is accepted whole.
+    const responseChunks: Uint8Array[] = []
+    let creditTotal = 0
+    let creditCount = 0
+    for (;;) {
+      const message = await reader?.next()
+      if (message === undefined) throw new Error('the big request produced no terminal')
+      if (message.type === 'fetch.request.credit') {
+        creditTotal += message.credit as number
+        creditCount++
+        continue
+      }
+      if (message.type === 'fetch.response.head') {
+        expect(message.status).toBe(200)
+        continue
+      }
+      if (message.type === 'fetch.response.chunk') {
+        responseChunks.push(message.data as Uint8Array)
+        continue
+      }
+      expect(message.type).toBe('fetch.response.end')
+      break
+    }
+    expect(creditCount).toBe(Math.ceil(body.byteLength / TRANSPORT_MAX_FRAME_BYTES))
+    expect(creditTotal).toBe(body.byteLength)
+    expect(JSON.parse(Buffer.concat(responseChunks).toString('utf8'))).toEqual({
+      type: 'server-response',
+      rpcId: 'rpc-bigreq',
+      result: { ok: true, value: { items: [] } },
+    })
+  }, 30_000)
+
   it('answers fetch.abort quietly: no terminal frame for the aborted request', async () => {
     attach([], false)
     const requestId = 'quiet'
+    const body = clientRequest('rpc-q', 'session.search', { query: 'x' })
     post({ type: 'fetch.open', requestId, url: 'http://dsh.local/api/session.search', method: 'POST', headers: JSON_HEADERS })
-    post({ type: 'fetch.request.chunk', requestId, sequence: 0, data: clientRequest('rpc-q', 'session.search', { query: 'x' }) })
+    post({ type: 'fetch.request.chunk', requestId, sequence: 0, data: body })
     post({ type: 'fetch.request.end', requestId })
     const r = reader
     if (r === undefined) throw new Error('reader missing')
+    // The accepted chunk is credited as it enters the accumulator; the
+    // refusal-free wait below is the quiet part.
+    const credit = await r.untilType('fetch.request.credit')
+    expect(credit.credit).toBe(body.byteLength)
     expect(await r.next(300)).toBeUndefined()
     post({ type: 'fetch.abort', requestId, reason: 'user' })
     expect(await r.next(300)).toBeUndefined()

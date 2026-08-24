@@ -107,6 +107,14 @@ class TransportLink {
     expect(message.type).toBe(type)
     return message
   }
+
+  async untilType(type: string, timeoutMs = MESSAGE_TIMEOUT_MS): Promise<WireMessage> {
+    for (;;) {
+      const message = await this.next(timeoutMs)
+      if (message === undefined) throw new Error(`no ${type} message within ${String(timeoutMs)} ms`)
+      if (message.type === type) return message
+    }
+  }
 }
 
 /** Drive one fetch over the link; resolves the assembled response facts. */
@@ -114,7 +122,12 @@ async function runFetch(link: TransportLink, requestId: string, url: string, bod
   link.send({ type: 'fetch.open', requestId, url, method: 'POST', headers: [['content-type', 'application/json']] })
   link.send({ type: 'fetch.request.chunk', requestId, sequence: 0, data: body })
   link.send({ type: 'fetch.request.end', requestId })
-  const head = await link.ofType('fetch.response.head')
+  // The runtime credits the accepted body as it arrives over the real child
+  // IPC edge; the credit must match the body exactly.
+  const credit = await link.untilType('fetch.request.credit')
+  expect(credit.requestId).toBe(requestId)
+  expect(credit.credit).toBe(body.byteLength)
+  const head = await link.untilType('fetch.response.head')
   const chunks: Uint8Array[] = []
   for (;;) {
     const message = await link.next()

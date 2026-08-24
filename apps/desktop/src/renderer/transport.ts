@@ -6,13 +6,15 @@
  * DSH semantics: urls and frames are opaque, and the host plane answers
  * through the dumb broker and the runtime adapter.
  *
- * Backpressure is credit-based in both directions: the runtime may hold
+ * Backpressure is credit-based on every data path: the runtime may hold
  * {@link TRANSPORT_CREDIT_BYTES} per direction in flight, and this side
  * returns credit as bytes are consumed (a response chunk when it enters the
- * ReadableStream queue, a stream frame when the consumer dequeues it);
- * `send` is gated by the uplink window the runtime returns credit into.
- * Abandoned consumers therefore stall the runtime within one credit window
- * instead of buffering unbounded.
+ * ReadableStream queue, a stream frame when the consumer dequeues it); the
+ * request-body pump and `send` are gated by the windows the runtime returns
+ * credit into (`fetch.request.credit`, `stream.credit`). Abandoned
+ * consumers and stalled producers therefore hold the peer within one credit
+ * window instead of buffering unbounded — the in-flight high-water mark is
+ * the window, separate from the semantic total a request may reach.
  *
  * Cancellation is terminal: an AbortSignal stays armed until the operation
  * actually ends, `ReadableStream.cancel` on a response body posts
@@ -154,6 +156,8 @@ interface FetchOp {
   onAbort: (() => void) | undefined
   /** The sequence the next `fetch.response.chunk` must carry. */
   expectedSequence: number
+  /** The request-body send window; the runtime returns credit into it. */
+  requestWindow: TransportSendWindow
 }
 
 interface StreamOp {
@@ -197,6 +201,9 @@ export function createDesktopTransport(port: TransportPortLike): DesktopTranspor
   const releaseFetchOp = (op: FetchOp): void => {
     if (!fetchOps.has(op.requestId)) return
     fetchOps.delete(op.requestId)
+    // End the request window with the operation: a producer parked on
+    // credit wakes instead of holding on past the terminal.
+    op.requestWindow.cancel()
     if (op.onAbort !== undefined) op.signal.removeEventListener('abort', op.onAbort)
   }
 
@@ -297,6 +304,12 @@ export function createDesktopTransport(port: TransportPortLike): DesktopTranspor
         failFetchOp(op, new TransportError(message.code, message.message))
         return
       }
+      case 'fetch.request.credit': {
+        // The runtime returns request-body credit as it accumulates the body.
+        const op = fetchOps.get(message.requestId)
+        if (op !== undefined) op.requestWindow.addCredit(message.credit)
+        return
+      }
       case 'stream.open.ack': {
         const op = streamOps.get(message.streamId)
         if (op === undefined || op.terminal) return
@@ -373,6 +386,7 @@ export function createDesktopTransport(port: TransportPortLike): DesktopTranspor
       aborted: false,
       onAbort: undefined,
       expectedSequence: 0,
+      requestWindow: new TransportSendWindow(),
     }
     fetchOps.set(requestId, op)
     const abortError = (): DOMException => new DOMException('The operation was aborted.', 'AbortError')
@@ -393,7 +407,9 @@ export function createDesktopTransport(port: TransportPortLike): DesktopTranspor
     request.signal.addEventListener('abort', onAbort, { once: true })
     post({ type: 'fetch.open', requestId, url: url.href, method: request.method, headers: Array.from(request.headers.entries()) })
     if (request.body !== null) {
-      // Pump the request body in bounded frames. The loop stops when the
+      // Pump the request body in bounded frames, gated by the request credit
+      // window: at most one window of body bytes is ever in flight across
+      // the IPC, no matter how large the request. The loop stops when the
       // operation terminates (abort, or a transport refusal such as the
       // request size bound) so production cannot run past the terminal.
       const reader = request.body.getReader()
@@ -409,19 +425,25 @@ export function createDesktopTransport(port: TransportPortLike): DesktopTranspor
           if (op.aborted || !fetchOps.has(requestId)) break
           const { done, value } = await reader.read()
           if (done) break
-          // The loop is synchronous: liveness cannot change inside it, so the
-          // check lives at the head where an await has passed.
           for (let offset = 0; offset < value.byteLength;) {
             const slice = value.subarray(offset, offset + TRANSPORT_MAX_FRAME_BYTES)
             offset += slice.byteLength
+            await op.requestWindow.reserve(slice.byteLength, request.signal)
+            // The reserve awaited: a terminal may have run in the meantime. A
+            // terminal removes the op from the map (and sets `aborted`) in the
+            // same step, so map liveness is the complete check.
+            if (!fetchOps.has(requestId)) break
             post({ type: 'fetch.request.chunk', requestId, sequence: sequence++, data: slice })
           }
         }
       } catch (error) {
-        if (!op.aborted) {
+        // A producer failure on a live operation is terminal: settle it here
+        // and let the fetch reject through the head below (one rejection, no
+        // unhandled one). After a remote terminal or abort the op is out of
+        // the map and its terminal already settled the operation.
+        if (fetchOps.has(requestId)) {
           const detail = error instanceof Error ? error.message : String(error)
           failFetchOp(op, new TransportError(TransportErrorCode.internal, `request body failed: ${detail}`))
-          throw new TransportError(TransportErrorCode.internal, `request body failed: ${detail}`)
         }
       } finally {
         request.signal.removeEventListener('abort', stopOnAbort)

@@ -11,9 +11,13 @@
  *
  * Backpressure: each direction of a request or stream starts with
  * {@link TRANSPORT_CREDIT_BYTES} of send credit; the receiver returns credit
- * as it consumes (`fetch.response.credit`, `stream.credit`). The credit
- * messages are the stage 3 addition to the SPEC §9 example protocol, which
- * §10 requires ("pause/resume or credit signaling if required").
+ * as it consumes — `fetch.response.credit` when a response chunk enters the
+ * consumer's queue, `fetch.request.credit` as the runtime accumulates the
+ * request body, `stream.credit` when the consumer dequeues a frame — so a
+ * slow or abandoned peer can never hold more than one window of bytes in
+ * flight across the IPC edges. The credit messages are the stage 3 addition
+ * to the SPEC §9 example protocol, which §10 requires ("pause/resume or
+ * credit signaling if required").
  * @module @deepseek-ai/dsh-desktop-runtime/transport
  */
 
@@ -29,15 +33,29 @@ export const TRANSPORT_MAX_FRAME_BYTES = 64 * 1024
 export const TRANSPORT_CREDIT_BYTES = 256 * 1024
 
 /**
- * The per-request high-water mark (SPEC §10): the runtime buffers a fetch
- * request body whole because the in-process carrier materializes the body
- * before it can answer (`req.json()`), and the buffer is refused once this
- * total is exceeded. This is the request-direction bound — it is not the
- * frame bound ({@link TRANSPORT_MAX_FRAME_BYTES}), and no request-direction
- * credit exists: the producer pumps frame by frame with no queue of its
- * own, and an over-bound request is a protocol refusal, not a stall.
+ * The semantic total-request limit (SPEC §10): how large one complete fetch
+ * request may be. It matches the pinned DSH client's carrier default,
+ * `DEFAULT_MAX_REQUEST_BODY_BYTES` (300 MiB,
+ * `packages/client/connection/src/http-bridge.ts:12`), which the pinned
+ * client-connection validates at load against the attachment image limits
+ * (`assertImageBodyCapacity`, `packages/client/connection/src/index.ts:32-44`:
+ * `ceil(maxMessageImageBytes * 4/3)` plus a 1 MiB envelope headroom — about
+ * 267.7 MiB at the attachment-local default of 200 MiB,
+ * `packages/attachment/attachment-local/src/index.ts:32`). A desktop ceiling
+ * below the carrier default would refuse requests the pinned client
+ * considers valid, so the transport adopts the carrier-level maximum rather
+ * than any attachment configuration.
+ *
+ * This total is deliberately separate from the transport high-water mark:
+ * the request pump is gated by {@link TRANSPORT_CREDIT_BYTES} of
+ * `fetch.request.credit`, so at most one window of request bytes is ever
+ * unacknowledged in flight across the renderer→runtime IPC, no matter how
+ * large the allowed request is. The runtime buffers the accepted body whole
+ * because the in-process carrier materializes it before it can answer
+ * (`req.json()`); that buffer is the request itself, not IPC queueing. An
+ * over-bound request is a protocol refusal, not a stall.
  */
-export const TRANSPORT_MAX_REQUEST_BYTES = 32 * 1024 * 1024
+export const TRANSPORT_MAX_REQUEST_BYTES = 300 * 1024 * 1024
 
 /** Transport-level error codes (business error codes ride inside the payload, not here). */
 export const TransportErrorCode = {
@@ -63,6 +81,7 @@ export const TRANSPORT_MESSAGE_TYPES: ReadonlySet<string> = new Set([
   'fetch.open',
   'fetch.request.chunk',
   'fetch.request.end',
+  'fetch.request.credit',
   'fetch.abort',
   'fetch.response.head',
   'fetch.response.chunk',
@@ -144,6 +163,13 @@ export interface FetchRequestChunk {
 export interface FetchRequestEnd {
   type: 'fetch.request.end'
   requestId: string
+}
+
+/** Primitive A — the runtime returns request-body send credit as it accumulates the body. */
+export interface FetchRequestCredit {
+  type: 'fetch.request.credit'
+  requestId: string
+  credit: number
 }
 
 /** Primitive A — the renderer cancels the request; MUST reach DSH as an AbortSignal. */
@@ -246,6 +272,7 @@ export type DesktopTransportMessage =
   | FetchOpen
   | FetchRequestChunk
   | FetchRequestEnd
+  | FetchRequestCredit
   | FetchAbort
   | FetchResponseHead
   | FetchResponseChunk
@@ -351,6 +378,8 @@ export function parseTransportMessage(value: unknown): DesktopTransportMessage {
       }
     case 'fetch.request.end':
       return { type, requestId: readId(raw.requestId, 'fetch.request.end.requestId') }
+    case 'fetch.request.credit':
+      return { type, requestId: readId(raw.requestId, 'fetch.request.credit.requestId'), credit: readCredit(raw.credit) }
     case 'fetch.abort': {
       const reason = readOptionalReason(raw.reason)
       return { type, requestId: readId(raw.requestId, 'fetch.abort.requestId'), ...(reason !== undefined ? { reason } : {}) }

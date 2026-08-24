@@ -113,6 +113,11 @@ describe('renderer transport: fetch', () => {
         controller.close()
       },
     })
+    // The body exceeds one credit window: the peer credits each accepted
+    // chunk the way the runtime does, or the pump would stall at 256 KiB.
+    peer.on('fetch.request.chunk', (message) => {
+      peer.send({ type: 'fetch.request.credit', requestId: message.requestId, credit: (message.data as Uint8Array).byteLength })
+    })
     peer.on('fetch.request.end', (message) => {
       peer.send({ type: 'fetch.response.head', requestId: message.requestId, status: 204, statusText: '', headers: [] })
       peer.send({ type: 'fetch.response.end', requestId: message.requestId })
@@ -406,6 +411,136 @@ describe('renderer transport: streams', () => {
     expect(abort.reason).toBe('aborted')
     // The operation was terminal before the body completed: no end claim.
     expect(peer.ofType('fetch.request.end').length).toBe(0)
+    transport.close()
+  })
+
+  /** A pull-based body that yields `count` full frames, then closes. */
+  function framedBody(count: number): ReadableStream<Uint8Array> {
+    const frame = new TextEncoder().encode('x'.repeat(TRANSPORT_MAX_FRAME_BYTES))
+    let pulls = 0
+    return new ReadableStream<Uint8Array>({
+      pull(controller) {
+        pulls++
+        if (pulls <= count) {
+          controller.enqueue(new Uint8Array(frame))
+          return Promise.resolve()
+        }
+        controller.close()
+      },
+    })
+  }
+
+  it('stalls request-body pumping on the credit window and resumes on fetch.request.credit', async () => {
+    const { client, peer } = peerChannel()
+    const transport = createDesktopTransport(client)
+    peer.on('fetch.request.end', (message) => {
+      peer.send({ type: 'fetch.response.head', requestId: message.requestId, status: 204, statusText: '', headers: [] })
+      peer.send({ type: 'fetch.response.end', requestId: message.requestId })
+    })
+    const pending = transport.fetch('/api/stall-req', { method: 'POST', body: framedBody(5) })
+    const open = await peer.waitForType('fetch.open')
+    const requestId = open.requestId as string
+    const windowFrames = TRANSPORT_CREDIT_BYTES / TRANSPORT_MAX_FRAME_BYTES
+    await vi.waitFor(() => {
+      expect(peer.ofType('fetch.request.chunk').length).toBe(windowFrames)
+    })
+    await new Promise<void>((resolve) => { setTimeout(resolve, 50) })
+    expect(peer.ofType('fetch.request.chunk').length).toBe(windowFrames) // parked on credit
+    peer.send({ type: 'fetch.request.credit', requestId, credit: TRANSPORT_MAX_FRAME_BYTES })
+    const response = await pending
+    expect(response.status).toBe(204)
+    const chunks = peer.ofType('fetch.request.chunk')
+    expect(chunks.length).toBe(5)
+    chunks.forEach((chunk, index) => {
+      expect(chunk.sequence).toBe(index)
+    })
+    transport.close()
+  })
+
+  it('fails the fetch when the request body producer errors', async () => {
+    const { client, peer } = peerChannel()
+    const transport = createDesktopTransport(client)
+    const bodyStream = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(new TextEncoder().encode('ok'))
+        controller.error(new Error('producer died'))
+      },
+    })
+    const pending = transport.fetch('/api/producer-err', { method: 'POST', body: bodyStream })
+    await expect(pending).rejects.toMatchObject({
+      name: 'TransportError',
+      code: 'internal',
+      message: 'request body failed: producer died',
+    })
+    // The operation is terminal: no completed-body claim.
+    expect(peer.ofType('fetch.request.end').length).toBe(0)
+    transport.close()
+  })
+
+  it('settles a parked request-body producer when the operation fails remotely', async () => {
+    const { client, peer } = peerChannel()
+    const transport = createDesktopTransport(client)
+    const pending = transport.fetch('/api/req-fail', { method: 'POST', body: framedBody(5) })
+    const open = await peer.waitForType('fetch.open')
+    const windowFrames = TRANSPORT_CREDIT_BYTES / TRANSPORT_MAX_FRAME_BYTES
+    await vi.waitFor(() => {
+      expect(peer.ofType('fetch.request.chunk').length).toBe(windowFrames)
+    })
+    await new Promise<void>((resolve) => { setTimeout(resolve, 50) })
+    peer.send({ type: 'fetch.error', requestId: open.requestId, code: 'internal', message: 'runtime died' })
+    await expect(pending).rejects.toMatchObject({ name: 'TransportError', code: 'internal' })
+    // The parked producer settled with the terminal: no end claim, no more frames.
+    expect(peer.ofType('fetch.request.end').length).toBe(0)
+    expect(peer.ofType('fetch.request.chunk').length).toBe(windowFrames)
+    transport.close()
+  })
+
+  it('settles a parked request-body producer immediately on abort', async () => {
+    const { client, peer } = peerChannel()
+    const transport = createDesktopTransport(client)
+    const controller = new AbortController()
+    const pending = transport.fetch('/api/req-abort', { method: 'POST', body: framedBody(5), signal: controller.signal })
+    const open = await peer.waitForType('fetch.open')
+    const windowFrames = TRANSPORT_CREDIT_BYTES / TRANSPORT_MAX_FRAME_BYTES
+    await vi.waitFor(() => {
+      expect(peer.ofType('fetch.request.chunk').length).toBe(windowFrames)
+    })
+    await new Promise<void>((resolve) => { setTimeout(resolve, 50) })
+    controller.abort()
+    await expect(pending).rejects.toMatchObject({ name: 'AbortError' })
+    const abort = await peer.waitForType('fetch.abort')
+    expect(abort.requestId).toBe(open.requestId)
+    expect(abort.reason).toBe('aborted')
+    expect(peer.ofType('fetch.request.end').length).toBe(0)
+    transport.close()
+  })
+
+  it('clamps excess request credit at the send window', async () => {
+    const { client, peer } = peerChannel()
+    const transport = createDesktopTransport(client)
+    peer.on('fetch.request.end', (message) => {
+      peer.send({ type: 'fetch.response.head', requestId: message.requestId, status: 204, statusText: '', headers: [] })
+      peer.send({ type: 'fetch.response.end', requestId: message.requestId })
+    })
+    const windowFrames = TRANSPORT_CREDIT_BYTES / TRANSPORT_MAX_FRAME_BYTES
+    const pending = transport.fetch('/api/credit-clamp', { method: 'POST', body: framedBody(windowFrames * 2 + 1) })
+    const open = await peer.waitForType('fetch.open')
+    const requestId = open.requestId as string
+    await vi.waitFor(() => {
+      expect(peer.ofType('fetch.request.chunk').length).toBe(windowFrames)
+    })
+    await new Promise<void>((resolve) => { setTimeout(resolve, 50) })
+    // A credit of four windows must release exactly one window of frames.
+    peer.send({ type: 'fetch.request.credit', requestId, credit: TRANSPORT_CREDIT_BYTES * 4 })
+    await vi.waitFor(() => {
+      expect(peer.ofType('fetch.request.chunk').length).toBe(windowFrames * 2)
+    })
+    await new Promise<void>((resolve) => { setTimeout(resolve, 50) })
+    expect(peer.ofType('fetch.request.chunk').length).toBe(windowFrames * 2) // parked again
+    peer.send({ type: 'fetch.request.credit', requestId, credit: TRANSPORT_MAX_FRAME_BYTES })
+    const response = await pending
+    expect(response.status).toBe(204)
+    expect(peer.ofType('fetch.request.chunk').length).toBe(windowFrames * 2 + 1)
     transport.close()
   })
 

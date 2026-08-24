@@ -10,9 +10,9 @@ stage 3（SPEC #8–#11）必须在 renderer 与独立运行时之间加入 IPC 
 
 ## Decision
 
-协议落在运行时包 `apps/desktop-runtime/src/transport.ts`，经 `./transport` 子路径导出，使运行时与 desktop 应用共用同一个解析器：十六种 wire 消息类型（SPEC #9 全集外加 `fetch.response.credit` 与 `stream.credit`）、尺寸常量（64 KiB 最大帧、256 KiB 额度窗口、32 MiB 最大请求）、一个对畸形帧抛出 `TransportProtocolError` 的严格 wire 边界解析器、用于按方向做额度核算的 `TransportSendWindow`、作为通道 demux 判别式的 `isTransportMessage`，以及 Node 两种 port 都满足的结构化 `TransportPort` 表面。
+协议落在运行时包 `apps/desktop-runtime/src/transport.ts`，经 `./transport` 子路径导出，使运行时与 desktop 应用共用同一个解析器：十七种 wire 消息类型（SPEC #9 全集外加 `fetch.response.credit`、`fetch.request.credit` 与 `stream.credit`）、尺寸常量（64 KiB 最大帧、256 KiB 额度窗口、300 MiB 最大请求——即固定 DSH 载体默认值）、一个对畸形帧抛出 `TransportProtocolError` 的严格 wire 边界解析器、用于按方向做额度核算的 `TransportSendWindow`、作为通道 demux 判别式的 `isTransportMessage`，以及 Node 两种 port 都满足的结构化 `TransportPort` 表面。
 
-背压采用双向 credit 信令，这正是 SPEC #10 明确允许的：每个方向最多在途 256 KiB，消费者按消费量回退额度——响应块在进入 `ReadableStream` 队列时、流帧在被消费者出队时，客户端的有界异步 `send` 则由一个上行窗口把关，双向载体消费客户端帧时由运行时以 `stream.credit` 回填——使被弃的消费者在一个窗口之内停住对端，而不是无限缓冲。broker 的 wire 门只检查传输元数据：任何入站值必须解析为良构的传输消息（`runtime.*` 控制词汇与畸形值一律丢弃、绝不转发——renderer 的 port 无法注入子进程控制），而超过固定 64 KiB 上限的带数据帧在任一方向都收到一条合成回送发起方的 `frame-too-large` 错误；32 MiB 请求上限是总量，由运行时在累积分块时强制，不是帧尺寸。
+背压采用逐数据路径的 credit 信令，这正是 SPEC #10 明确允许的：每个方向最多在途 256 KiB，接收方按消费量回退额度——响应块在进入 `ReadableStream` 队列时、请求体在运行时累计时（`fetch.request.credit`）、流帧在被消费者出队时，客户端的有界异步 `send` 则由一个上行窗口把关，双向载体消费客户端帧时由运行时以 `stream.credit` 回填——使被弃的消费者或停摆的生产者在一个窗口之内停住对端，而不是无限缓冲。broker 的 wire 门只检查传输元数据：任何入站值必须解析为良构的传输消息（`runtime.*` 控制词汇与畸形值一律丢弃、绝不转发——renderer 的 port 无法注入子进程控制），而超过固定 64 KiB 上限的带数据帧在任一方向都收到一条合成回送发起方的 `frame-too-large` 错误。300 MiB 最大请求是语义总量（固定 DSH 载体默认值），由运行时在累积分块时强制——是总量而非帧尺寸，且与请求 credit 维持的 256 KiB 在途高水位刻意分离。
 
 main↔runtime 边界无法转移 `MessagePort`：Node `child_process` 根本没有 port 转移（实测：`child.postMessage` 不存在、`child.send(null, [port])` 抛 "This handle type cannot be sent"、`child.send(port)` 到达时是普通对象），因此 broker 直接在既有的结构化克隆 fork IPC 上转发 wire 消息本身，靠类型判别式与 `runtime.*` 控制消息解复用。同一边界还有第二个事实：child IPC 克隆会把 `Uint8Array`（甚至 `Buffer`）降级为普通对象。因此协议模块自带一个不透明 wire 编解码器——围绕 `data` 字段的 base64 标记——`toOpaqueTransportWire` / `fromOpaqueTransportWire`，在管道两端（supervisor 的收发与运行时的进程适配器）应用，使 broker 护栏、运行时解析器与 renderer 客户端永远只见到原始字节。
 
@@ -30,9 +30,9 @@ renderer 客户端 `createDesktopTransport(port)` 位于 `apps/desktop/src/rende
 
 - 新的 workspace 边与入口：`apps/desktop` → `@deepseek-ai/dsh-desktop-runtime`、`./transport` 导出子路径、desktop 构建脚本里的显式构建顺序；`knip.json` 删除因此冗余的运行时 `src/index.ts` 条目（knip 从包 exports 推断它）。
 - child IPC 中继是系统中唯一的非 `MessagePort` 边界；不透明编解码器被限制在管道两端，除 boot 套件外不出现于 broker、renderer 客户端或任何测试中。
-- D2（契约「未知」清单）已解决：credit 信令已设计并测试，包括一个 600 KiB 响应体停在窗口上、随回退额度恢复、流载体上的逐帧额度，以及客户端 `send` 的上行把关。
+- D2（契约「未知」清单）已解决：credit 信令已设计并测试，包括一个 600 KiB 响应体停在窗口上、随回退额度恢复、流载体上的逐帧额度、客户端 `send` 的上行把关，以及按 `fetch.request.credit` 把关的请求体泵送（停摆、恢复、停驻中 abort、远端终态唤醒、超额 credit 钳制，外加一个超过 stage 3 第一版上限的 33 MiB 请求端到端传输）。
 - 新的 DSH 流端点需要零 desktop 改动：运行时服务载体 GET 所应答的任何东西，没有任何 desktop 层命名端点。SPEC §31 边界测试扫描传输源码中的业务 RPC 与流字面量，以保持这一状态。
-- 请求体方向在运行时边界整体缓冲请求（32 MiB 封顶，超限以 `request-too-large` 拒绝）：固定载体在应答前会物化整个 body（`req.json()`），故那里的背压契约是按请求的高水位；不存在请求方向 credit（SPEC #10）。
+- 请求容量与固定 DSH 客户端契约对齐：`TRANSPORT_MAX_REQUEST_BYTES` 为 300 MiB，即载体默认值 `DEFAULT_MAX_REQUEST_BODY_BYTES`（`packages/client/connection/src/http-bridge.ts:12`），固定 client-connection 在加载时按附件图片上限校验它（`assertImageBodyCapacity`，`packages/client/connection/src/index.ts:32-44`：`ceil(maxMessageImageBytes * 4/3)` 加 1 MiB 信封余量——附件本地默认 200 MiB 时约 267.7 MiB，`packages/attachment/attachment-local/src/index.ts:32`）。stage 3 第一版的 32 MiB 上限会拒绝固定客户端认为合法的请求，故传输层采纳载体级最大值，不导入任何附件配置。运行时仍整体缓冲已接受的 body——载体在应答前会物化它（`req.json()`）——但请求方向 credit（`fetch.request.credit`，运行时累计时回退）使 renderer→runtime IPC 上未确认在途的 body 字节至多一个 256 KiB 窗口，大的语义总量与小的在途高水位因此保持为两个独立概念（SPEC #10）。
 - 运行时控制协议新增 `runtime.transport-closed`——一个与进程死亡不同的通道代信号；supervisor 的强杀路径不变。
 - stage 4 现在消费 `window.dshDesktop.openTransport()` 做 renderer 的 `__DSH_TRANSPORT__` 集成（契约 §3.5、C3）；客户端侧的 `AbstractApiClient` 子类是 stage 4 剩余工作。
 

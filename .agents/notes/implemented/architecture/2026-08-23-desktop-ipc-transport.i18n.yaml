@@ -2,5 +2,5 @@
 # side as of the last confirmed-consistent state. Both languages carry equal authority;
 # after editing either side, bring the other along and re-record with:
 #   pnpm run verify-translation-pairing --write .agents/notes/implemented/architecture/2026-08-23-desktop-ipc-transport.md
-2026-08-23-desktop-ipc-transport.md: 577f0767a6687b95071015b7884bff6e334e45ad
-2026-08-23-desktop-ipc-transport.zh.md: 30d391d9524c32272de54b1d00110ff0f6ac297b
+2026-08-23-desktop-ipc-transport.md: 0fa472c28646b7c81c1bf00ce74de14e672543a1
+2026-08-23-desktop-ipc-transport.zh.md: 01e0f9c50be8c18785a6be223450b943be9e8a2d
