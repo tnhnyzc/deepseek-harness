@@ -9,6 +9,7 @@ import { existsSync } from 'node:fs'
 import { join, resolve } from 'node:path'
 import { _electron as electron } from 'playwright'
 import { describe, it, expect } from 'vitest'
+import { APP_HOME_URL } from '../src/main/protocol.ts'
 
 const appDir = resolve(import.meta.dirname, '..')
 const mainEntry = join(appDir, 'dist', 'main', 'index.js')
@@ -40,7 +41,15 @@ describe.skipIf(!guiAvailable() || !built)('desktop shell smoke', () => {
         const warnings: string[] = []
         const external: string[] = []
         win.on('console', (message) => {
-          if (message.text().includes('Electron Security Warning')) warnings.push(message.text())
+          const text = message.text()
+          if (!text.includes('Electron Security Warning')) return
+          // The pinned Cordis loader evaluates its `!!js` config expressions
+          // through new Function at module scope, so the stage 4 CSP must
+          // carry 'unsafe-eval' for the pinned tree to boot; that one warning
+          // is the documented consequence. Every other security warning still
+          // fails the smoke.
+          if (text.includes('Insecure Content-Security-Policy')) return
+          warnings.push(text)
         })
         win.on('request', (request) => {
           if (!request.url().startsWith('dsh-app://')) external.push(request.url())
@@ -48,7 +57,7 @@ describe.skipIf(!guiAvailable() || !built)('desktop shell smoke', () => {
         await win.reload()
         await win.waitForLoadState('domcontentloaded')
 
-        expect(win.url()).toBe('dsh-app://app/index.html')
+        expect(win.url()).toBe(APP_HOME_URL)
         // From stage 2 the root mirrors the runtime lifecycle; before the
         // first IPC round-trip it still shows the initial shell state.
         const state = await win.evaluate(() => document.getElementById('root')?.dataset.state)
@@ -66,8 +75,10 @@ describe.skipIf(!guiAvailable() || !built)('desktop shell smoke', () => {
         expect(globals.require).toBe('undefined')
         expect(globals.process).toBe('undefined')
 
+        // The url is inlined: the callback is serialized into the page
+        // context, where this file's imports do not exist.
         const traversal = await win.evaluate(
-          async () => (await fetch('dsh-app://app/%2e%2e/%2e%2e/etc/passwd')).status,
+          async () => (await fetch('dsh-app://127.0.0.1/%2e%2e/%2e%2e/etc/passwd')).status,
         )
         expect(traversal).toBe(404)
 
@@ -98,61 +109,33 @@ describe.skipIf(!guiAvailable() || !runtimeBuilt)('desktop runtime smoke', () =>
       const state = await win.evaluate(() => document.getElementById('root')?.dataset.state)
       expect(state).toBe('ready')
 
-      // Ready implies a settled DSH Context, not a localhost probe: the
-      // renderer shows the runtime + DSH versions reported over IPC.
-      const body = await win.evaluate(() => document.body.textContent ?? '')
-      expect(body).toContain('Harness ready — runtime ')
-      expect(body).toContain(', DSH ')
+      // Stage 4: ready hands the root to the DSH client tree. The carrier
+      // seam and the boot protocol are installed before the tree takes over,
+      // and the shell state screen is gone — one root, the pinned app in it.
+      await win.waitForFunction(() => {
+        const globals = globalThis as { __DSH_TRANSPORT__?: unknown; __DSH_BOOT__?: unknown }
+        return globals.__DSH_TRANSPORT__ !== undefined
+          && globals.__DSH_BOOT__ !== undefined
+          && document.querySelector('.shell-state') === null
+      }, undefined, { timeout: 60_000 })
 
-      // The transport end-to-end: the preload hands the renderer half of a
-      // real MessagePort over Electron IPC; a keyless fetch round-trips
-      // through the main broker, the child IPC, and the runtime adapter.
+      // The transport end-to-end: the app's boot channel (opened at ready
+      // through the preload's openTransport) carries a keyless round trip
+      // through the main broker, the child IPC, and the runtime adapter. The
+      // smoke drives it through the pinned carrier seam the DSH tree itself
+      // uses, on the app's single channel — the broker is per-generation, so
+      // a second channel would replace the boot channel and the boot
+      // traffic's in-flight responses would race the test's own.
       const facts = await win.evaluate(async () => {
-        const port = await window.dshDesktop.openTransport()
-        try {
-          const requestId = 'smoke-fetch'
-          const payload = new TextEncoder().encode(
-            JSON.stringify({ type: 'client-request', rpcId: 'smoke-rpc', method: 'session.list', payload: {} }),
-          )
-          const result = await new Promise<{ status: number; body: string }>((resolve, reject) => {
-            let status = 0
-            const chunks: Uint8Array[] = []
-            const onClose = () => { reject(new Error('transport port closed mid-fetch')) }
-            port.addEventListener('close', onClose)
-            port.addEventListener('message', (event) => {
-              const data = (event as { data?: unknown }).data
-              const message = data as {
-                type: string
-                status?: number
-                data?: Uint8Array
-                code?: string
-                message?: string
-              } | undefined
-              if (message === undefined) return
-              if (message.type === 'fetch.response.head') status = message.status ?? 0
-              else if (message.type === 'fetch.response.chunk' && message.data !== undefined) chunks.push(message.data)
-              else if (message.type === 'fetch.response.end') {
-                port.removeEventListener('close', onClose)
-                const merged = new Uint8Array(chunks.reduce((total, chunk) => total + chunk.byteLength, 0))
-                let offset = 0
-                for (const chunk of chunks) {
-                  merged.set(chunk, offset)
-                  offset += chunk.byteLength
-                }
-                resolve({ status, body: new TextDecoder().decode(merged) })
-              } else if (message.type === 'fetch.error') {
-                port.removeEventListener('close', onClose)
-                reject(new Error(`fetch.error: ${String(message.code)} ${String(message.message)}`))
-              }
-            })
-            port.postMessage({ type: 'fetch.open', requestId, url: 'http://dsh.local/api/session.list', method: 'POST', headers: [['content-type', 'application/json']] })
-            port.postMessage({ type: 'fetch.request.chunk', requestId, sequence: 0, data: payload })
-            port.postMessage({ type: 'fetch.request.end', requestId })
-          })
-          return result
-        } finally {
-          port.close()
-        }
+        const hooks = (globalThis as unknown as {
+          __DSH_TRANSPORT__: { fetch: (input: URL, init: RequestInit) => Promise<Response> }
+        }).__DSH_TRANSPORT__
+        const response = await hooks.fetch(new URL('/api/session.list', location.origin), {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ type: 'client-request', rpcId: 'smoke-rpc', method: 'session.list', payload: {} }),
+        })
+        return { status: response.status, body: await response.text() }
       })
       expect(facts.status).toBe(200)
       const envelope = JSON.parse(facts.body) as { type: string; result: { ok: boolean; value: { items: unknown[] } } }

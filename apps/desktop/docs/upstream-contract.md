@@ -1237,9 +1237,12 @@ DESKTOP-CONSUMPTION: consume unchanged.
   and registers in exactly one face aggregate
   (`packages/AGENTS.md`, "Package tsconfig"; root `AGENTS.md`,
   "Keep compiler faces explicit").
-- The `api/remotes` two-face exception is the only one:
-  `tsconfig.host.json:142` + `tsconfig.client.json:60`, enforced by
-  `collectProjectReferenceFaceViolations`
+- Two-face projects register in both aggregates, face by face:
+  `api/remotes` at `tsconfig.host.json:142` + `tsconfig.client.json:60`,
+  and the stage 4 `apps/desktop` split (Electron main/preload in
+  `tsconfig.host.json`, the DSH renderer in `tsconfig.client.json`) at
+  `tsconfig.host.json:311` + `tsconfig.client.json:100`. Face isolation is
+  enforced by `collectProjectReferenceFaceViolations`
   (`scripts/project-reference-faces.ts:24-67`, invoked from
   `scripts/check-workspace-constraints.ts:482`).
 - `DSH_BUILD_FACE` (host/client) is a tsdown env flag set by the root
@@ -1392,10 +1395,22 @@ Classification of every anticipated desktop need:
 
 | # | Question | Where proven |
 | --- | --- | --- |
-| D1 | `__DSH_BOOT__` provisioning mode: fetch rendered index over transport vs in-process graph export (decides B3) | stage 4 |
+| D1 | `__DSH_BOOT__` provisioning mode: fetch rendered index over transport vs in-process graph export (decides B3) | resolved in stage 4: the graph is the in-process export (B3), published over the child IPC before `runtime.ready`; the bundle bytes stay on the transport fetch channel (Agent Note `2026-08-25-desktop-dsh-client-boot`) |
 | D2 | Backpressure/credit behavior of the process-IPC frame protocol under sustained token-rate streams (transport-internal; no upstream dependency) | resolved in stage 3: credit signaling with per-direction 256 KiB windows (Agent Note `2026-08-23-desktop-ipc-transport`) |
-| D3 | `isLoopback`-gated affordances under a `dsh-app://` URL with a loopback hostname (`packages/client/connection/src/loopback-hostname.ts:14-20`) | stages 1/4 |
+| D3 | `isLoopback`-gated affordances under a `dsh-app://` URL with a loopback hostname (`packages/client/connection/src/loopback-hostname.ts:14-20`) | resolved in stages 1/4: the protocol host is `127.0.0.1`, loopback to the unmodified pinned classification (Agent Note `2026-08-25-desktop-dsh-client-boot`) |
 | D4 | Native-module ABI compatibility of the DSH dependency graph against the bundled standalone Node (mandatory packaging test, root `AGENTS.md` + SPEC stage 11) | stage 9/11 |
+
+### Applied local modifications (stage 4)
+
+The pinned source is modified in exactly three places, each guarded so the
+web app's HTTP behavior is untouched (rationale in Agent Note
+`2026-08-25-desktop-dsh-client-boot`):
+
+| # | File | Change |
+| --- | --- | --- |
+| M1 | `packages/client/modules/src/index.ts` | `ClientModuleRegistry` injects `['loader']` only; the `/plugins` bundle route and the `webserver/index-inject` rows register only when `ctx.get('webServer')` is present — the composed graph and bundle table serve non-HTTP carriers |
+| M2 | `packages/client/connection/src/index.ts` | `inject = []`; the `/api` route and the WebSocket downlinks register only when a webserver is present; the `HostConnectionService` and `createSharedFetchHandler` (in-process RPC dispatch) are provided unconditionally |
+| M3 | `packages/client/connection/src/rpc-host.ts` | `register()` returns a no-op disposer when no webserver exists: a channel on a non-HTTP host is unreachable over HTTP, not an error |
 
 ---
 

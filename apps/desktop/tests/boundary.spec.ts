@@ -2,10 +2,11 @@
  * SPEC §31 architectural boundary tests: source scans whose sole purpose is
  * preventing future architectural decay. Electron main must never import DSH
  * product packages (agent loop, session internals, model providers, tool
- * implementations); the renderer must never import electron, Node built-ins,
- * or DSH host runtime packages; the desktop transport must never name a
- * business RPC or stream; and desktop production code must never create a
- * localhost HTTP listener.
+ * implementations); the renderer may import only the browser client surface
+ * (the pinned DSH client packages' browser entries, stage 4) and must never
+ * import electron, Node built-ins, or DSH host runtime packages; the desktop
+ * transport must never name a business RPC or stream; and desktop production
+ * code must never create a localhost HTTP listener.
  */
 
 import { readFileSync, readdirSync, statSync } from 'node:fs'
@@ -58,6 +59,22 @@ const ELECTRON_SPECIFIER = /^electron(\/|$)/
 const NODE_BUILTIN = /^node:/
 
 /**
+ * The browser client surface stage 4 admits in the renderer: the pinned DSH
+ * client packages, only their browser entries (the client tree runs there
+ * unchanged). Everything else — host runtime, agents, providers — stays
+ * forbidden.
+ */
+const RENDERER_ALLOWED_DSH: ReadonlySet<string> = new Set([
+  '@deepseek-ai/dsh-client-web',
+  '@deepseek-ai/dsh-client-connection/client',
+  // The event-path constants: imported through the package's declared
+  // `./src/*` subpath because the built `/client` entry is the CJS module
+  // factory, whose named exports the renderer bundler cannot read.
+  '@deepseek-ai/dsh-client-connection/src/api-path.ts',
+  '@deepseek-ai/dsh-host-apiproxy/client',
+])
+
+/**
  * Business RPC and stream-semantics literals. The transport is generic: a
  * name from the product vocabulary here is architectural decay by definition.
  */
@@ -101,6 +118,7 @@ describe('SPEC §31 architectural boundaries', () => {
       const source = readFileSync(file, 'utf8')
       const offenders = importSpecifiers(source).filter((specifier) => {
         if (specifier === PROTOCOL_SPECIFIER) return false
+        if (RENDERER_ALLOWED_DSH.has(specifier)) return false
         return ELECTRON_SPECIFIER.test(specifier) || NODE_BUILTIN.test(specifier) || DSH_PRODUCT_PACKAGE.test(specifier)
       })
       expect(offenders, `${file} imports renderer-forbidden modules`).toEqual([])

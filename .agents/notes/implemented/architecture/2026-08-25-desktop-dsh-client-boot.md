@@ -1,0 +1,44 @@
+# Agent Note: desktop stage 4 — DSH client boot over the transport
+
+Status: implemented
+
+English | [中文](2026-08-25-desktop-dsh-client-boot.zh.md)
+
+## Problem
+
+Stage 4 (SPEC stage 4) must boot the real pinned DSH client/UI tree inside the desktop renderer: one application root, no second or stand-in UI, and DSH stays the sole owner of every agent semantic. The renderer receives everything from the host over the completed stage 3 transport: the `__DSH_TRANSPORT__` carrier seam, the `__DSH_BOOT__` graph, the `__ModuleLoader__` facade, and the bundle bytes. The stage 0 contract left two items requiring proof during implementation (D1: `__DSH_BOOT__` provisioning mode; D3: loopback-gated affordances under `dsh-app://`), and the pinned client tree assumes an HTTP deployment — webserver rows registering routes, an index injected at render time, bundles served at `/plugins/<id>/client.js` — that the desktop host deliberately does not run.
+
+## Decision
+
+**Provisioning (D1).** The graph is the in-process export (contract B3): `apps/desktop-runtime/src/boot-graph.ts` builds a `runtime.boot-graph` child IPC message — the composed `WebBootGraph` from `ClientModuleRegistry`, the `__ModuleLoader__` facade script, and the preload bundle URLs — and the runtime entry sends it on the ordered fork channel **before** `runtime.ready`; the supervisor caches it and serves it to the renderer over the trusted `dsh-desktop:boot-graph` invoke (preload `getBootPayload()`). The bundle bytes stay on the transport's fetch channel: the runtime's dispatch routes `GET /plugins/*` to `createClientBundleFetch(clientModules)`, serving the built artifact byte for byte, and everything else to the connection's in-process fetch handler ahead of the API proxy fallback. The pinned `AppWebEntry` reads `__DSH_BOOT__` and `__ModuleLoader__` and takes `__DSH_TRANSPORT__.loadBundle` when present (its `prefetchImmediateTier` skips the HTTP prefetch on exactly that condition, `packages/client/web/src/boot.ts:97-110`), so the renderer never dereferences an HTTP-only URL.
+
+**Loopback (D3).** The `dsh-app://` protocol host is `127.0.0.1` (`APP_PROTOCOL_HOST`, `apps/desktop/src/main/protocol.ts`): the pinned loopback classification reads `location.hostname` unmodified (`packages/client/connection/src/loopback-hostname.ts:14-20`), and `127.0.0.1` is loopback to it — the loopback-gated affordances and the API trust fence work without touching the pinned fence. `APP_HOME_URL` is `dsh-app://127.0.0.1/index.html`.
+
+**Carrier.** `apps/desktop/src/renderer/dsh-carrier.ts` installs the pinned `__DSH_TRANSPORT__` seam (`createApiClient` / `fetch` / `loadBundle`) on `globalThis` over the stage 3 desktop transport. `DesktopApiClient extends AbstractApiClient` overrides `doFetch`: the two pinned event paths route to the stream primitive, every other method to the fetch primitive; `loadBundle` fetches bundle bytes and executes them as a classic script through a blob object URL (`evaluateClassicScript`). The event-path values are imported from the pinned `api-path.ts` through the package's declared `./src/*` subpath, because the built `/client` entry is a CJS module factory whose named exports a renderer bundler cannot read statically (the `ClientTransportHooks` type stays a type-only import from `/client`); the renderer boundary allowlist widens to exactly that one source file.
+
+**Upstream extensions (three, narrowest).** The pinned tree registers its client surface against the webserver row; the desktop host disables that row. Three edits make the client halves usable without HTTP while leaving every HTTP behavior intact for the web app:
+
+1. `packages/client/modules/src/index.ts` — `ClientModuleRegistry` injects `['loader']` only; the `/plugins` bundle route and the `webserver/index-inject` rows register only when `ctx.get('webServer')` is present. The composed graph, bundle table, and `clientPath` exist for any Loader host.
+2. `packages/client/connection/src/index.ts` — `inject = []`; the `/api` route and the WebSocket downlinks register only when a webserver is present; the `HostConnectionService` and its `createSharedFetchHandler` (the in-process RPC interceptor dispatch the runtime composes ahead of the API proxy fallback) are provided unconditionally.
+3. `packages/client/connection/src/rpc-host.ts` — `register()` returns a no-op disposer when no webserver exists: a channel on a non-HTTP host is unreachable over HTTP, not an error.
+
+**Boot sequence.** The renderer's `main.ts` keeps the stage 2 shell projection until `ready`; then `openTransport()` → `installDesktopCarrier` → `getBootPayload()` → execute the loader facade → execute the preload bundles → set `__DSH_BOOT__` → `new AppWebEntry(root).run()` — after clearing `#root`: `AppWebEntry`'s `BootPage` appends its `div[data-dsh-boot]` into the container, and the pinned `mountApp` (`packages/client/ui-renderer/src/client/index.ts:61-72`) hydrates the whole container when that child exists, so any sibling the shell left behind would break the hydration. One root, the pinned app. Teardown disposes the client tree before closing the transport, so its stream operations end on a live channel. The renderer's `index.html` CSP gains `'unsafe-eval'` in `script-src`: the pinned Cordis loader evaluates `!!js` config expressions through `new Function` at module scope (`vendor/loader/src/config/utils.ts:5`), so the pinned tree cannot boot without it; the Electron "Insecure CSP" warning is the documented consequence, and the shell smoke tolerates exactly that one warning while failing on any other.
+
+**Build.** The renderer bundles the pinned client tree with Vite: the shared client build-environment defines, React deduped to one copy, `node:module` aliased to a throwing stub (the loader's require shim is browser-inert), and the `process.*` names the client code statically reads defined at build time. The app remains a fork app the root build does not cover; `pnpm --filter @deepseek-ai/dsh-desktop run build` builds runtime → main → renderer. The face-isolation gate splits the app's typecheck by compiler face: the renderer consumes the client half of the split `client/connection` package, so it is checked under `apps/desktop/tsconfig.client.json` in the client aggregate, while the Electron main, preload, and shared contract are checked under `apps/desktop/tsconfig.host.json` in the host aggregate; the app's `tsconfig.json` is the standalone build spanning both.
+
+## Consequences
+
+- D1 and D3 are resolved (contract "unknown" list): graph over the child IPC, bundles over the transport fetch; `127.0.0.1` protocol host.
+- The pinned source now diverges in exactly three places (above); the web app is untouched because all three edits are guarded on webserver presence.
+- The renderer consumes four DSH packages by source (`client-web`, `client-connection`, `client-modules`, `host-apiproxy`); the boundary spec's renderer allowlist is that set plus the one `api-path.ts` source import, and anything else fails loud.
+- The broker stays single-channel per generation; the app's boot channel is the app's channel for the runtime's lifetime, and the runtime smoke drives its round trip through the app's own carrier on that channel (a second channel would replace the boot channel, and the boot traffic's in-flight responses would race the test).
+- `__DSH_TRANSPORT__.fetch` is the generic RPC fetch: the smoke's keyless `session.list` round trip is the standing end-to-end proof (renderer port → broker → child IPC → adapter → in-process dispatch).
+- A pinned reader behavior is load-bearing for the carrier's tests: `readSse` drops a malformed frame with a `console.error` log instead of killing the stream (`packages/host/apiproxy/src/fetch/client.ts:369-408`).
+
+## Alternatives considered
+
+- Serve the rendered index over the transport fetch (the other D1 branch) — rejected: index injection is a webserver effect (`webserver/index-inject`); faking it would synthesize DSH's render-time artifacts in the desktop, while the in-process graph is the registry's own data.
+- A bare `app` protocol host (the stage 1 shape) — rejected at D3: `isLoopback` is false for a non-loopback hostname in the pinned classification, so the affordances and the trust fence would see a non-loopback origin.
+- Re-export the event-path constants from the built `/client` entry — tried and reverted: it widens the CJS bundle's public API where the declared `./src/*` subpath already serves source consumers.
+- A second transport channel for smoke or diagnostic traffic — rejected: the broker is per generation by design; a replacement kills the app's live connection, and driving the round trip through the app's carrier covers the same edges.
+- A CSP without `'unsafe-eval'` plus an eval-free patch to the vendored loader — rejected: a fourth upstream edit inside vendored loader internals versus one documented CSP token on a private fork app.

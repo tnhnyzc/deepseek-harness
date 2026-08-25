@@ -7,7 +7,8 @@
 import { describe, expect, it } from 'vitest'
 import { isTrustedIpcSender, type IpcSender } from '../src/main/security.ts'
 
-const TRUSTED_URL = 'dsh-app://app/index.html'
+// D3: the protocol host is loopback (127.0.0.1), not a bare 'app' host.
+const TRUSTED_URL = 'dsh-app://127.0.0.1/index.html'
 
 function senderEvent(overrides: Partial<IpcSender> = {}): IpcSender {
   return {

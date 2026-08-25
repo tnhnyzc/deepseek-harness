@@ -18,12 +18,15 @@ import {
   loadOptionalPatches,
   PROFILE_PATCH_FILENAME,
 } from '@deepseek-ai/dsh-app-boot'
+import type { HostConnectionService } from '@deepseek-ai/dsh-client-connection'
 import { provideCmdline } from '@deepseek-ai/dsh-cmdline'
 import { resolveDshHome } from '@deepseek-ai/dsh-home-paths'
 import { DSH_LAUNCH_ENVIRONMENT_KEY } from '@deepseek-ai/dsh-launch-environment'
+import { toFetchHandler } from '@deepseek-ai/dsh-host-apiproxy'
+import { bootGraphMessage, createClientBundleFetch } from './boot-graph.ts'
 import { composeDesktopPatches, prepareDesktopProfile, PROFILE_ROOT_FILENAME } from './composition.ts'
 import { createProcessShutdown } from './shutdown.ts'
-import { attachTransportRuntime } from './transport-runtime.ts'
+import { attachTransportRuntime, type FetchDispatch } from './transport-runtime.ts'
 import { createProcessTransportPort } from './transport-process.ts'
 
 const BIN_NAME = 'dsh-desktop-runtime'
@@ -101,15 +104,37 @@ async function main(): Promise<void> {
     })
     const apiProxy = ctx.get('apiProxy')
     if (apiProxy === undefined) throw new Error('boot settled without the apiProxy service; the desktop runtime cannot serve transport')
-    transportDispose = attachTransportRuntime(transportPort, apiProxy)
+    // The client boot table composes the __DSH_BOOT__ graph and owns the
+    // bundle paths; without it the renderer cannot boot the DSH client tree.
+    const clientModules = ctx.get('clientModules')
+    if (clientModules === undefined) {
+      throw new Error('boot settled without the clientModules service; the desktop runtime cannot serve the client boot graph')
+    }
+    // The host Connection service contributes the in-process RPC interceptor
+    // dispatch (the Typert gateway) ahead of the API proxy fallback; without
+    // it the fetch channel is the bare carrier.
+    const connection = ctx.get('connection') as HostConnectionService | undefined
+    const apiHandler = toFetchHandler(apiProxy)
+    const bundleFetch = createClientBundleFetch(clientModules)
+    const unaryHandler = connection !== undefined
+      ? connection.createSharedFetchHandler('/api', apiHandler)
+      : apiHandler
+    const fetchDispatch: FetchDispatch = (request) => {
+      const pathname = new URL(request.url).pathname
+      return request.method === 'GET' && pathname.startsWith('/plugins/')
+        ? bundleFetch(request)
+        : unaryHandler.fetch(request)
+    }
+    transportDispose = attachTransportRuntime(transportPort, apiProxy, { fetchDispatch })
     dispose = () => {
       transportDispose?.()
       return ctx.fiber.dispose()
     }
     // The entry refuses to run without an IPC channel (above), so the
-    // readiness fact goes over it unconditionally. The transport listens
-    // before the fact: the supervisor relays only after it, and both go out
-    // on the same ordered channel.
+    // readiness fact goes over it unconditionally. The boot artifacts precede
+    // the readiness fact on the same ordered channel: the supervisor caches
+    // them before it may report the runtime ready.
+    process.send(bootGraphMessage(clientModules))
     process.send(readyMessage(ctx))
   } catch (error) {
     uninstall()

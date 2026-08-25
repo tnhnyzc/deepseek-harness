@@ -643,11 +643,18 @@
     "apps/desktop": {
       "entry": [
         "tests/**/*.spec.ts",
-        "forge.config.ts"
+        "forge.config.ts",
+        "src/renderer/node-module-stub.ts"
       ],
       "project": [
         "src/**/*.ts",
         "tests/**/*.ts"
+      ],
+      "ignoreDependencies": [
+        "@types/react",
+        "@types/react-dom",
+        "react",
+        "react-dom"
       ]
     },
     "apps/desktop-runtime": {

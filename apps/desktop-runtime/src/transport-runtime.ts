@@ -1,13 +1,15 @@
 /**
  * The desktop runtime side of the transport: it consumes the wire protocol on
  * a MessagePort and serves both primitives through the one existing upstream
- * mechanism — the in-process fetch carrier `toFetchHandler(ctx.apiProxy)`
- * (no HTTP). Fetch traffic is the carrier as-is; a stream open is a GET whose
- * response body is pumped as ordered, credit-gated frames, so every downlink
- * the carrier serves — the pinned event streams, plain downloads, and any
- * stream a future revision adds — is carried with zero desktop changes. The
- * adapter names no endpoint, frame schema, or envelope; it only chunks,
- * sequences, and credits bytes.
+ * mechanism — the in-process fetch carrier (no HTTP). The fetch channel runs
+ * an injected dispatch the production wiring composes from the host's own
+ * handlers (the RPC channel with its in-process interceptors, the
+ * client-bundle byte route); a stream open is a GET on the bare API proxy
+ * carrier whose response body is pumped as ordered, credit-gated frames, so
+ * every downlink the carrier serves — the pinned event streams, plain
+ * downloads, and any stream a future revision adds — is carried with zero
+ * desktop changes. The adapter names no endpoint, frame schema, or envelope;
+ * it only chunks, sequences, and credits bytes.
  * @module @deepseek-ai/dsh-desktop-runtime/transport-runtime
  */
 
@@ -43,6 +45,9 @@ interface StreamState {
   window: TransportSendWindow
 }
 
+/** One request of the fetch channel, answered by an injected dispatch. */
+export type FetchDispatch = (request: Request) => Promise<Response>
+
 /** Adapter options. */
 export interface TransportRuntimeOptions {
   /**
@@ -51,6 +56,14 @@ export interface TransportRuntimeOptions {
    * the default, tests exercise the bound accounting at smaller totals.
    */
   maxRequestBytes?: number
+  /**
+   * The fetch channel's request dispatch (defaults to the bare API proxy
+   * handler). The production wiring composes the host's own handlers here —
+   * the RPC channel with its in-process interceptors and the client-bundle
+   * byte route — so the adapter names no endpoint and stays the same
+   * chunking, sequencing, and crediting edge for whatever the host serves.
+   */
+  fetchDispatch?: FetchDispatch
 }
 
 /**
@@ -63,6 +76,7 @@ export interface TransportRuntimeOptions {
  */
 export function attachTransportRuntime(port: TransportPort, api: ApiProxy, options?: TransportRuntimeOptions): () => void {
   const handler = toFetchHandler(api)
+  const fetchDispatch = options?.fetchDispatch ?? handler.fetch
   const maxRequestBytes = options?.maxRequestBytes ?? TRANSPORT_MAX_REQUEST_BYTES
   const fetches = new Map<string, FetchState>()
   const streams = new Map<string, StreamState>()
@@ -116,7 +130,7 @@ export function attachTransportRuntime(port: TransportPort, api: ApiProxy, optio
     try {
       request = new Request(state.url, {
         method: state.method,
-        headers: state.headers,
+        headers: withHostHeader(state.url, state.headers),
         ...(state.chunks.length > 0 ? { body: concatChunks(state.chunks, state.bytes) } : {}),
         signal: state.controller.signal,
       })
@@ -126,7 +140,7 @@ export function attachTransportRuntime(port: TransportPort, api: ApiProxy, optio
     }
     let response: Response
     try {
-      response = await handler.fetch(request)
+      response = await fetchDispatch(request)
     } catch (error) {
       // The seam rejects only for carrier-level failures (a hung impl is the
       // client's timeout concern, not this adapter's).
@@ -416,6 +430,25 @@ export function attachTransportRuntime(port: TransportPort, api: ApiProxy, optio
     port.removeListener('close', onClose)
     endAll()
   }
+}
+
+/**
+ * Complete the Host header for in-process dispatch. A real HTTP server sees
+ * Host on the socket, but an IPC-relayed request carries none — a browser
+ * renderer cannot set it (forbidden header name), and only the URL's
+ * authority is trustworthy here. The upstream /api trust fence classifies a
+ * request by that header, so the adapter derives it the way the socket would
+ * have carried it.
+ */
+function withHostHeader(url: string, headers: Array<[string, string]>): Array<[string, string]> {
+  if (headers.some(([name]) => name.toLowerCase() === 'host')) return headers
+  let host: string
+  try {
+    host = new URL(url).host
+  } catch {
+    return headers // an unparseable url fails in the dispatch, not here
+  }
+  return host === '' ? headers : [['host', host], ...headers]
 }
 
 /** Concatenate buffered request chunks into one fresh body buffer. */

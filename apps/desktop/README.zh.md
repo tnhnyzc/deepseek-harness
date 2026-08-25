@@ -9,9 +9,11 @@ DeepSeek Harness 桌面应用的私有 Electron 壳。stage 1 交付加固的窗
 经正常 DSH 处置路径停止它。stage 3 加入 IPC 传输：运行时经 fork IPC 提供
 fetch 兼容的请求/响应原语与不透明的有序流，main 中的哑中继 broker 把帧
 转给 renderer，renderer 经 `window.dshDesktop.openTransport()` 使用两者。
-DSH client 应用树在 stage 4 从这个 renderer 启动。范围、接缝与未决的
-D1、D3、D4 问题（D2 已在 stage 3 解决）见 `SPEC.md` #6-#11、
-`ARCHITECTURE.md` 与[上游契约](./docs/upstream-contract.md)。
+stage 4 经该传输从这个 renderer 引导固定的 DSH 客户端/UI 树：运行时在
+报告就绪之前发布客户端 boot 图，renderer 装上 `__DSH_TRANSPORT__` 载体
+接缝，`AppWebEntry` 接管唯一的应用根节点——没有第二个 UI。范围、接缝、
+已应用的本地改动与未决的 D4 问题（D1、D2、D3 已在 stage 3-4 解决）见
+`SPEC.md` #6-#11、`ARCHITECTURE.md` 与[上游契约](./docs/upstream-contract.md)。
 
 ## 构建
 
@@ -51,11 +53,15 @@ pnpm test apps/desktop  # supervisor, smoke, and protocol tests
 - `tests/transport-broker.spec.ts` 总是运行：main broker 对 fake（wire 门的
   丢弃与合成尺寸拒绝、双向中继、就绪拒绝、通道替换、拆除）。
 - `tests/security.spec.ts` 与 `tests/boundary.spec.ts` 总是运行：IPC 发端
-  信任规则，以及 SPEC §31 架构边界扫描（main 无 DSH 产品导入、renderer 无
-  electron/Node、传输无业务字面量、无 HTTP 监听器）。
+  信任规则，以及 SPEC §31 架构边界扫描（main 无 DSH 产品导入、renderer 的
+  DSH 导入限于 boot 集合、传输无业务字面量、无 HTTP 监听器）。
+- `tests/dsh-carrier.spec.ts` 总是运行：`__DSH_TRANSPORT__` 载体对脚本化
+  fake（接缝形状、API 客户端里的事件路径 vs fetch 路由，以及 bundle 加载
+  器的 fetch + 经典脚本执行）。
 - `tests/shell.spec.ts` 在缺少构建产物（端到端运行时块额外需要运行时 bundle
-  与捆绑 Node）或没有 GUI 会话时自跳过；其 smoke 块现在还在活传输上完成
-  一次 fetch 往返。`protocol.spec.ts` 总是运行。
+  与捆绑 Node）或没有 GUI 会话时自跳过；其运行时冒烟块断言 stage 4 交接
+  （DSH 全局已安装、shell 状态已消失），并经应用自己的载体完成一次 fetch
+  往返。`protocol.spec.ts` 总是运行。
 
 ## 打包
 
@@ -75,8 +81,10 @@ stage 1 Agent Note）。工具链在 stage 11 定案。
 - `src/shared/runtime-state.ts` — main、preload 与 renderer 共享的状态与
   传输类型。
 - `src/renderer/` — 打包后的 renderer 入口（CSP 严格、无 `file://`）；投影
-  运行时生命周期与可恢复的失败界面，并携带 renderer 传输客户端
-  （`transport.ts`）。
+  运行时生命周期与可恢复的失败界面，携带 renderer 传输客户端
+  （`transport.ts`），自 stage 4 起装上 DSH 载体（`dsh-carrier.ts`）并在
+  就绪时把唯一根节点交给固定的 `AppWebEntry`；`node-module-stub.ts` 为
+  loader 在浏览器中惰性的 `node:module` require 提供桩。
 - `scripts/bundle-node.ts`、`node-versions.json` — 构建时按目标下载并做
   sha256 校验的固定 Node。
 - `tests/` — 监督者、smoke、协议、renderer 客户端、broker 与端到端测试。

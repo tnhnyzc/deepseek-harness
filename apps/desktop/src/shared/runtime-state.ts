@@ -1,3 +1,5 @@
+import type { WebBootGraph } from '@deepseek-ai/dsh-client-modules'
+
 /**
  * The supervised runtime lifecycle facts, shared verbatim between the
  * main-process supervisor, the preload bridge, and the renderer. Pure types:
@@ -21,6 +23,21 @@ export interface RuntimeReadyPayload {
   runtimeVersion: string
   dshVersion: string
   capabilities: RuntimeCapabilities
+}
+
+/**
+ * The client-boot artifacts the runtime publishes before it reports ready:
+ * the composed entry graph plus the host-owned boot scripts. The supervisor
+ * caches one payload per runtime generation; the renderer pulls it once
+ * before it starts the DSH client tree.
+ */
+export interface DshBootPayload {
+  /** The composed entry graph — the wire value of `window.__DSH_BOOT__`. */
+  graph: WebBootGraph
+  /** The module-loader facade script (the queue-mode `window.__ModuleLoader__`). */
+  moduleLoaderScript: string
+  /** The parser-preload bundle urls, in the order the boot protocol emits them. */
+  preloadBundles: string[]
 }
 
 /** One observable supervisor fact the renderer projects. */
@@ -64,4 +81,10 @@ export interface DshDesktopApi {
    * rejection of a settled promise.
    */
   openTransport(): Promise<DesktopTransportPort>
+  /**
+   * Pull the current generation's client-boot payload (boot graph, loader
+   * facade, preload bundle urls). Resolves `null` while no payload is
+   * cached for the live runtime (before its first publication).
+   */
+  getBootPayload(): Promise<DshBootPayload | null>
 }

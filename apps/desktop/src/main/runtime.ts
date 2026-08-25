@@ -11,6 +11,7 @@ import { fork, spawnSync, type ChildProcess } from 'node:child_process'
 import { dirname } from 'node:path'
 import { fromOpaqueTransportWire, isTransportMessage, toOpaqueTransportWire } from '@deepseek-ai/dsh-desktop-runtime/transport'
 import type {
+  DshBootPayload,
   RuntimeCapabilities,
   RuntimeReadyPayload,
   RuntimeState,
@@ -65,6 +66,12 @@ export interface RuntimeSupervisor {
   stop(): Promise<void>
   /** User-triggered relaunch from a failed state. */
   requestRestart(): void
+  /**
+   * The current generation's client-boot payload (boot graph, loader
+   * facade, preload bundle urls), published by the runtime before it
+   * reports ready; `undefined` while none is cached for the live child.
+   */
+  bootPayload(): DshBootPayload | undefined
   /** The transport channel relay surface for the dumb broker. */
   transport: RuntimeTransport
 }
@@ -147,6 +154,7 @@ export function createRuntimeSupervisor(options: RuntimeSupervisorOptions): Runt
   let state: RuntimeState = 'stopped'
   let child: ChildProcess | undefined
   let ready: RuntimeReadyPayload | undefined
+  let bootPayload: DshBootPayload | undefined
   let reason: string | undefined
   let autoRetried = false
   let spawnError = false
@@ -216,6 +224,7 @@ export function createRuntimeSupervisor(options: RuntimeSupervisorOptions): Runt
     const close = transportCloseHandler
     transportMessageHandler = undefined
     transportCloseHandler = undefined
+    bootPayload = undefined
     close?.()
     if (state === 'stopping') {
       finishStop()
@@ -249,14 +258,26 @@ export function createRuntimeSupervisor(options: RuntimeSupervisorOptions): Runt
     const wired = child
     wired.stdout?.on('data', (chunk: Buffer) => { diagnostics.push(chunk.toString()) })
     wired.stderr?.on('data', (chunk: Buffer) => { diagnostics.push(chunk.toString()) })
-    wired.on('message', (message: { type?: unknown; runtimeVersion?: unknown; dshVersion?: unknown; capabilities?: unknown } | null) => {
+    wired.on('message', (message: {
+      type?: unknown
+      runtimeVersion?: unknown
+      dshVersion?: unknown
+      capabilities?: unknown
+    } | null) => {
       if (message !== null && typeof message === 'object' && isTransportMessage(message)) {
         // The child edge encodes byte fields; restore them for the broker.
         const decoded = fromOpaqueTransportWire(message)
         if (decoded !== null) transportMessageHandler?.(decoded)
         return
       }
-      if (message === null || typeof message !== 'object' || message.type !== 'runtime.ready' || state !== 'starting') return
+      if (message === null || typeof message !== 'object') return
+      // The boot artifacts precede readiness on the ordered channel; cache
+      // them for the pull before the generation may report ready.
+      if (message.type === 'runtime.boot-graph') {
+        if (state === 'starting') bootPayload = parseBootGraphMessage(message)
+        return
+      }
+      if (message.type !== 'runtime.ready' || state !== 'starting') return
       ready = {
         runtimeVersion: String(message.runtimeVersion),
         dshVersion: String(message.dshVersion),
@@ -282,6 +303,7 @@ export function createRuntimeSupervisor(options: RuntimeSupervisorOptions): Runt
     autoRetried = false
     transition('starting')
     ready = undefined
+    bootPayload = undefined
     reason = undefined
     spawnChild()
   }
@@ -323,5 +345,42 @@ export function createRuntimeSupervisor(options: RuntimeSupervisorOptions): Runt
     closeChannel: () => { sendToChild({ type: 'runtime.transport-closed' }) },
   }
 
-  return { view, start, stop, requestRestart, transport }
+  return {
+    view,
+    start,
+    stop,
+    requestRestart,
+    bootPayload: () => bootPayload,
+    transport,
+  }
+}
+
+/**
+ * Wire validation for the child's boot-artifact publication: the renderer
+ * re-parses the graph through the pinned manifest parser, so the supervisor
+ * only checks the shape it caches and serves.
+ * @param message - the raw `runtime.boot-graph` child message.
+ * @returns the validated payload, or `undefined` when the shape is not the
+ * boot-artifact message (dropped silently; a generation without it simply
+ * reports none).
+ */
+function parseBootGraphMessage(message: unknown): DshBootPayload | undefined {
+  if (typeof message !== 'object' || message === null) return undefined
+  const candidate = message as Record<string, unknown>
+  const graph = candidate.graph
+  if (typeof graph !== 'object' || graph === null) return undefined
+  const graphValue = graph as Record<string, unknown>
+  if (typeof graphValue.rev !== 'string' || !Array.isArray(graphValue.entries)) return undefined
+  for (const row of graphValue.entries) {
+    if (typeof row !== 'object' || row === null) return undefined
+    const entry = row as Record<string, unknown>
+    if (typeof entry.id !== 'string' || typeof entry.url !== 'string' || typeof entry.rev !== 'string') return undefined
+  }
+  if (typeof candidate.moduleLoaderScript !== 'string') return undefined
+  if (!Array.isArray(candidate.preloadBundles) || candidate.preloadBundles.some(url => typeof url !== 'string')) return undefined
+  return {
+    graph: graph as DshBootPayload['graph'],
+    moduleLoaderScript: candidate.moduleLoaderScript,
+    preloadBundles: candidate.preloadBundles as string[],
+  }
 }

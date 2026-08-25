@@ -94,6 +94,12 @@ export class HostConnectionService extends Service implements HostConnectionHand
     options: ConnectionRpcHandlerOptions,
   ): () => Promise<void> {
     assertChannel(channel)
+    const webServer = owner.get('webServer')
+    if (webServer === undefined) {
+      // A non-HTTP host (the desktop carrier) has no route to register; the
+      // channel is simply unreachable over HTTP, not an error.
+      return async () => { /* no route to remove */ }
+    }
     const trustedHosts = options.authority === 'loopback' ? [] : this.trustedHosts
     const fetchHandler = rpcFetchHandler(channel, handler)
     const route: WebRoute = {
@@ -109,7 +115,7 @@ export class HostConnectionService extends Service implements HostConnectionHand
       },
     }
     return owner.effect(
-      () => owner.webServer.register(route),
+      () => webServer.register(route),
       `client-connection: ${channel} rpc channel`,
     )
   }

@@ -3,24 +3,25 @@
   "compilerOptions": {
     "rootDir": ".",
     "outDir": "lib/types",
-    "lib": [
-      "ES2024",
-      "DOM",
-      "DOM.Iterable"
-    ]
+    "tsBuildInfoFile": "lib/tsconfig.host.tsbuildinfo"
   },
-  "references": [
-    { "path": "../desktop-runtime" },
-    { "path": "../../packages/host/apiproxy" },
-    { "path": "../../packages/client/connection/tsconfig.client.json" },
-    { "path": "../../packages/client/connection/tsconfig.host.json" },
-    { "path": "../../packages/client/modules" },
-    { "path": "../../packages/client/web" }
-  ],
   "include": [
-    "src",
+    "src/main",
+    "src/preload",
+    "src/shared",
+    "src/renderer/transport.ts",
     "tests",
     "forge.config.ts",
     "tsdown.config.ts"
+  ],
+  "exclude": [
+    "tests/dsh-carrier.spec.ts"
+  ],
+  "references": [
+    { "path": "../desktop-runtime" },
+    { "path": "../../packages/host/apiproxy" },
+    { "path": "../../packages/client/connection/tsconfig.host.json" },
+    { "path": "../../packages/client/modules" },
+    { "path": "../../packages/client/web" }
   ]
 }

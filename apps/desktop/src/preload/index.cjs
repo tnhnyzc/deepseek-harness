@@ -1,13 +1,16 @@
 /**
  * The desktop bridge: the stage 2 supervision channel (the renderer projects
  * the runtime lifecycle — startup state, ready versions, recoverable failure
- * with a restart action) plus the stage 3 transport open (the renderer
- * receives the half of a MessageChannel the dumb broker relays to the
- * runtime; the port itself carries the DSH client traffic, this file never
- * interprets it). The file is plain CJS because a sandboxed renderer preload
- * cannot use ESM imports; it is checked in as a stable artifact and loaded
- * from this package in both the development layout and the packaged asar.
- * Type contracts live in `src/shared/runtime-state.ts`.
+ * with a restart action), the stage 3 transport open (the renderer receives
+ * the half of a MessageChannel the dumb broker relays to the runtime; the
+ * port itself carries the DSH client traffic, this file never interprets
+ * it), and the stage 4 boot-payload pull (the runtime-published boot graph
+ * and host-owned boot scripts, cached by the supervisor; passed through as
+ * structured data, never interpreted). The file is plain CJS because a
+ * sandboxed renderer preload cannot use ESM imports; it is checked in as a
+ * stable artifact and loaded from this package in both the development
+ * layout and the packaged asar. Type contracts live in
+ * `src/shared/runtime-state.ts`.
  * @module @deepseek-ai/dsh-desktop/src/preload/index
  */
 
@@ -18,6 +21,7 @@ const { contextBridge, ipcRenderer } = require('electron');
 const STATE_CHANNEL = 'dsh-desktop:runtime-state';
 const GET_CHANNEL = 'dsh-desktop:runtime-get';
 const RESTART_CHANNEL = 'dsh-desktop:runtime-restart';
+const BOOT_GRAPH_CHANNEL = 'dsh-desktop:boot-graph';
 const TRANSPORT_OPEN_CHANNEL = 'dsh-desktop:transport-open';
 const TRANSPORT_PORT_CHANNEL = 'dsh-desktop:transport-port';
 const TRANSPORT_DENIED_CHANNEL = 'dsh-desktop:transport-denied';
@@ -25,6 +29,7 @@ const TRANSPORT_OPEN_TIMEOUT_MS = 10000;
 
 const api = {
   getRuntimeState: () => ipcRenderer.invoke(GET_CHANNEL),
+  getBootPayload: () => ipcRenderer.invoke(BOOT_GRAPH_CHANNEL),
   onRuntimeState: (callback) => {
     const listener = (_event, view) => {
       callback(view);

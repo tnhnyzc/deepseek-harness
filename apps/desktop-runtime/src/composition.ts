@@ -22,19 +22,29 @@ import {
 const DESKTOP_PROFILE_NAME = 'web'
 
 /**
- * Rows the desktop overlay disables. `webserver` is the HTTP listener;
- * `web-runtime` serves the frontend dist and provides `webRuntime`;
- * `connection` binds the gateway routes and WebSocket downlinks;
- * `modules` and `client-hmr` declare `webServer` in their plugin injection
- * lists and can never activate without it.
+ * Rows the desktop overlay disables. `webserver` is the HTTP listener and
+ * `web-runtime` serves the frontend dist and provides `webRuntime`; both stay
+ * off — the desktop carrier never listens. `client-hmr` stays off as well:
+ * its browser half opens `EventSource('/plugins/events')` outside the
+ * transport hook, which is a browser-only dev channel production desktop has
+ * no use for.
  */
 const DESKTOP_DISABLED_ROWS = [
   'webserver',
   'web-runtime',
-  'connection',
-  'modules',
   'client-hmr',
 ] as const
+
+/**
+ * The `connection` row's web-profile wiring is HTTP-shaped: its entry inject
+ * waits on `webRuntime` and its config reads `ctx.webRuntime.trustedHosts`.
+ * Desktop replaces both — no `webRuntime` exists, and a local process has no
+ * non-loopback serving authorities. The node half still activates: without a
+ * web server it registers no route and no WebSocket downlink, but it provides
+ * the `connection` service whose in-process RPC interceptor dispatch (the
+ * Typert gateway) the transport's fetch channel consumes.
+ */
+const CONNECTION_ROW_ID = 'connection'
 
 /**
  * The directory-picker replacement: the web composition mounts the `auto`
@@ -111,6 +121,13 @@ export function composeDesktopPatches(
   const overlays: PatchOptions[] = []
   for (const id of DESKTOP_DISABLED_ROWS) {
     if (rows.has(id)) overlays.push({ id, disabled: true })
+  }
+  if (rows.has(CONNECTION_ROW_ID)) {
+    overlays.push({
+      id: CONNECTION_ROW_ID,
+      inject: [],
+      config: { trustedHosts: [] },
+    })
   }
   if (rows.has(DESKTOP_PICKER_ROW_ID)) {
     overlays.push({ id: DESKTOP_PICKER_ROW_ID, disabled: true })

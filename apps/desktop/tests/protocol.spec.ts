@@ -5,6 +5,7 @@
  */
 import { join, normalize } from 'node:path'
 import { describe, it, expect } from 'vitest'
+import { isLoopbackHostname } from '@deepseek-ai/dsh-client-connection/src/loopback-hostname.ts'
 import {
   APP_PROTOCOL,
   APP_PROTOCOL_HOST,
@@ -63,6 +64,16 @@ describe('isAppUrl', () => {
     expect(isAppUrl(`${APP_PROTOCOL}://index.html`)).toBe(false)
     expect(isAppUrl('https://example.com/')).toBe(false)
     expect(isAppUrl('not a url')).toBe(false)
+  })
+})
+
+describe('protocol host and the pinned loopback classifier', () => {
+  // The pinned client derives ctx.connection.isLoopback from
+  // location.hostname through its zero-dependency classifier; UI affordances
+  // and the /api Host fence AND on loopback. A bare custom host would
+  // classify non-loopback and hide them, so the host is a loopback literal.
+  it('classifies the protocol host as loopback to the pinned classifier', () => {
+    expect(isLoopbackHostname(APP_PROTOCOL_HOST)).toBe(true)
   })
 })
 

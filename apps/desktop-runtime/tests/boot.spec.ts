@@ -27,6 +27,13 @@ interface ReadyPayload {
   capabilities: { apiProxy: boolean; httpServer: boolean }
 }
 
+interface BootGraphPayload {
+  type: 'runtime.boot-graph'
+  graph: { rev: string; entries: Array<{ id: string; url: string; rev: string }> }
+  moduleLoaderScript: string
+  preloadBundles: string[]
+}
+
 function forkRuntime(home: string): ChildProcess {
   return fork(ENTRY, [], {
     execPath: process.execPath,
@@ -42,13 +49,15 @@ function forkRuntime(home: string): ChildProcess {
   })
 }
 
-function waitForReady(child: ChildProcess): Promise<ReadyPayload> {
+function waitForReady(child: ChildProcess, messages: unknown[]): Promise<ReadyPayload> {
   return new Promise((resolveReady, reject) => {
     const timer = setTimeout(() => {
       reject(new Error(`runtime did not report ready within ${String(READY_TIMEOUT_MS)} ms`))
     }, READY_TIMEOUT_MS)
     child.on('message', (message: ReadyPayload) => {
-      if (message !== null && typeof message === 'object' && message.type === 'runtime.ready') {
+      if (message === null || typeof message !== 'object') return
+      messages.push(message)
+      if (message.type === 'runtime.ready') {
         clearTimeout(timer)
         resolveReady(message)
       }
@@ -83,11 +92,12 @@ describe.skipIf(!existsSync(ENTRY))('desktop runtime boot', () => {
   let home: string
   let child: ChildProcess
   let ready: ReadyPayload
+  const messages: unknown[] = []
 
   beforeAll(async () => {
     home = mkdtempSync(join(tmpdir(), 'dsh-desktop-runtime-'))
     child = forkRuntime(home)
-    ready = await waitForReady(child)
+    ready = await waitForReady(child, messages)
   }, READY_TIMEOUT_MS + 10_000)
 
   afterAll(async () => {
@@ -105,6 +115,29 @@ describe.skipIf(!existsSync(ENTRY))('desktop runtime boot', () => {
 
   it('mounts no localhost web server', async () => {
     await expect(portIsListening(WEB_FALLBACK_PORT)).resolves.toBe(false)
+  })
+
+  it('publishes the client boot graph before the readiness fact', () => {
+    // The renderer pulls the cached payload only after ready, so the
+    // artifacts must arrive first on the ordered channel.
+    const graphIndex = messages.findIndex(m => (m as { type?: unknown }).type === 'runtime.boot-graph')
+    const readyIndex = messages.findIndex(m => (m as { type?: unknown }).type === 'runtime.ready')
+    expect(graphIndex).toBeGreaterThanOrEqual(0)
+    expect(readyIndex).toBeGreaterThan(graphIndex)
+    const payload = messages[graphIndex] as BootGraphPayload
+    expect(payload.graph.rev).toEqual(expect.any(String))
+    expect(payload.graph.entries.length).toBeGreaterThan(0)
+    for (const entry of payload.graph.entries) {
+      expect(entry.id).toEqual(expect.any(String))
+      expect(entry.url).toEqual(expect.any(String))
+      expect(entry.rev).toEqual(expect.any(String))
+    }
+    // The facade script is the queue-mode module-loader global.
+    expect(payload.moduleLoaderScript).toContain('__ModuleLoader__')
+    // The parser preload carries the bootstrap module and the runtime object
+    // layer — both must exist before the shell boot can create the system.
+    expect(payload.preloadBundles.some(url => url.includes('@deepseek-ai/dsh-client-modules'))).toBe(true)
+    expect(payload.preloadBundles.some(url => url.includes('@deepseek-ai/dsh-client-runtime'))).toBe(true)
   })
 
   it('confines all runtime state to the desktop-managed home', () => {

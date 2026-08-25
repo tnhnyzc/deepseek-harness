@@ -24,6 +24,12 @@
       "path": "../../packages/boot/cmdline"
     },
     {
+      "path": "../../packages/client/connection/tsconfig.host.json"
+    },
+    {
+      "path": "../../packages/client/modules"
+    },
+    {
       "path": "../../packages/bundle/base"
     },
     {

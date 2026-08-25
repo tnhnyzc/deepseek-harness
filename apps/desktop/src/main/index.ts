@@ -19,10 +19,11 @@ import { denySessionPermissions, isTrustedIpcSender, type IpcSender } from './se
 import { createTransportBroker, TRANSPORT_OPEN_CHANNEL, wrapMainPort, type BrokerChannel } from './transport-broker.ts'
 import { createAppWindow } from './window.ts'
 
-/** The renderer channels of the stage 2 supervision bridge. */
+/** The renderer channels of the supervision bridge. */
 const STATE_CHANNEL = 'dsh-desktop:runtime-state'
 const GET_CHANNEL = 'dsh-desktop:runtime-get'
 const RESTART_CHANNEL = 'dsh-desktop:runtime-restart'
+const BOOT_GRAPH_CHANNEL = 'dsh-desktop:boot-graph'
 
 /**
  * Resolve the packaged renderer distribution directory.
@@ -79,6 +80,12 @@ if (!singleInstance) {
       const current = supervisor
       if (current === undefined) throw new Error('desktop shell: runtime supervisor not initialized')
       return current.view()
+    })
+    ipcMain.handle(BOOT_GRAPH_CHANNEL, (event) => {
+      if (!trusted(event)) throw new Error('desktop shell: untrusted IPC sender')
+      const current = supervisor
+      if (current === undefined) throw new Error('desktop shell: runtime supervisor not initialized')
+      return current.bootPayload() ?? null
     })
     ipcMain.handle(RESTART_CHANNEL, (event) => {
       if (!trusted(event)) throw new Error('desktop shell: untrusted IPC sender')

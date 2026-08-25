@@ -15,11 +15,20 @@
     "start": "electron ."
   },
   "devDependencies": {
+    "@deepseek-ai/dsh-client-connection": "workspace:^",
+    "@deepseek-ai/dsh-client-modules": "workspace:^",
+    "@deepseek-ai/dsh-client-web": "workspace:^",
     "@deepseek-ai/dsh-desktop-runtime": "workspace:^",
+    "@deepseek-ai/dsh-host-apiproxy": "workspace:^",
     "@electron-forge/shared-types": "7.11.2",
     "@types/node": "^22.20.0",
+    "@types/react": "~18.3.1",
+    "@types/react-dom": "~18.3.0",
     "electron": "43.4.1",
+    "jsdom": "29.1.1",
     "playwright": "^1.49.0",
+    "react": "^18.2.0",
+    "react-dom": "^18.2.0",
     "tsdown": "^0.22.2",
     "typescript": "^6.0.3",
     "vite": "^6.0.0"

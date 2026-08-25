@@ -521,6 +521,10 @@ export function createDesktopTransport(port: TransportPortLike): DesktopTranspor
       expectedSequence: 0,
       window: new TransportSendWindow(),
     }
+    // `outcome` is observational: a consumer may never await it, in which
+    // case a terminal failure must not surface as an unhandled rejection —
+    // the stream's frames already carry the same failure to the pump.
+    op.outcome.promise.catch(() => undefined)
     streamOps.set(id, op)
     post({ type: 'stream.open', streamId: id, url: new URL(url, TRANSPORT_BASE_URL).href })
     const handle: DesktopStream = {

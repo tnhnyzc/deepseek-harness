@@ -8,7 +8,7 @@
  */
 
 import { fork, type ChildProcess } from 'node:child_process'
-import { existsSync, mkdtempSync } from 'node:fs'
+import { existsSync, mkdtempSync, readFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
@@ -144,6 +144,26 @@ function clientRequest(rpcId: string, method: string, payload: Record<string, un
   return new TextEncoder().encode(JSON.stringify({ type: 'client-request', rpcId, method, payload }))
 }
 
+/** Drive one bodyless GET over the link; resolves the assembled response facts. */
+interface GetFacts { status: number; body: string; contentType?: string }
+
+async function runGet(link: TransportLink, requestId: string, url: string): Promise<GetFacts> {
+  link.send({ type: 'fetch.open', requestId, url, method: 'GET', headers: [] })
+  link.send({ type: 'fetch.request.end', requestId })
+  const head = await link.untilType('fetch.response.head')
+  const contentType = (head.headers as Array<[string, string]>).find(([name]) => name.toLowerCase() === 'content-type')?.[1]
+  const chunks: Uint8Array[] = []
+  for (;;) {
+    const message = await link.next()
+    if (message === undefined) throw new Error(`GET ${requestId}: no further response message`)
+    if (message.type === 'fetch.response.end') break
+    if (message.type === 'fetch.error') throw new Error(`GET ${requestId} failed: ${String(message.code)} ${String(message.message)}`)
+    expect(message.type).toBe('fetch.response.chunk')
+    chunks.push(message.data as Uint8Array)
+  }
+  return { status: head.status as number, body: Buffer.concat(chunks).toString('utf8'), contentType }
+}
+
 describe.skipIf(!existsSync(ENTRY))('desktop transport boot', () => {
   let home: string
   let child: ChildProcess
@@ -185,6 +205,25 @@ describe.skipIf(!existsSync(ENTRY))('desktop transport boot', () => {
 
   it('answers a 404 for an unknown api path with the carrier status', async () => {
     const result = await runFetch(link, 'boot-404', 'http://dsh.local/api/nope.nope', clientRequest('boot-rpc-3', 'nope.nope', {}))
+    expect(result.status).toBe(404)
+  }, 45_000)
+
+  it('serves a client bundle on the fetch channel, byte-identical to the built artifact', async () => {
+    const url = 'http://dsh.local/plugins/@deepseek-ai/dsh-client-modules/client.js'
+    const result = await runGet(link, 'boot-bundle', url)
+    expect(result.status).toBe(200)
+    expect(result.contentType).toContain('text/javascript')
+    // The registry resolves the id to the built bundle; the wire bytes are
+    // that file, not a copy this test has to keep in sync by hand.
+    const expected = readFileSync(
+      resolve(import.meta.dirname, '..', '..', '..', 'packages', 'client', 'modules', 'lib', 'client.js'),
+      'utf8',
+    )
+    expect(result.body).toBe(expected)
+  }, 45_000)
+
+  it('answers a 404 for a bundle the module table does not know', async () => {
+    const result = await runGet(link, 'boot-bundle-404', 'http://dsh.local/plugins/@deepseek-ai/dsh-nope/client.js')
     expect(result.status).toBe(404)
   }, 45_000)
 

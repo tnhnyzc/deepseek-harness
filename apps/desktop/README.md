@@ -11,11 +11,15 @@ over fork IPC, and stops it through the normal DSH disposal path on quit.
 Stage 3 adds the IPC transport: the runtime serves a fetch-compatible
 request/response primitive and an opaque ordered stream over the fork IPC,
 a dumb broker in main relays the frames to the renderer, and the renderer
-reaches both through `window.dshDesktop.openTransport()`. The DSH client
-application tree starts from this renderer in stage 4. See `SPEC.md`
+ reaches both through `window.dshDesktop.openTransport()`. Stage 4 boots
+the pinned DSH client/UI tree from this renderer over that transport: the
+runtime publishes the client boot graph before it reports ready, the
+renderer installs the `__DSH_TRANSPORT__` carrier seam, and `AppWebEntry`
+takes over the single application root — no second UI. See `SPEC.md`
 #6-#11, `ARCHITECTURE.md`, and the
-[upstream contract](./docs/upstream-contract.md) for scope, seams, and the
-open D1, D3, and D4 questions (D2 resolved in stage 3).
+[upstream contract](./docs/upstream-contract.md) for scope, seams, the
+applied local modifications, and the open D4 question (D1, D2, and D3
+resolved in stages 3-4).
 
 ## Build
 
@@ -60,13 +64,18 @@ pnpm test apps/desktop  # supervisor, smoke, and protocol tests
   relay, readiness denial, channel replacement, teardown).
 - `tests/security.spec.ts` and `tests/boundary.spec.ts` always run: the
   IPC sender trust rule, and the SPEC §31 architectural boundary scans
-  (no DSH product imports in main, no electron/Node in the renderer, no
-  business literals in the transport, no HTTP listeners).
+  (no DSH product imports in main, the renderer's DSH imports limited to
+  the boot set, no business literals in the transport, no HTTP listeners).
+- `tests/dsh-carrier.spec.ts` always runs: the `__DSH_TRANSPORT__` carrier
+  against a scripted fake (the seam shape, event-path vs fetch routing in
+  the API client, and the bundle loader's fetch + classic-script
+  execution).
 - `tests/shell.spec.ts` self-skips without the build artifacts (the
   end-to-end runtime block additionally needs the runtime bundle and the
-  bundled Node) or without a GUI session; its smoke block now also
-  round-trips a fetch over the live transport. `protocol.spec.ts` always
-  runs.
+  bundled Node) or without a GUI session; its runtime smoke asserts the
+  stage 4 handoff (the DSH globals installed, the shell state gone) and
+  round-trips a fetch through the app's own carrier. `protocol.spec.ts`
+  always runs.
 
 ## Package
 
@@ -88,8 +97,11 @@ Note). Tooling settles in stage 11.
 - `src/shared/runtime-state.ts` — state and transport types shared by
   main, preload, and renderer.
 - `src/renderer/` — packaged renderer entry (CSP-strict, no `file://`);
-  projects the runtime lifecycle and a recoverable failure screen, and
-  carries the renderer transport client (`transport.ts`).
+  projects the runtime lifecycle and a recoverable failure screen, carries
+  the renderer transport client (`transport.ts`), and — from stage 4 —
+  installs the DSH carrier (`dsh-carrier.ts`) and hands the single root to
+  the pinned `AppWebEntry` at ready; `node-module-stub.ts` stands in for
+  the loader's browser-inert `node:module` require.
 - `scripts/bundle-node.ts`, `node-versions.json` — build-time download and
   sha256 verification of the pinned Node per target.
 - `tests/` — supervisor, smoke, protocol, renderer client, broker, and

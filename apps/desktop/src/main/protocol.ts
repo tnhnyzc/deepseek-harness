@@ -11,8 +11,16 @@ import { net, protocol } from 'electron'
 
 /** The private frontend protocol scheme. */
 export const APP_PROTOCOL = 'dsh-app'
-/** The single protocol host; the main page is dsh-app://app/index.html. */
-export const APP_PROTOCOL_HOST = 'app'
+/**
+ * The single protocol host: a loopback literal. The pinned DSH client
+ * derives `ctx.connection.isLoopback` from `location.hostname` through its
+ * zero-dependency classifier, and UI affordances (native path open, the
+ * configuration plane) AND on that flag — a bare custom host would classify
+ * non-loopback and hide them. `127.0.0.1` is loopback to the unmodified
+ * classifier, and it is the authority the `/api` Host fence sees when the
+ * runtime completes it from the request URL.
+ */
+export const APP_PROTOCOL_HOST = '127.0.0.1'
 /** URL of the main application page. */
 export const APP_HOME_URL = `${APP_PROTOCOL}://${APP_PROTOCOL_HOST}/index.html`
 
