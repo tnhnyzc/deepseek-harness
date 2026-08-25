@@ -110,9 +110,40 @@ describe('createNativeBridge', () => {
     const id = requestId(seam)
     controller.abort()
     await expect(promise).rejects.toMatchObject({ name: 'AbortError' })
-    // The operation is terminal: a late response settles nothing.
+    // The abort propagated to main exactly once, for this request.
+    expect(seam.sent).toEqual([
+      { type: 'native.request', requestId: id, method: 'directory.pick' },
+      { type: 'native.abort', requestId: id, reason: 'the caller aborted' },
+    ])
+    // The operation is terminal: a late response settles nothing and
+    // emits nothing further.
     seam.respond({ type: 'native.response', requestId: id, ok: true, path: '/late' })
     await new Promise<void>((resolve) => { setTimeout(resolve, 10) })
+    expect(seam.sent).toHaveLength(2)
+  })
+
+  it('forwards a string signal reason to the abort message, bounded', async () => {
+    const seam = makeSeam()
+    const controller = new AbortController()
+    const promise = seam.bridge.openPath('/tmp/a', controller.signal)
+    const id = requestId(seam)
+    controller.abort('r'.repeat(1024))
+    await expect(promise).rejects.toMatchObject({ name: 'AbortError' })
+    const abort = seam.sent.find(message => message.type === 'native.abort')
+    expect(abort).toMatchObject({ type: 'native.abort', requestId: id, reason: 'r'.repeat(512) })
+  })
+
+  it('sends no abort when the response wins the race', async () => {
+    const seam = makeSeam()
+    const controller = new AbortController()
+    const promise = seam.bridge.pickDirectory(controller.signal)
+    const id = requestId(seam)
+    seam.respond({ type: 'native.response', requestId: id, ok: true, path: '/won' })
+    await expect(promise).resolves.toBe('/won')
+    // A late abort after the success terminal fabricates no remote cancel.
+    controller.abort()
+    await new Promise<void>((resolve) => { setTimeout(resolve, 10) })
+    expect(seam.sent).toEqual([{ type: 'native.request', requestId: id, method: 'directory.pick' }])
   })
 
   it('ignores a stale response for a request id it never issued', async () => {

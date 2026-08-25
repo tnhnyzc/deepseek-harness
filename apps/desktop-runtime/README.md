@@ -45,8 +45,9 @@ flags), `runtime.shutdown` down (dispose and exit), and
 `runtime.transport-closed` up (a transport channel generation ended). The
 same channel also carries the stage 3 transport frames — fetch and stream
 messages, demultiplexed from the control messages by their type tag — and
-the stage 5 native capability family: `native.request` up (a closed OS
-capability call), `native.response`/`native.cancel` down.
+the stage 5 native capability family: `native.request`/`native.abort` up
+(a closed OS capability call; the caller's abandonment of an in-flight
+request), `native.response`/`native.cancel` down.
 
 ## Test
 
@@ -66,7 +67,8 @@ request/response client (ids, the whole-lifetime abort terminal, stale and
 duplicate refusal, teardown settlement); `directory-picker.spec.ts` the
 provider; `native-boot.spec.ts` plays the Electron main side against the
 built runtime over real fork IPC (pick success/cancel, open
-success/failure, cancel mapping, abort with the late result dropped) and
+success/failure, cancel mapping, in-flight pick and open aborts each
+crossing a real `native.abort` with the late result dropped) and
 self-skips the same way.
 
 ## Layout

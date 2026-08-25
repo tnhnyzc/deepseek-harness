@@ -11,7 +11,7 @@
 
 import { dialog, shell } from 'electron'
 import type { BrowserWindow } from 'electron'
-import type { NativeErrorCode } from '@deepseek-ai/dsh-desktop-runtime/native'
+import { NATIVE_MAX_DIAGNOSTIC_CHARS, type NativeErrorCode } from '@deepseek-ai/dsh-desktop-runtime/native'
 
 /** One capability invocation's failure, tagged with the closed channel code. */
 export class NativeCapabilityError extends Error {
@@ -103,8 +103,8 @@ export function createNativeCapabilities(ports: NativeCapabilityPorts = electron
   }
 }
 
-/** The diagnostic bound: a channel message never carries more than this. */
-export const MAX_DIAGNOSTIC_CHARS = 512
+/** The diagnostic bound: a channel message never carries more than this (the protocol's own constant). */
+export const MAX_DIAGNOSTIC_CHARS = NATIVE_MAX_DIAGNOSTIC_CHARS
 
 /**
  * Reduce one thrown value to a bounded, redaction-safe message.

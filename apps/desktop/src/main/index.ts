@@ -15,7 +15,7 @@ import {
   runtimeEntryPath,
 } from './runtime-paths.ts'
 import { createNativeCapabilities } from './native-capabilities.ts'
-import { createNativeChannel } from './native-channel.ts'
+import { createNativeChannel, type NativeChannelOptions } from './native-channel.ts'
 import { createRuntimeSupervisor, type RuntimeSupervisor, type RuntimeStateView } from './runtime.ts'
 import { denySessionPermissions, isTrustedIpcSender, type IpcSender } from './security.ts'
 import { createTransportBroker, TRANSPORT_OPEN_CHANNEL, wrapMainPort, type BrokerChannel } from './transport-broker.ts'
@@ -106,15 +106,28 @@ if (!singleInstance) {
         return { local: wrapMainPort(channel.port1), remote: channel.port2 }
       },
     })
-    // The native capability channel: runtime requests are validated and
-    // dispatched to the OS registry; the renderer never touches this path.
-    const nativeChannel = createNativeChannel({
+    // The native capability channel is per-generation, like the transport
+    // channel: a generation's channel owns its pending set, its teardown
+    // settles that generation's requests, and a fresh channel owns the next
+    // generation (the supervisor clears the message handler before the
+    // close handler runs, so the re-registration below survives). The
+    // narrowed local keeps the channel's closures off the reassigned let.
+    const runtime = supervisor
+    const nativeChannelOptions: NativeChannelOptions = {
       capabilities: createNativeCapabilities(),
-      send: (message) => { supervisor?.native.send(message) },
+      send: (message) => { runtime.native.send(message) },
       getWindow: () => BrowserWindow.getAllWindows()[0],
+    }
+    let nativeChannel = createNativeChannel(nativeChannelOptions)
+    const armNativeChannel = (): void => {
+      runtime.native.onMessage((value) => { nativeChannel.handle(value) })
+    }
+    armNativeChannel()
+    runtime.native.onClose(() => {
+      nativeChannel.teardown('runtime generation ended')
+      nativeChannel = createNativeChannel(nativeChannelOptions)
+      armNativeChannel()
     })
-    supervisor.native.onMessage((value) => { nativeChannel.handle(value) })
-    supervisor.native.onClose(() => { nativeChannel.teardown('runtime generation ended') })
     ipcMain.on(TRANSPORT_OPEN_CHANNEL, (event) => {
       if (!trusted(event)) return
       broker.handleOpenRequest(event.sender)

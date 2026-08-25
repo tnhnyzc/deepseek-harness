@@ -37,8 +37,9 @@ pnpm run build          # tsc -b + root tsdown emits the four dist entries
 上行 `runtime.ready`（版本加能力标志）、下行 `runtime.shutdown`（处置并
 退出）、上行 `runtime.transport-closed`（一个传输通道代结束）。同一通道还
 承载 stage 3 的传输帧——fetch 与流消息，靠类型标签与控制消息解复用——以及
-stage 5 的原生能力族：上行 `native.request`（一个封闭的 OS 能力调用）、
-下行 `native.response`/`native.cancel`。
+stage 5 的原生能力族：上行 `native.request`/`native.abort`（一个封闭的 OS
+能力调用；调用方对一个在途请求的放弃）、下行
+`native.response`/`native.cancel`。
 
 ## 测试
 
@@ -55,8 +56,8 @@ pnpm test apps/desktop-runtime
 `native-bridge.spec.ts` 锚定子进程侧请求/响应客户端（id、贯穿整个生命
 周期的 abort 终结态、过期与重复拒绝、拆除结算）；`directory-picker.spec.ts`
 锚定提供方；`native-boot.spec.ts` 在真实 fork IPC 上以构建产物扮演 Electron
-main 侧（选择成功/取消、打开成功/失败、取消映射、abort 并丢弃迟到结果），
-同样自跳过。
+main 侧（选择成功/取消、打开成功/失败、取消映射、在选择与打开两种在途
+abort 上各自穿过一条真实的 `native.abort` 并丢弃迟到结果），同样自跳过。
 
 ## 布局
 

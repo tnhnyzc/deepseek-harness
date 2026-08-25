@@ -9,7 +9,7 @@
 
 import { fork, spawnSync, type ChildProcess } from 'node:child_process'
 import { dirname } from 'node:path'
-import { isNativeRequestMessage } from '@deepseek-ai/dsh-desktop-runtime/native'
+import { isNativeAbortMessage, isNativeRequestMessage } from '@deepseek-ai/dsh-desktop-runtime/native'
 import { fromOpaqueTransportWire, isTransportMessage, toOpaqueTransportWire } from '@deepseek-ai/dsh-desktop-runtime/transport'
 import type {
   DshBootPayload,
@@ -60,16 +60,17 @@ export interface RuntimeTransport {
 
 /**
  * The supervisor's half of the native capability channel: the child issues
- * `native.request` messages over the same fork IPC channel, and responses
- * and cancels ride back through `send`. Like the transport relay, handlers
- * stay installed across generations; child exit fires `onClose`.
+ * `native.request` and `native.abort` messages over the same fork IPC
+ * channel, and responses and cancels ride back through `send`. Like the
+ * transport relay, the close handler stays installed across generations;
+ * child exit fires `onClose`, ending the generation's channel.
  */
 interface RuntimeNative {
   /** Send one native response or cancel to the live child; a no-op when not connected. */
   send(value: object): void
-  /** Relay inbound native requests (transport and control messages are not included). */
+  /** Relay inbound native requests and aborts (transport and control messages are not included). */
   onMessage(handler: (value: object) => void): void
-  /** Fired once when the current child exits, tearing the channel down. */
+  /** Fired once when the current child exits, tearing the generation's channel down. */
   onClose(handler: () => void): void
 }
 
@@ -294,8 +295,8 @@ export function createRuntimeSupervisor(options: RuntimeSupervisorOptions): Runt
         if (decoded !== null) transportMessageHandler?.(decoded)
         return
       }
-      if (message !== null && typeof message === 'object' && isNativeRequestMessage(message)) {
-        // The native capability channel: OS capability requests only.
+      if (message !== null && typeof message === 'object' && (isNativeRequestMessage(message) || isNativeAbortMessage(message))) {
+        // The native capability channel: OS capability requests and caller aborts only.
         nativeMessageHandler?.(message)
         return
       }

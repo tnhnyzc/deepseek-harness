@@ -117,7 +117,7 @@ const NATIVE_FILES = [
 ]
 
 /** The native protocol message tags: renderer-side knowledge of them is a bridge by definition. */
-const NATIVE_PROTOCOL_TAGS = ['native.request', 'native.response', 'native.cancel', 'directory.pick', 'path.open']
+const NATIVE_PROTOCOL_TAGS = ['native.request', 'native.response', 'native.cancel', 'native.abort', 'directory.pick', 'path.open']
 
 const HTTP_LISTENER = /createServer\s*\(|new\s+(?:net|http|https)\.Server/
 

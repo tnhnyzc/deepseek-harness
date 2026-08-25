@@ -7,12 +7,15 @@
 import { describe, expect, it } from 'vitest'
 import {
   NATIVE_ERROR_CODES,
+  NATIVE_MAX_DIAGNOSTIC_CHARS,
   NATIVE_MAX_PATH_LENGTH,
   NATIVE_METHODS,
   NativeProtocolError,
+  isNativeAbortMessage,
   isNativeCancelMessage,
   isNativeRequestMessage,
   isNativeResponseMessage,
+  parseNativeAbort,
   parseNativeCancel,
   parseNativeRequest,
   parseNativeResponse,
@@ -40,6 +43,11 @@ describe('isNative*Message demux guards', () => {
     expect(isNativeCancelMessage({ type: 'native.cancel' })).toBe(true)
     expect(isNativeCancelMessage({ type: 'native.request' })).toBe(false)
     expect(isNativeCancelMessage(undefined)).toBe(false)
+    expect(isNativeAbortMessage({ type: 'native.abort' })).toBe(true)
+    expect(isNativeAbortMessage({ type: 'native.cancel' })).toBe(false)
+    expect(isNativeAbortMessage({ type: 'native.request' })).toBe(false)
+    expect(isNativeAbortMessage(null)).toBe(false)
+    expect(isNativeAbortMessage('native.abort')).toBe(false)
   })
 })
 
@@ -104,9 +112,15 @@ describe('parseNativeResponse', () => {
     ['an unknown code', { type: 'native.response', requestId: 'a', ok: false, code: 'session-lost', message: 'm' }],
     ['a missing failure message', { type: 'native.response', requestId: 'a', ok: false, code: 'open-failed' }],
     ['a non-string failure message', { type: 'native.response', requestId: 'a', ok: false, code: 'open-failed', message: 3 }],
+    ['an over-bound failure message', { type: 'native.response', requestId: 'a', ok: false, code: 'open-failed', message: 'm'.repeat(NATIVE_MAX_DIAGNOSTIC_CHARS + 1) }],
     ['a non-string chooser path', { type: 'native.response', requestId: 'a', ok: true, path: 3 }],
   ])('refuses %s', (_label, value) => {
     expect(() => parseNativeResponse(value)).toThrow(NativeProtocolError)
+  })
+
+  it('accepts a failure message at the exact bound', () => {
+    const message = 'm'.repeat(NATIVE_MAX_DIAGNOSTIC_CHARS)
+    expect(parseNativeResponse({ type: 'native.response', requestId: 'a', ok: false, code: 'open-failed', message }).message).toBe(message)
   })
 })
 
@@ -122,7 +136,37 @@ describe('parseNativeCancel', () => {
     ['a missing request id', { type: 'native.cancel', reason: 'r' }],
     ['an empty reason', { type: 'native.cancel', requestId: 'a', reason: '' }],
     ['a missing reason', { type: 'native.cancel', requestId: 'a' }],
+    ['an over-bound reason', { type: 'native.cancel', requestId: 'a', reason: 'r'.repeat(NATIVE_MAX_DIAGNOSTIC_CHARS + 1) }],
   ])('refuses %s', (_label, value) => {
     expect(() => parseNativeCancel(value)).toThrow(NativeProtocolError)
+  })
+
+  it('accepts a reason at the exact bound', () => {
+    const reason = 'r'.repeat(NATIVE_MAX_DIAGNOSTIC_CHARS)
+    expect(parseNativeCancel({ type: 'native.cancel', requestId: 'a', reason }).reason).toBe(reason)
+  })
+})
+
+describe('parseNativeAbort', () => {
+  it('parses an abort with a reason', () => {
+    expect(parseNativeAbort({ type: 'native.abort', requestId: 'a', reason: 'the caller aborted' }))
+      .toEqual({ type: 'native.abort', requestId: 'a', reason: 'the caller aborted' })
+  })
+
+  it.each([
+    ['a non-object', null],
+    ['the wrong type tag', { type: 'native.cancel', requestId: 'a', reason: 'r' }],
+    ['a missing request id', { type: 'native.abort', reason: 'r' }],
+    ['an empty request id', { type: 'native.abort', requestId: '', reason: 'r' }],
+    ['an empty reason', { type: 'native.abort', requestId: 'a', reason: '' }],
+    ['a missing reason', { type: 'native.abort', requestId: 'a' }],
+    ['an over-bound reason', { type: 'native.abort', requestId: 'a', reason: 'r'.repeat(NATIVE_MAX_DIAGNOSTIC_CHARS + 1) }],
+  ])('refuses %s', (_label, value) => {
+    expect(() => parseNativeAbort(value)).toThrow(NativeProtocolError)
+  })
+
+  it('accepts a reason at the exact bound', () => {
+    const reason = 'r'.repeat(NATIVE_MAX_DIAGNOSTIC_CHARS)
+    expect(parseNativeAbort({ type: 'native.abort', requestId: 'a', reason }).reason).toBe(reason)
   })
 })

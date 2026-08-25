@@ -9,6 +9,11 @@
  * message names or constrains any DSH business concept. The renderer never
  * sees this channel: requests originate only from the supervised runtime
  * child, and Electron main answers with OS capability vocabulary only.
+ * Cancellation is directional and per-concept: `native.abort` (child→main)
+ * tells main that the caller abandoned one request — main marks that
+ * request logically terminal and drops its late OS completion, which a
+ * physical native dialog may still finish in the background; `native.cancel`
+ * (main→child) tells the runtime that the channel generation is dying.
  * @module @deepseek-ai/dsh-desktop-runtime/native
  */
 
@@ -21,6 +26,14 @@ export type NativeMethod = 'directory.pick' | 'path.open'
  * protocol violation, refused before any OS API is invoked.
  */
 export const NATIVE_MAX_PATH_LENGTH = 32_768
+
+/**
+ * The bound on every free-text field of the protocol (failure messages,
+ * cancel and abort reasons): channel diagnostics stay small and
+ * redaction-safe. Parsers enforce it at the wire boundary — a producing
+ * side truncating its own outbound value is not the contract.
+ */
+export const NATIVE_MAX_DIAGNOSTIC_CHARS = 512
 
 /** Closed failure vocabulary of the native channel (no DSH business codes). */
 export type NativeErrorCode =
@@ -62,6 +75,7 @@ export interface NativeFailure {
   requestId: string
   ok: false
   code: NativeErrorCode
+  /** Bounded to {@link NATIVE_MAX_DIAGNOSTIC_CHARS}. */
   message: string
 }
 
@@ -71,10 +85,24 @@ export type NativeResponse = NativeSuccess | NativeFailure
 export interface NativeCancel {
   type: 'native.cancel'
   requestId: string
+  /** Bounded to {@link NATIVE_MAX_DIAGNOSTIC_CHARS}. */
   reason: string
 }
 
-export type NativeMessage = NativeRequest | NativeResponse | NativeCancel
+/**
+ * Child→main caller cancellation for one pending request: the DSH caller's
+ * AbortSignal terminated the operation, so main marks the request logically
+ * terminal and must drop its late OS completion (a visible native dialog may
+ * still finish in the background; its result is discarded, not sent).
+ */
+export interface NativeAbort {
+  type: 'native.abort'
+  requestId: string
+  /** Bounded to {@link NATIVE_MAX_DIAGNOSTIC_CHARS}. */
+  reason: string
+}
+
+export type NativeMessage = NativeRequest | NativeResponse | NativeCancel | NativeAbort
 
 /** Error thrown when a received value is not a well-formed native message. */
 export class NativeProtocolError extends Error {
@@ -137,6 +165,19 @@ export function isNativeCancelMessage(value: unknown): value is { type: 'native.
   return value !== null && typeof value === 'object' && (value as { type?: unknown }).type === 'native.cancel'
 }
 
+/** Cheap main-side demux guard for the caller-abort message. */
+export function isNativeAbortMessage(value: unknown): value is { type: 'native.abort' } {
+  return value !== null && typeof value === 'object' && (value as { type?: unknown }).type === 'native.abort'
+}
+
+/** The bounded free-text check: a non-empty string within the diagnostic bound. */
+function readBoundedText(value: unknown, label: string): string {
+  if (typeof value !== 'string' || value === '') fail(`${label}: expected a non-empty string`)
+  return value.length <= NATIVE_MAX_DIAGNOSTIC_CHARS
+    ? value
+    : fail(`${label}: ${String(value.length)} characters exceed the ${String(NATIVE_MAX_DIAGNOSTIC_CHARS)} character bound`)
+}
+
 /**
  * Validate one child→main request into a typed message. This is the wire
  * boundary: the registry parses every inbound request through it, and a
@@ -182,7 +223,7 @@ export function parseNativeResponse(value: unknown): NativeResponse {
       requestId,
       ok: false,
       code: readErrorCode(raw.code),
-      message: typeof raw.message === 'string' ? raw.message : fail('native.response.message: expected a string'),
+      message: readBoundedText(raw.message, 'native.response.message'),
     }
   }
   fail('native.response.ok: expected a boolean')
@@ -200,6 +241,24 @@ export function parseNativeCancel(value: unknown): NativeCancel {
   return {
     type: 'native.cancel',
     requestId: readId(raw.requestId, 'native.cancel.requestId'),
-    reason: typeof raw.reason === 'string' && raw.reason !== '' ? raw.reason : fail('native.cancel.reason: expected a non-empty string'),
+    reason: readBoundedText(raw.reason, 'native.cancel.reason'),
+  }
+}
+
+/**
+ * Validate one child→main caller abort into a typed message. The channel
+ * parses every inbound abort through it; a malformed abort is dropped,
+ * never treated as a settlement.
+ * @param value - the structured-cloned abort value.
+ * @returns the validated abort.
+ */
+export function parseNativeAbort(value: unknown): NativeAbort {
+  if (value === null || typeof value !== 'object') fail('message: expected an object')
+  const raw = value as Record<string, unknown>
+  if (raw.type !== 'native.abort') fail('type: expected "native.abort"')
+  return {
+    type: 'native.abort',
+    requestId: readId(raw.requestId, 'native.abort.requestId'),
+    reason: readBoundedText(raw.reason, 'native.abort.reason'),
   }
 }

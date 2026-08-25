@@ -909,15 +909,17 @@ consumer, and the stage 5 method set is closed to what exists.
 The private runtime↔main channel for OS capability calls. It rides the
 supervisor's fork IPC (never the renderer, never the stage 3 transport
 port, never localhost) and is separate from it: the supervisor demuxes
-`native.request` off the child channel before the transport relay
-(`apps/desktop/src/main/runtime.ts`), and the runtime child's bridge
-demuxes the reverse direction the same way
+`native.request` and `native.abort` off the child channel before the
+transport relay (`apps/desktop/src/main/runtime.ts`), and the runtime
+child's bridge demuxes the reverse direction the same way
 (`apps/desktop-runtime/src/transport-process.ts` ignores it by the
 transport discriminant).
 
 Closed wire contract (`apps/desktop-runtime/src/native.ts`, shipped as the
 `@deepseek-ai/dsh-desktop-runtime/native` subpath; the main face imports
-it, the runtime face imports it, and nothing else may):
+it, the runtime face imports it, and nothing else may). Every free-text
+field is bounded to `NATIVE_MAX_DIAGNOSTIC_CHARS` (512 characters) and
+enforced by the parsers at the wire boundary:
 
 - `native.request { requestId, method: 'directory.pick' }` /
   `{ requestId, method: 'path.open', path }` — child→main. The method set
@@ -928,9 +930,22 @@ it, the runtime face imports it, and nothing else may):
   `{ requestId, ok: false, code, message }` — main→child. The failure
   vocabulary is closed: `unknown-method`, `malformed-request`,
   `dialog-failed`, `open-failed`, `cancelled`. Messages carry no DSH
-  business vocabulary; `message` is bounded (512 chars).
+  business vocabulary.
 - `native.cancel { requestId, reason }` — main→child, sent on generation
   teardown for every still-pending request.
+- `native.abort { requestId, reason }` — child→main, sent once when the
+  DSH caller's `AbortSignal` terminates an in-flight request. It is the
+  caller-cancellation direction; `native.cancel` is the
+  generation-teardown direction, and the two are never merged.
+
+Logical termination ends a request without a response: `native.abort`
+(the caller gave up) marks the request terminal at main the moment it
+arrives, and teardown's `native.cancel` settles the runtime side's
+operation as `cancelled`. In both cases the physical OS operation — a
+visible native dialog in particular, which cannot be portably dismissed
+from main — may still finish in the background; its late result is
+dropped (at main for an abort, at the runtime for a cancel) rather than
+emitted as a stale response.
 
 Roles:
 
@@ -941,16 +956,24 @@ Roles:
   `dialog.showOpenDialog({ properties: ['openDirectory'] })` and
   `shell.openPath(path)` over an injectable port — and settles each
   request with exactly one response (a success, a closed-code failure, or
-  a teardown cancel). Duplicate in-flight ids settle once; a torn-down
-  generation drops late results.
+  a teardown cancel). A `native.abort` marks the request logically
+  terminal immediately and drops its late result; a malformed abort is
+  dropped without touching any request; duplicate in-flight ids settle
+  once; a torn-down generation drops late results. The channel is
+  per-generation: the app recreates it on every supervisor close
+  (`apps/desktop/src/main/index.ts`), so a dead generation can never
+  receive or answer a new one's traffic.
 - Runtime side: `createNativeBridge`
   (`apps/desktop-runtime/src/native-bridge.ts`) issues unique request ids,
   holds the caller's `AbortSignal` for the operation's whole lifetime
   (abort ⇒ `AbortError` terminal, operation terminal, late messages
-  ignored), and settles every pending operation with `channel-closed` on
-  dispose or supervisor disconnect. `NativeError` codes map onto DSH
-  business codes at the seam: abort ⇒ `cancelled`, anything else ⇒
-  `internal` (`api-proxy.ts` `openTarget`/`pickDirectory` mapping).
+  ignored, and — once the request was dispatched — one `native.abort`
+  crossing the caller's abandonment to main; a never-dispatched request
+  fabricates no remote cancel), and settles every pending operation with
+  `channel-closed` on dispose or supervisor disconnect. `NativeError`
+  codes map onto DSH business codes at the seam: abort ⇒ `cancelled`,
+  anything else ⇒ `internal` (`api-proxy.ts`
+  `openTarget`/`pickDirectory` mapping).
 
 Vocabulary boundary: Electron main may know the OS capability names
 (`directory.pick`, `path.open`) and nothing about DSH; the runtime child
@@ -962,8 +985,15 @@ plus the renderer's ignorance).
 Acceptance: `apps/desktop-runtime/tests/native-boot.spec.ts` forks the
 built runtime, plays the main side over the child IPC, and pins
 `host.describe.canOpenPath`, pick success/cancel, open success/failure,
-the main-issued cancel mapping, client-abort termination with the late
-result dropped, and healthy reuse after the abort.
+the main-issued cancel mapping, client-abort termination of an in-flight
+pick and of an in-flight open (each crossing a real `native.abort` whose
+late result is dropped), and healthy reuse after the abort.
+`apps/desktop/tests/native-integration.spec.ts` forks the same runtime
+but answers it with the REAL main-side channel over a controllable OS
+port, pinning the caller-abort end-to-end: the request leaves the
+main-side pending set immediately on `native.abort`, the late dialog
+completion emits nothing, and the channel stays healthy for the next
+request.
 
 ---
 

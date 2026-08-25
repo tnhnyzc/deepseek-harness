@@ -57,8 +57,12 @@ pnpm test apps/desktop  # supervisor, smoke, and protocol tests
   丢弃与合成尺寸拒绝、双向中继、就绪拒绝、通道替换、拆除）。
 - `tests/native-capabilities.spec.ts` 与 `tests/native-channel.spec.ts`
   总是运行：OS 能力注册表与 main 侧通道对注入的 fake（封闭的成功/取消/
-  失败映射、有界的诊断、重复拒绝、畸形请求分类，以及拆除时对每个在途
-  请求的取消）。
+  失败映射、有界的诊断、重复拒绝、畸形请求分类、拆除时对每个在途
+  请求的取消，以及把迟到 OS 结果丢弃的调用方 abort 终结）。
+- `tests/native-integration.spec.ts` 在缺少运行时 bundle 时自跳过：fork
+  构建好的运行时，并用真实的 main 侧通道加可受控的 OS 端口应答它——选择
+  正常结算，调用方 abort 立即清空 main 侧在途集合、迟到的对话框完成不
+  发出任何东西，通道对下一个请求保持健康。
 - `tests/security.spec.ts` 与 `tests/boundary.spec.ts` 总是运行：IPC 发端
   信任规则，以及 SPEC §31 架构边界扫描（main 无 DSH 产品导入、renderer 的
   DSH 导入限于 boot 集合、传输与原生能力层无业务字面量、renderer 与
@@ -83,8 +87,9 @@ stage 1 Agent Note）。工具链在 stage 11 定案。
 - `src/main/` — Electron main 进程：窗口、`dsh-app://` 协议、session 加固、
   运行时监督者（`runtime.ts`、`runtime-paths.ts`）、哑传输 broker
   （`transport-broker.ts`），以及原生能力边界（`native-capabilities.ts`、
-  `native-channel.ts`：封闭的 OS 注册表与经 supervisor fork IPC 的
-  请求/响应通道）。Node API 不达 renderer。
+  `native-channel.ts`：封闭的 OS 注册表与经 supervisor fork IPC 的按代际
+  请求/响应通道，调用方 abort 把其请求逻辑终结、迟到的 OS 完成被
+  丢弃）。Node API 不达 renderer。
 - `src/preload/index.cjs` — 签入的 CJS 监督桥（沙箱 preload 无法加载 ESM）；
   状态视图、状态事件、重启，以及把活传输 port 交给 renderer 的
   `openTransport()`。

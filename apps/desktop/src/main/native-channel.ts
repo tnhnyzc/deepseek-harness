@@ -5,12 +5,18 @@
  * request with exactly one response — a success, a closed-code failure, or
  * (on generation teardown) a cancel for every still-pending request. A
  * request is a capability invocation, not a business operation: this module
- * knows the closed method set and nothing about DSH. Late results of a
- * torn-down generation settle nothing and are dropped.
+ * knows the closed method set and nothing about DSH. Two kinds of logical
+ * termination end a request without a response: a runtime-issued
+ * `native.abort` (the caller abandoned it) and generation teardown — in
+ * both cases the OS operation may still finish in the background (a visible
+ * native dialog cannot be portably dismissed), and its late result is
+ * dropped here rather than emitted as a stale response.
  * @module @deepseek-ai/dsh-desktop/src/main/native-channel
  */
 
 import {
+  isNativeAbortMessage,
+  parseNativeAbort,
   parseNativeRequest,
   type NativeErrorCode,
   type NativeMessage,
@@ -31,7 +37,7 @@ export interface NativeChannelOptions {
 
 /** The main side of the desktop native capability channel. */
 export interface NativeChannel {
-  /** Validate and dispatch one raw inbound request from the runtime child. */
+  /** Validate and dispatch one raw inbound message (request or abort) from the runtime child. */
   handle(raw: unknown): void
   /** Generation teardown: cancel every pending request; ignore late results. */
   teardown(reason: string): void
@@ -53,8 +59,10 @@ export function createNativeChannel(options: NativeChannelOptions): NativeChanne
   let active = true
 
   const finish = (requestId: string, response: NativeResponse): void => {
+    // Aborted or torn-down requests are already out of the pending set:
+    // their late OS completion is dropped, never emitted as a stale response.
+    if (!pending.has(requestId)) return
     pending.delete(requestId)
-    if (!active) return
     options.send(response)
   }
 
@@ -76,6 +84,19 @@ export function createNativeChannel(options: NativeChannelOptions): NativeChanne
 
   const handle = (raw: unknown): void => {
     if (!active) return
+    if (isNativeAbortMessage(raw)) {
+      // Caller cancellation: the request becomes logically terminal now.
+      // Nothing is sent back; the late OS completion is dropped by finish.
+      let abort
+      try {
+        abort = parseNativeAbort(raw)
+      } catch {
+        return // A malformed abort settles nothing: fail closed.
+      }
+      // Unknown or stale ids are a no-op: deletion of an absent entry.
+      pending.delete(abort.requestId)
+      return
+    }
     let request
     try {
       request = parseNativeRequest(raw)

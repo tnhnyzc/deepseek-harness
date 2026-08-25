@@ -163,4 +163,73 @@ describe('createNativeChannel', () => {
     harness.channel.teardown('r'.repeat(MAX_DIAGNOSTIC_CHARS * 2))
     expect(harness.sent[0]).toEqual({ type: 'native.cancel', requestId: 'a', reason: 'r'.repeat(MAX_DIAGNOSTIC_CHARS) })
   })
+
+  it('marks a pending pick logically terminal on a caller abort and drops the late dialog result', async () => {
+    let settlePick: (value: string | null) => void = () => undefined
+    const harness = makeHarness({
+      pickDirectory: () => new Promise<string | null>((resolve) => { settlePick = resolve }),
+      openPath: async () => undefined,
+    })
+    harness.channel.handle({ type: 'native.request', requestId: 'a', method: 'directory.pick' })
+    await vi.waitFor(() => { expect(harness.channel.pendingIds()).toEqual(['a']) })
+    harness.channel.handle({ type: 'native.abort', requestId: 'a', reason: 'the caller aborted' })
+    // The request leaves the pending set immediately; nothing is sent back.
+    expect(harness.channel.pendingIds()).toEqual([])
+    expect(harness.sent).toEqual([])
+    // The dialog is allowed to finish in the background: its result is
+    // dropped, never emitted as a stale response.
+    settlePick('/late')
+    await new Promise<void>((resolve) => { setTimeout(resolve, 10) })
+    expect(harness.sent).toEqual([])
+    // A duplicate abort is a no-op.
+    harness.channel.handle({ type: 'native.abort', requestId: 'a', reason: 'the caller aborted' })
+    expect(harness.sent).toEqual([])
+  })
+
+  it('marks a pending open logically terminal on a caller abort and drops the late completion', async () => {
+    let settleOpen: () => void = () => undefined
+    const harness = makeHarness({
+      pickDirectory: async () => null,
+      openPath: () => new Promise<void>((resolve) => { settleOpen = resolve }),
+    })
+    harness.channel.handle({ type: 'native.request', requestId: 'b', method: 'path.open', path: '/tmp/doc' })
+    await vi.waitFor(() => { expect(harness.channel.pendingIds()).toEqual(['b']) })
+    harness.channel.handle({ type: 'native.abort', requestId: 'b', reason: 'the caller aborted' })
+    expect(harness.channel.pendingIds()).toEqual([])
+    settleOpen()
+    await new Promise<void>((resolve) => { setTimeout(resolve, 10) })
+    expect(harness.sent).toEqual([])
+  })
+
+  it('lets an unknown abort leave unrelated requests untouched', async () => {
+    const harness = makeHarness()
+    // Unknown id: no effect, nothing sent.
+    harness.channel.handle({ type: 'native.abort', requestId: 'never-issued', reason: 'the caller aborted' })
+    expect(harness.sent).toEqual([])
+    // A live request still settles normally after a stale abort for its id.
+    harness.channel.handle({ type: 'native.request', requestId: 'a', method: 'directory.pick' })
+    harness.channel.handle({ type: 'native.abort', requestId: 'a', reason: 'the caller aborted' })
+    expect(harness.channel.pendingIds()).toEqual([])
+    harness.channel.handle({ type: 'native.request', requestId: 'c', method: 'directory.pick' })
+    await vi.waitFor(() => { expect(harness.sent).toHaveLength(1) })
+    expect(harness.sent[0]).toEqual({ type: 'native.response', requestId: 'c', ok: true, path: '/tmp/chosen' })
+  })
+
+  it('drops a malformed abort without touching the pending request', async () => {
+    let settlePick: (value: string | null) => void = () => undefined
+    const harness = makeHarness({
+      pickDirectory: () => new Promise<string | null>((resolve) => { settlePick = resolve }),
+      openPath: async () => undefined,
+    })
+    harness.channel.handle({ type: 'native.request', requestId: 'a', method: 'directory.pick' })
+    await vi.waitFor(() => { expect(harness.channel.pendingIds()).toEqual(['a']) })
+    harness.channel.handle({ type: 'native.abort', requestId: 'a' })
+    harness.channel.handle({ type: 'native.abort', requestId: 'a', reason: 'r'.repeat(MAX_DIAGNOSTIC_CHARS + 1) })
+    expect(harness.channel.pendingIds()).toEqual(['a'])
+    expect(harness.sent).toEqual([])
+    // The request still settles normally once the dialog completes.
+    settlePick('/tmp/chosen')
+    await vi.waitFor(() => { expect(harness.sent).toHaveLength(1) })
+    expect(harness.sent[0]).toEqual({ type: 'native.response', requestId: 'a', ok: true, path: '/tmp/chosen' })
+  })
 })

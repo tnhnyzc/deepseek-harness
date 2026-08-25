@@ -4,9 +4,12 @@
  * carries a unique request id and the caller's AbortSignal for its whole
  * lifetime — an abort settles the operation with the abort terminal, the
  * operation becomes terminal, and any late response or cancel is ignored.
- * Channel death (the supervisor disconnecting) settles every pending
- * operation with the channel-closed failure; no pending operation survives
- * the channel.
+ * A mid-flight abort also tells main the request is abandoned (`native.abort`),
+ * so main's logical request ends with the caller even though the OS
+ * operation — a visible native dialog in particular — may still finish in
+ * the background with its result dropped. Channel death (the supervisor
+ * disconnecting) settles every pending operation with the channel-closed
+ * failure; no pending operation survives the channel.
  * @module @deepseek-ai/dsh-desktop-runtime/native-bridge
  */
 
@@ -14,6 +17,7 @@ import { randomUUID } from 'node:crypto'
 import {
   isNativeCancelMessage,
   isNativeResponseMessage,
+  NATIVE_MAX_DIAGNOSTIC_CHARS,
   parseNativeCancel,
   parseNativeResponse,
   type NativeErrorCode,
@@ -65,11 +69,22 @@ interface PendingOperation {
   /** The abort listener, removed when the operation actually terminates. */
   onAbort: (() => void) | undefined
   terminal: boolean
+  /** True once the request message has been dispatched to the channel. */
+  sent: boolean
 }
 
 /** The abort terminal: the DSH layer maps it to its `cancelled` business code. */
 function abortError(): DOMException {
   return new DOMException('The operation was aborted.', 'AbortError')
+}
+
+/** The wire reason for one caller abort: a string signal reason, bounded, or the fixed fallback. */
+function abortReason(signal: AbortSignal): string {
+  // The DOM lib types signal.reason as any; narrow at this boundary.
+  const reason: unknown = signal.reason
+  return typeof reason === 'string' && reason !== ''
+    ? reason.slice(0, NATIVE_MAX_DIAGNOSTIC_CHARS)
+    : 'the caller aborted'
 }
 
 /**
@@ -180,6 +195,7 @@ export function createNativeBridge(options: NativeBridgeOptions = {}): NativeBri
       reject: (_error) => { /* reassigned below */ },
       onAbort: undefined,
       terminal: false,
+      sent: false,
     }
     const promise = new Promise<unknown>((resolve, reject) => {
       op.resolve = resolve
@@ -193,13 +209,18 @@ export function createNativeBridge(options: NativeBridgeOptions = {}): NativeBri
       if (op.terminal) return
       op.terminal = true
       release(id)
+      // Tell main the request is logically terminal; a never-dispatched
+      // request fabricates no remote cancel.
+      if (op.sent) send({ type: 'native.abort', requestId: id, reason: abortReason(signal) })
       op.reject(abortError())
     }
     op.onAbort = onAbort
     signal.addEventListener('abort', onAbort, { once: true })
     if (method === 'directory.pick') {
+      op.sent = true
       send({ type: 'native.request', requestId: id, method })
     } else if (path !== undefined) {
+      op.sent = true
       send({ type: 'native.request', requestId: id, method, path })
     } else {
       // Unreachable: openPath always carries its path.

@@ -3,9 +3,10 @@
  * built runtime under a temporary home and plays the Electron main side over
  * the child IPC channel — the runtime's host.pickDirectory and host.openPath
  * cross as native.request messages and settle only on the main-side
- * responses, the client abort terminates an in-flight pick and its late
- * result is dropped, and a main-issued cancel settles the pick as a channel
- * failure. Self-skips when the entry has not been built (`pnpm run build`).
+ * responses, a client abort terminates an in-flight operation and crosses as
+ * a real native.abort message whose late result is dropped, and a
+ * main-issued cancel settles the pick as a channel failure. Self-skips when
+ * the entry has not been built (`pnpm run build`).
  */
 
 import { fork, type ChildProcess } from 'node:child_process'
@@ -36,6 +37,12 @@ interface NativeRequest {
   path?: string
 }
 
+interface NativeAbort {
+  type: 'native.abort'
+  requestId: string
+  reason: string
+}
+
 function forkRuntime(home: string): ChildProcess {
   return fork(ENTRY, [], {
     execPath: process.execPath,
@@ -61,6 +68,8 @@ class NativeLink {
   private transportWaiters: Array<() => void> = []
   private nativeQueue: NativeRequest[] = []
   private nativeWaiters: Array<() => void> = []
+  private abortQueue: NativeAbort[] = []
+  private abortWaiters: Array<() => void> = []
   ready: Promise<void>
 
   constructor(private readonly child: ChildProcess) {
@@ -79,6 +88,11 @@ class NativeLink {
         if (value.type === 'native.request') {
           this.nativeQueue.push(value as unknown as NativeRequest)
           for (const wake of this.nativeWaiters.splice(0)) wake()
+          return
+        }
+        if (value.type === 'native.abort') {
+          this.abortQueue.push(value as unknown as NativeAbort)
+          for (const wake of this.abortWaiters.splice(0)) wake()
           return
         }
         const decoded = fromOpaqueTransportWire(value)
@@ -118,13 +132,36 @@ class NativeLink {
     }
   }
 
+  async nextNativeAbort(timeoutMs = MESSAGE_TIMEOUT_MS): Promise<NativeAbort> {
+    const deadline = Date.now() + timeoutMs
+    for (;;) {
+      const pending = this.abortQueue.shift()
+      if (pending !== undefined) return pending
+      if (Date.now() >= deadline) throw new Error(`no native.abort within ${String(timeoutMs)} ms`)
+      await this.park(this.abortWaiters, deadline)
+    }
+  }
+
+  /** No further aborts in flight: the queue stays empty for the grace period. */
+  async drainAborts(timeoutMs = 300): Promise<void> {
+    const deadline = Date.now() + timeoutMs
+    while (Date.now() < deadline) {
+      const pending = this.abortQueue.shift()
+      if (pending !== undefined) throw new Error(`unexpected late native.abort for ${pending.requestId}`)
+      await new Promise<void>((resolveSleep) => { setTimeout(resolveSleep, 50) })
+    }
+  }
+
   private park(waiters: Array<() => void>, deadline: number): Promise<void> {
     return new Promise<void>((resolvePark) => {
-      const timer = setTimeout(resolvePark, deadline - Date.now())
-      waiters.push(() => {
+      const waiter = (): void => {
         clearTimeout(timer)
+        const i = waiters.indexOf(waiter)
+        if (i >= 0) waiters.splice(i, 1)
         resolvePark()
-      })
+      }
+      const timer = setTimeout(waiter, Math.max(deadline - Date.now(), 0))
+      waiters.push(waiter)
     })
   }
 
@@ -142,12 +179,16 @@ class NativeLink {
 
   private nextNative(timeoutMs: number): Promise<NativeRequest | undefined> {
     return new Promise<NativeRequest | undefined>((resolveNext) => {
-      const timer = setTimeout(() => { resolveNext(undefined) }, timeoutMs)
-      this.nativeWaiters.push(() => {
+      // The waiter removes itself on every settlement: a timed-out waiter left
+      // in the array would steal the next message from a later consumer.
+      const waiter = (): void => {
         clearTimeout(timer)
-        const pending = this.nativeQueue.shift()
-        resolveNext(pending)
-      })
+        const i = this.nativeWaiters.indexOf(waiter)
+        if (i >= 0) this.nativeWaiters.splice(i, 1)
+        resolveNext(this.nativeQueue.shift())
+      }
+      const timer = setTimeout(waiter, timeoutMs)
+      this.nativeWaiters.push(waiter)
     })
   }
 }
@@ -276,13 +317,19 @@ describe.skipIf(!existsSync(ENTRY))('desktop native capability boot', () => {
     expect(envelope.result.error?.message).toContain('generation ended')
   }, 45_000)
 
-  it('terminates an in-flight pick on client abort and drops the late result', async () => {
+  it('terminates an in-flight pick on client abort, crosses the caller cancel, and drops the late result', async () => {
     openFetch(link, 'native-pick-abort', 'native-rpc-7', 'host.pickDirectory', {})
     const nativeRequest = await link.nextNativeRequest()
     expect(nativeRequest.method).toBe('directory.pick')
     link.send({ type: 'fetch.abort', requestId: 'native-pick-abort' })
+    // The caller cancellation crosses as a real runtime→main message for
+    // exactly this request.
+    const abort = await link.nextNativeAbort()
+    expect(abort.requestId).toBe(nativeRequest.requestId)
+    expect(abort.reason).not.toBe('')
     // The late chooser result settles nothing: the operation is terminal.
     link.send({ type: 'native.response', requestId: nativeRequest.requestId, ok: true, path: CHOSEN_DIRECTORY })
+    await expect(link.drainAborts()).resolves.toBeUndefined()
     // The runtime stays healthy: a later pick still crosses the channel and
     // settles normally.
     openFetch(link, 'native-pick-after-abort', 'native-rpc-8', 'host.pickDirectory', {})
@@ -294,6 +341,18 @@ describe.skipIf(!existsSync(ENTRY))('desktop native capability boot', () => {
     expect(envelope.result).toEqual({ ok: true, value: { path: CHOSEN_DIRECTORY } })
     // No operation is in flight: nothing further crosses the channel.
     await expect(link.drainNative(300)).resolves.toEqual([])
+  }, 45_000)
+
+  it('terminates an in-flight open on client abort and crosses the caller cancel', async () => {
+    openFetch(link, 'native-open-abort', 'native-rpc-9', 'host.openPath', { path: OPEN_TARGET })
+    const nativeRequest = await link.nextNativeRequest()
+    expect(nativeRequest.method).toBe('path.open')
+    link.send({ type: 'fetch.abort', requestId: 'native-open-abort' })
+    const abort = await link.nextNativeAbort()
+    expect(abort.requestId).toBe(nativeRequest.requestId)
+    // The late open completion settles nothing and emits nothing further.
+    link.send({ type: 'native.response', requestId: nativeRequest.requestId, ok: true })
+    await expect(link.drainAborts()).resolves.toBeUndefined()
   }, 45_000)
 
   it('still disposes the whole tree on runtime.shutdown and exits 0', async () => {

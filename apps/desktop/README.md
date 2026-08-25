@@ -69,8 +69,15 @@ pnpm test apps/desktop  # supervisor, smoke, and protocol tests
 - `tests/native-capabilities.spec.ts` and `tests/native-channel.spec.ts`
   always run: the OS capability registry and the main-side channel against
   injected fakes (the closed success/cancel/failure mapping, the bounded
-  diagnostics, duplicate refusal, malformed-request classification, and the
-  teardown cancel of every pending request).
+  diagnostics, duplicate refusal, malformed-request classification, the
+  teardown cancel of every pending request, and the caller-abort
+  termination that drops the late OS result).
+- `tests/native-integration.spec.ts` self-skips without the runtime
+  bundle: it forks the built runtime and answers it with the REAL
+  main-side channel over a controllable OS port — the pick settles, a
+  caller abort empties the main-side pending set immediately and the late
+  dialog completion emits nothing, and the channel stays healthy for the
+  next request.
 - `tests/security.spec.ts` and `tests/boundary.spec.ts` always run: the
   IPC sender trust rule, and the SPEC §31 architectural boundary scans
   (no DSH product imports in main, the renderer's DSH imports limited to
@@ -102,8 +109,10 @@ Note). Tooling settles in stage 11.
   session hardening, the runtime supervisor (`runtime.ts`,
   `runtime-paths.ts`), the dumb transport broker (`transport-broker.ts`),
   and the native capability boundary (`native-capabilities.ts`,
-  `native-channel.ts`: the closed OS registry and the request/response
-  channel over the supervisor's fork IPC). No Node APIs reach the renderer.
+  `native-channel.ts`: the closed OS registry and the per-generation
+  request/response channel over the supervisor's fork IPC, where a caller
+  abort logically terminates its request and the late OS completion is
+  dropped). No Node APIs reach the renderer.
 - `src/preload/index.cjs` — checked-in CJS supervision bridge (a sandboxed
   preload cannot load ESM); state view, state events, restart, and
   `openTransport()` handing the renderer the live transport port.
