@@ -347,6 +347,9 @@ describe.skipIf(!guiAvailable() || !runtimeBuilt)('desktop UX', () => {
     const file = byLabel('File')
     expect(file.find(item => item.label === 'New Session')?.accelerator).toBe('CmdOrCtrl+N')
     expect(file.find(item => item.label === 'Open Workspace…')?.accelerator).toBe('CmdOrCtrl+O')
+    // Settings… lives in the macOS application menu, in File elsewhere.
+    const settingsHome = isMac ? DESKTOP_APP_NAME : 'File'
+    expect(byLabel(settingsHome).find(item => item.label === 'Settings…')?.accelerator).toBe('CmdOrCtrl+,')
     const view = byLabel('View')
     expect(view.find(item => item.label === 'Toggle Sidebar')?.accelerator).toBe('CmdOrCtrl+\\')
     // Role items render platform-localized labels (macOS: "Actual Size"), so
@@ -481,12 +484,20 @@ describe.skipIf(!guiAvailable() || !runtimeBuilt)('desktop UX', () => {
     assertCleanConsole()
   }, 60_000)
 
-  it('opens settings through the menu', async () => {
-    if (process.platform === 'darwin') {
-      expect(await clickMenu([DESKTOP_APP_NAME, 'Settings…'])).toBe(true)
-    } else {
-      // The non-mac About item exercises the platform panel seam; settings
-      // itself is the same renderer gesture either platform.
+  it('opens settings through the canonical menu item', async () => {
+    // The canonical Settings home differs per platform (the macOS
+    // application menu, File on the other platforms), but it is always the
+    // same closed command reaching the same pinned DSH settings dialog.
+    const settingsPath = process.platform === 'darwin'
+      ? [DESKTOP_APP_NAME, 'Settings…']
+      : ['File', 'Settings…']
+    expect(await clickMenu(settingsPath)).toBe(true)
+    const dialog = win.getByRole('dialog', { name: 'Settings' })
+    await dialog.waitFor({ timeout: 15_000 })
+    await dialog.getByRole('button', { name: 'Close' }).click()
+    await expect.poll(async () => await win.getByRole('dialog', { name: 'Settings' }).count(), { timeout: 10_000 }).toBe(0)
+    if (process.platform !== 'darwin') {
+      // The non-mac About item exercises the platform panel seam.
       await app.evaluate(({ app }) => {
         const recorder = { calls: 0 }
         ;(globalThis as Record<string, unknown>).__uxAboutRecorder = recorder
@@ -500,12 +511,7 @@ describe.skipIf(!guiAvailable() || !runtimeBuilt)('desktop UX', () => {
       await expect.poll(() => app.evaluate(() => (
         (globalThis as Record<string, unknown>).__uxAboutRecorder as { calls: number }
       ).calls), { timeout: 10_000 }).toBe(1)
-      return
     }
-    const dialog = win.getByRole('dialog', { name: 'Settings' })
-    await dialog.waitFor({ timeout: 15_000 })
-    await dialog.getByRole('button', { name: 'Close' }).click()
-    await expect.poll(async () => await win.getByRole('dialog', { name: 'Settings' }).count(), { timeout: 10_000 }).toBe(0)
     assertCleanConsole()
   }, 90_000)
 })

@@ -91,9 +91,13 @@ describe('application menu template', () => {
     const { items } = template()
     expect(findSelf(items, ['File', 'New Session'])?.accelerator).toBe('CmdOrCtrl+N')
     expect(findSelf(items, ['File', 'Open Workspace…'])?.accelerator).toBe('CmdOrCtrl+O')
+    expect(findSelf(items, ['File', 'Settings…'])?.accelerator).toBe('CmdOrCtrl+,')
     expect(findSelf(items, ['View', 'Toggle Sidebar'])?.accelerator).toBe('CmdOrCtrl+\\')
     const { items: macItems } = template({ isMac: true })
+    expect(findSelf(macItems, ['File', 'New Session'])?.accelerator).toBe('CmdOrCtrl+N')
+    expect(findSelf(macItems, ['File', 'Open Workspace…'])?.accelerator).toBe('CmdOrCtrl+O')
     expect(findSelf(macItems, [DESKTOP_APP_NAME, 'Settings…'])?.accelerator).toBe('CmdOrCtrl+,')
+    expect(findSelf(macItems, ['View', 'Toggle Sidebar'])?.accelerator).toBe('CmdOrCtrl+\\')
     // Esc keeps the pinned UI's own semantics: no menu item claims it.
     for (const item of [items, macItems].flat()) {
       expect(item.accelerator).not.toBe('Esc')
@@ -111,11 +115,47 @@ describe('application menu template', () => {
   })
 
   it('keeps the SPEC File and Session items in order', () => {
+    // Non-macOS carries Settings… in File; macOS carries it in the
+    // application menu instead.
     const { items } = template()
     expect(children(findSelf(items, ['File'])).map(name))
+      .toEqual(['New Session', 'Open Workspace…', 'separator', 'Settings…', 'separator', 'close'])
+    const { items: macItems } = template({ isMac: true })
+    expect(children(findSelf(macItems, ['File'])).map(name))
       .toEqual(['New Session', 'Open Workspace…', 'separator', 'close'])
     expect(children(findSelf(items, ['Session'])).map(entry => entry.label ?? ''))
       .toEqual(['New Session', 'Cancel Current Run', 'Rename Session'])
+  })
+
+  it('carries exactly one Settings item per platform on the closed command', () => {
+    const settingsItems = (items: TemplateItem[]): TemplateItem[] => {
+      const found: TemplateItem[] = []
+      const walk = (pool: TemplateItem[]): void => {
+        for (const entry of pool) {
+          if (entry.label === 'Settings…') found.push(entry)
+          const submenu = entry.submenu
+          if (Array.isArray(submenu)) walk(submenu)
+        }
+      }
+      walk(items)
+      return found
+    }
+    // macOS: the application menu is the canonical Settings home.
+    const mac = template({ isMac: true })
+    const macSettings = settingsItems(mac.items)
+    expect(macSettings).toHaveLength(1)
+    expect(macSettings[0]?.accelerator).toBe('CmdOrCtrl+,')
+    expect(findSelf(mac.items, [DESKTOP_APP_NAME, 'Settings…'])).toBeDefined()
+    macSettings[0]?.click?.()
+    expect(mac.sent).toEqual(['open-settings'])
+    // Windows/Linux: File is the canonical Settings home.
+    const win = template()
+    const winSettings = settingsItems(win.items)
+    expect(winSettings).toHaveLength(1)
+    expect(winSettings[0]?.accelerator).toBe('CmdOrCtrl+,')
+    expect(findSelf(win.items, ['File', 'Settings…'])).toBeDefined()
+    winSettings[0]?.click?.()
+    expect(win.sent).toEqual(['open-settings'])
   })
 
   it('keeps the disabled Help placeholders and the non-mac About', () => {

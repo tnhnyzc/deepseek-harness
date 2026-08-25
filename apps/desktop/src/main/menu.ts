@@ -61,12 +61,21 @@ export function buildApplicationMenuTemplate(options: ApplicationMenuOptions): M
       { role: 'quit' },
     ],
   }
+  // macOS carries Settings… in the application menu (platform
+  // convention); the other platforms put it in File.
+  const nonMacSettingsEntry: MenuItemConstructorOptions[] = options.isMac
+    ? []
+    : [
+      { label: 'Settings…', accelerator: 'CmdOrCtrl+,', click: () => { send('open-settings') } },
+      { type: 'separator' },
+    ]
   const fileMenu: MenuItemConstructorOptions = {
     label: 'File',
     submenu: [
       { label: 'New Session', accelerator: 'CmdOrCtrl+N', click: () => { send('new-session') } },
       { label: 'Open Workspace…', accelerator: 'CmdOrCtrl+O', click: () => { send('open-workspace') } },
       { type: 'separator' },
+      ...nonMacSettingsEntry,
       { role: 'close' },
     ],
   }
