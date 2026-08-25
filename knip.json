@@ -666,8 +666,7 @@
         "tests/**/*.ts"
       ],
       "ignoreDependencies": [
-        "@deepseek-ai/dsh-base",
-        "@deepseek-ai/dsh-web-app"
+        "@deepseek-ai/.+"
       ]
     },
     "packages/subagent/subagent-dsh-sdk": {

@@ -1141,6 +1141,12 @@ DESKTOP-CONSUMPTION: consume unchanged.
   first record = `HeaderLine` (`format.ts:33-44`), then one JSON record per
   line with chunk packing (`:221-224`; `index.ts:37`) and default `zstd`
   encoding (`.jsonl.zstd`, `index.ts:38`, `format.ts:24-26`).
+- Frame container: a `.jsonl.zstd` file is a **container of concatenated
+  Zstandard frames** — one frame per durable write batch — decoded by
+  structural frame scanning, never a single-frame decoder
+  (`scanZstdFrames`, `packages/session/session-persistence-jsonl/src/zstd.ts`).
+  Node's `zstdDecompressSync` returns only the first frame's bytes for such a
+  file; external tooling that inspects session logs must scan frame headers.
 - Location: backend root = `dshHomePath('sessions')`
   (`packages/bundle/base/cordis.patch.yml:98-100`);
   `logPath(root, cwd, id, compression)` (`format.ts:201-208`) →
@@ -1537,6 +1543,61 @@ web app's HTTP behavior is untouched (rationale in Agent Note
 | M1 | `packages/client/modules/src/index.ts` | `ClientModuleRegistry` injects `['loader']` only; the `/plugins` bundle route and the `webserver/index-inject` rows register only when `ctx.get('webServer')` is present — the composed graph and bundle table serve non-HTTP carriers |
 | M2 | `packages/client/connection/src/index.ts` | `inject = []`; the `/api` route and the WebSocket downlinks register only when a webserver is present; the `HostConnectionService` and `createSharedFetchHandler` (in-process RPC dispatch) are provided unconditionally |
 | M3 | `packages/client/connection/src/rpc-host.ts` | `register()` returns a no-op disposer when no webserver exists: a channel on a non-HTTP host is unreachable over HTTP, not an error |
+
+### Stage 6 parity resolution
+
+Stage 6 proved the pinned UI over the desktop transport is semantically
+equivalent to `dsh web` for the normal user workflow (Agent Note
+`2026-08-25-desktop-stage6-parity`): `apps/desktop/tests/dsh-parity.spec.ts`
+drives the built app (real Electron + real desktop-runtime + real pinned
+composition) through session list, incremental streaming, tool/trajectory
+rendering, approval allow and deny, question answer, cancellation, rename,
+new session, model/provider settings, and clean-restart recovery, against a
+scripted deterministic SSE provider on the `DEEPSEEK_BASE_URL` seam. The
+suite self-skips without the built artifacts and fails on any renderer
+`console.error`/page error.
+
+Facts the stage settled about the pinned tree (contract-relevant):
+
+- First-run notice: `WelcomeNotice`
+  (`packages/client/ui-settings-models/src/client/WelcomeNotice.tsx`)
+  mounts **after** `data-state=ready`, once its `ui-onboarding` settings
+  scope has loaded; `OnboardingSurface`
+  (`packages/client/ui-primitives/src/OnboardingSurface.tsx`) holds `#root`
+  inert behind a body-portaled mask until `Continue` is clicked. The
+  acknowledgement is durable in the `ui-onboarding` settings namespace
+  (`welcomeNoticeVersion`, exact match).
+- Session row menu: the action cell renders `display: none` until the row is
+  hovered; the button is `aria-label="Session actions for {title}"`.
+- Composer lock is `readonly` on the `[data-composer-card] textarea`; the
+  placeholder text changes after the first turn (select by card, not
+  placeholder).
+- Automatic title is the `session-title-llm` row
+  (`@deepseek-ai/dsh-session-title-first-prompt-llm`,
+  `packages/bundle/base/cordis.patch.yml:46-52`): one provider call after the
+  first user message. A user rename appends the `session/title` event with
+  `source: { kind: 'user' }` and pins the title
+  (`packages/session/session-title/src/index.ts:355-374`).
+- Projection cache (`packages/session/session-projection-cache`; web-app row
+  `writeEveryEvents: 200`, `writeIntervalMs: 5000`; mandatory checkpoints at
+  `turn/end` and session disposal): the cold-start session **list** can carry
+  a checkpoint title older than a later user rename; opening the session
+  replays the log tail and relabels the row. DSH-owned, shared with
+  `dsh web`, no data loss — Stage 8 (race windows) owns it.
+- Workspace registry seeding: a version-2 registry at
+  `<DSH_HOME>/storages/workspace.json` (`unit: { name: 'workspace',
+  version: 2 }`, `tables.workspaces`) is selected by the client's
+  `startInitialSelection` at startup, which reuses the workspace's blank
+  session; the native directory dialog is the only path not proven
+  automatically.
+
+Carrier changes: `apps/desktop-runtime` gains the eight preset/tool packages
+the composed web-app configuration resolves at boot (dependency declaration
+only; knip `ignoreDependencies` → `@deepseek-ai/.+`). No pinned-tree
+modification — M1–M3 remain the full set. The one console exception the
+parity gate allows: a single `[cordis-client-runner] syncing inspect
+providers failed: … no active Connection` transient on a cold start
+(Stage 8 race window).
 
 ---
 
