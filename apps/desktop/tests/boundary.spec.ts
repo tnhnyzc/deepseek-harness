@@ -16,8 +16,15 @@ import { describe, expect, it } from 'vitest'
 const DESKTOP_ROOT = resolve(import.meta.dirname, '..')
 const RUNTIME_ROOT = resolve(DESKTOP_ROOT, '..', 'desktop-runtime')
 
-/** The one DSH-adjacent package desktop source may import: the transport protocol. */
-const PROTOCOL_SPECIFIER = '@deepseek-ai/dsh-desktop-runtime/transport'
+/**
+ * The closed wire protocols desktop source may import: the fetch/stream
+ * transport and the native capability protocol. Both are OS/transport
+ * vocabulary only; every other DSH package stays forbidden.
+ */
+const PROTOCOL_SPECIFIERS: ReadonlySet<string> = new Set([
+  '@deepseek-ai/dsh-desktop-runtime/transport',
+  '@deepseek-ai/dsh-desktop-runtime/native',
+])
 
 function listSources(root: string, extensions: ReadonlySet<string>): string[] {
   const out: string[] = []
@@ -97,6 +104,21 @@ const TRANSPORT_FILES = [
   join(RUNTIME_ROOT, 'src', 'transport-process.ts'),
 ]
 
+/**
+ * The desktop native capability source files: the OS capability surface on
+ * both sides of the channel. Like the transport, they must name OS
+ * capability vocabulary only, never a DSH business RPC.
+ */
+const NATIVE_FILES = [
+  join(DESKTOP_ROOT, 'src', 'main', 'native-capabilities.ts'),
+  join(DESKTOP_ROOT, 'src', 'main', 'native-channel.ts'),
+  join(RUNTIME_ROOT, 'src', 'native.ts'),
+  join(RUNTIME_ROOT, 'src', 'native-bridge.ts'),
+]
+
+/** The native protocol message tags: renderer-side knowledge of them is a bridge by definition. */
+const NATIVE_PROTOCOL_TAGS = ['native.request', 'native.response', 'native.cancel', 'directory.pick', 'path.open']
+
 const HTTP_LISTENER = /createServer\s*\(|new\s+(?:net|http|https)\.Server/
 
 describe('SPEC §31 architectural boundaries', () => {
@@ -105,7 +127,7 @@ describe('SPEC §31 architectural boundaries', () => {
     expect(mainFiles.length).toBeGreaterThan(0)
     for (const file of mainFiles) {
       const source = readFileSync(file, 'utf8')
-      const offenders = importSpecifiers(source).filter(specifier => specifier !== PROTOCOL_SPECIFIER
+      const offenders = importSpecifiers(source).filter(specifier => !PROTOCOL_SPECIFIERS.has(specifier)
         && DSH_PRODUCT_PACKAGE.test(specifier))
       expect(offenders, `${file} imports DSH product packages`).toEqual([])
     }
@@ -117,7 +139,7 @@ describe('SPEC §31 architectural boundaries', () => {
     for (const file of rendererFiles) {
       const source = readFileSync(file, 'utf8')
       const offenders = importSpecifiers(source).filter((specifier) => {
-        if (specifier === PROTOCOL_SPECIFIER) return false
+        if (PROTOCOL_SPECIFIERS.has(specifier)) return false
         if (RENDERER_ALLOWED_DSH.has(specifier)) return false
         return ELECTRON_SPECIFIER.test(specifier) || NODE_BUILTIN.test(specifier) || DSH_PRODUCT_PACKAGE.test(specifier)
       })
@@ -135,6 +157,41 @@ describe('SPEC §31 architectural boundaries', () => {
         expect(match, `${file} names a ${reason}`).toBeNull()
       }
     }
+  })
+
+  it('keeps the desktop native capability layers free of business RPC literals', () => {
+    expect(NATIVE_FILES).toHaveLength(4)
+    for (const file of NATIVE_FILES) {
+      const source = readFileSync(file, 'utf8')
+      for (const { pattern, reason } of BUSINESS_LITERALS) {
+        pattern.lastIndex = 0
+        const match = source.match(pattern)
+        expect(match, `${file} names a ${reason}`).toBeNull()
+      }
+    }
+  })
+
+  it('gives the renderer and preload no native protocol knowledge', () => {
+    const files = [
+      ...listSources(join(DESKTOP_ROOT, 'src', 'renderer'), new Set(['ts'])),
+      ...listSources(join(DESKTOP_ROOT, 'src', 'preload'), new Set(['cjs'])),
+    ]
+    expect(files.length).toBeGreaterThan(0)
+    for (const file of files) {
+      const source = readFileSync(file, 'utf8')
+      for (const tag of NATIVE_PROTOCOL_TAGS) {
+        expect(source, `${file} names the native protocol tag ${tag}`).not.toContain(tag)
+      }
+    }
+  })
+
+  it('mounts exactly one directory-picker provider in the desktop composition', () => {
+    const composition = readFileSync(join(RUNTIME_ROOT, 'src', 'composition.ts'), 'utf8')
+    // The temporary host-native chooser package must not be mounted.
+    expect(composition).not.toContain('dsh-host-directory-picker-native')
+    // The overlay disables the web `auto` row and inserts the desktop provider.
+    expect(composition).toContain('id: DESKTOP_PICKER_ROW_ID, disabled: true')
+    expect(composition).toContain('DESKTOP_PICKER_MODULE_NAME')
   })
 
   it('creates no HTTP listener in desktop production code', () => {

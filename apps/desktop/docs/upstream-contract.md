@@ -809,10 +809,28 @@ desktop overlay. Documented intent: "an Electron shell would provide the
 Related openers: `ApiProxyDefaults.openPath` / `openTextFile`
 (`packages/host/apiproxy/src/api-proxy.ts:596-601, 1840-1856`).
 
-DESKTOP-CONSUMPTION: desktop-only — stage 2 mounts the existing `-native`
-provider via a disable/insert overlay (§1.2); no new provider package, and
-an Electron dialog provider can take the same slot later. No edits to the
-seam, gateway, or existing packages.
+DESKTOP-CONSUMPTION: desktop-only — stage 2 mounted the existing `-native`
+provider via a disable/insert overlay (§1.2); stage 5 replaces that
+overlay's insert with the desktop provider.
+
+Stage 5 resolution: the desktop composition
+(`apps/desktop-runtime/src/composition.ts`) disables the web `auto`
+`directory-picker` row and inserts the desktop provider module
+(`apps/desktop-runtime/src/directory-picker.ts`, `DesktopDirectoryPicker`,
+built to `dist/directory-picker.js` beside the runtime entry and loaded by
+file URL). It is the same native seat — `capability()` returns one stable
+`{ kind: 'native', pick }` object — but `pick` delegates to the runtime
+child's native bridge (`apps/desktop-runtime/src/native-bridge.ts`), which
+crosses to Electron main's `dialog.showOpenDialog` over the native
+capability channel (§6.4). The child therefore never spawns
+osascript/Zenity/KDialog/COM choosers. An operator cancel is the
+capability's `null`; a caller abort terminates the pick (`host.pickDirectory`
+maps it to the `cancelled` business code, `api-proxy.ts:2842-2869`); Electron
+offers no API to close an already-visible dialog, so a late chooser result
+is dropped as a terminal no-op.
+
+The stage 2 `-native` provider remains in the pinned source for the
+browser/host surfaces; desktop simply no longer mounts it.
 
 ### 6.2 openDocument flows
 
@@ -854,8 +872,23 @@ resolve to the OS where the host runs. `defaults.openPath` / `openTextFile`
 / `canOpenPath` (`api-proxy.ts:596-601`) are the injection seam if the
 desktop host prefers Electron-native opening.
 
-DESKTOP-CONSUMPTION: consume unchanged (wire flows); optional desktop
-native openers via the existing `defaults` seam.
+DESKTOP-CONSUMPTION: consume unchanged (wire flows); stage 5 uses the
+seam through the M4 `nativeOpeners` service.
+
+Stage 5 resolution (M4): `ApiProxyService` reads an optional provided
+service `nativeOpeners` (`{ openPath?, openTextFile? }`) and forwards the
+present members as its `ApiProxyDefaults` openers
+(`packages/host/apiproxy/src/index.ts`, `src/api/native-openers.ts`). By
+absence the package's own native openers and `canOpenNativePath()`
+detection stand unchanged (web app unaffected). The desktop runtime
+provides `nativeOpeners.openPath`, bridged to Electron `shell.openPath`
+over the native channel; `canOpenPaths()` therefore reports the desktop as
+able to open. `openTextFile` is deliberately NOT bridged: the pinned
+Electron `shell.openPath` takes no options and has no text-editor intent
+(`electron.d.ts` `shell.openPath(path): Promise<string>`), so
+`settings.openDocument` keeps the DSH native text opener (subprocess
+`open -t` on macOS, `native-path-opener.ts:134`), where a text editor is
+actually requested.
 
 ### 6.3 Other native needs
 
@@ -868,6 +901,69 @@ native openers via the existing `defaults` seam.
   only picker seam is the directory picker.
 
 DESKTOP-CONSUMPTION: desktop-only (all three; no existing seam to extend).
+Deferred at stage 5: all three stay absent — the pinned source has no
+consumer, and the stage 5 method set is closed to what exists.
+
+### 6.4 The desktop native capability channel (stage 5)
+
+The private runtime↔main channel for OS capability calls. It rides the
+supervisor's fork IPC (never the renderer, never the stage 3 transport
+port, never localhost) and is separate from it: the supervisor demuxes
+`native.request` off the child channel before the transport relay
+(`apps/desktop/src/main/runtime.ts`), and the runtime child's bridge
+demuxes the reverse direction the same way
+(`apps/desktop-runtime/src/transport-process.ts` ignores it by the
+transport discriminant).
+
+Closed wire contract (`apps/desktop-runtime/src/native.ts`, shipped as the
+`@deepseek-ai/dsh-desktop-runtime/native` subpath; the main face imports
+it, the runtime face imports it, and nothing else may):
+
+- `native.request { requestId, method: 'directory.pick' }` /
+  `{ requestId, method: 'path.open', path }` — child→main. The method set
+  is closed and schema-validated (`parseNativeRequest`): a malformed
+  request is a protocol refusal, never an OS call. Paths are non-empty,
+  NUL-free, and ≤ 32768 characters.
+- `native.response { requestId, ok: true, path?: string | null }` /
+  `{ requestId, ok: false, code, message }` — main→child. The failure
+  vocabulary is closed: `unknown-method`, `malformed-request`,
+  `dialog-failed`, `open-failed`, `cancelled`. Messages carry no DSH
+  business vocabulary; `message` is bounded (512 chars).
+- `native.cancel { requestId, reason }` — main→child, sent on generation
+  teardown for every still-pending request.
+
+Roles:
+
+- Main side: `createNativeChannel`
+  (`apps/desktop/src/main/native-channel.ts`) validates each request,
+  dispatches onto `createNativeCapabilities`
+  (`apps/desktop/src/main/native-capabilities.ts`) —
+  `dialog.showOpenDialog({ properties: ['openDirectory'] })` and
+  `shell.openPath(path)` over an injectable port — and settles each
+  request with exactly one response (a success, a closed-code failure, or
+  a teardown cancel). Duplicate in-flight ids settle once; a torn-down
+  generation drops late results.
+- Runtime side: `createNativeBridge`
+  (`apps/desktop-runtime/src/native-bridge.ts`) issues unique request ids,
+  holds the caller's `AbortSignal` for the operation's whole lifetime
+  (abort ⇒ `AbortError` terminal, operation terminal, late messages
+  ignored), and settles every pending operation with `channel-closed` on
+  dispose or supervisor disconnect. `NativeError` codes map onto DSH
+  business codes at the seam: abort ⇒ `cancelled`, anything else ⇒
+  `internal` (`api-proxy.ts` `openTarget`/`pickDirectory` mapping).
+
+Vocabulary boundary: Electron main may know the OS capability names
+(`directory.pick`, `path.open`) and nothing about DSH; the runtime child
+may know the DSH seats (`ctx.directoryPicker`, `nativeOpeners`) and
+nothing about Electron. The renderer has no native protocol knowledge at
+all (boundary spec `apps/desktop/tests/boundary.spec.ts` pins both sides
+plus the renderer's ignorance).
+
+Acceptance: `apps/desktop-runtime/tests/native-boot.spec.ts` forks the
+built runtime, plays the main side over the child IPC, and pins
+`host.describe.canOpenPath`, pick success/cancel, open success/failure,
+the main-issued cancel mapping, client-abort termination with the late
+result dropped, and healthy reuse after the abort.
 
 ---
 

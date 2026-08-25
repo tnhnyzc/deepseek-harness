@@ -16,6 +16,7 @@ import { Context, Service } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
 import type {} from '@deepseek-ai/dsh-agent-default-model'
 import type { ApiProxy } from './api/index.ts'
+import type {} from './api/native-openers.ts'
 import { createApiProxy, DEFAULT_COLD_BLANK_PROBE_MAX_BYTES } from './api-proxy.ts'
 import {
   DEFAULT_SESSION_LOG_COMPRESSION_LEVEL,
@@ -95,10 +96,15 @@ export class ApiProxyService extends Service implements ApiProxy {
 
   constructor(ctx: Context, config: Config) {
     super(ctx, 'apiProxy')
+    // M4: a deployment may carry the default-application opener itself and
+    // inject it here; by absence the package's own native openers stand.
+    const nativeOpeners = ctx.get('nativeOpeners')
     const api = createApiProxy(ctx, {
       defaultModelSelection: () => ctx.agentDefaultModel.currentSelection(),
       saveDefaultModelSelection: selection => ctx.agentDefaultModel.saveSelection(selection),
       cwd: process.cwd(),
+      ...(nativeOpeners?.openPath === undefined ? {} : { openPath: nativeOpeners.openPath }),
+      ...(nativeOpeners?.openTextFile === undefined ? {} : { openTextFile: nativeOpeners.openTextFile }),
       ...config.nativeOpen === undefined ? {} : { canOpenPath: () => config.nativeOpen as boolean },
       ...(config.sessionExportCompressionLevel === undefined
         ? {}

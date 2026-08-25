@@ -25,6 +25,7 @@ import { DSH_LAUNCH_ENVIRONMENT_KEY } from '@deepseek-ai/dsh-launch-environment'
 import { toFetchHandler } from '@deepseek-ai/dsh-host-apiproxy'
 import { bootGraphMessage, createClientBundleFetch } from './boot-graph.ts'
 import { composeDesktopPatches, prepareDesktopProfile, PROFILE_ROOT_FILENAME } from './composition.ts'
+import { createNativeBridge } from './native-bridge.ts'
 import { createProcessShutdown } from './shutdown.ts'
 import { attachTransportRuntime, type FetchDispatch } from './transport-runtime.ts'
 import { createProcessTransportPort } from './transport-process.ts'
@@ -79,6 +80,7 @@ async function main(): Promise<void> {
   const shutdown = createProcessShutdown(() => dispose())
   const stop = (code: number): void => { shutdown.interrupt(code) }
   const transportPort = createProcessTransportPort()
+  const nativeBridge = createNativeBridge()
   let transportDispose: (() => void) | undefined
   process.on('SIGTERM', () => { stop(0) })
   process.on('SIGINT', () => { stop(130) })
@@ -101,6 +103,14 @@ async function main(): Promise<void> {
     const ctx = await boot(BIN_NAME, rootConfig, structuredClone(patches), (hostCtx) => {
       hostCtx.provide(DSH_LAUNCH_ENVIRONMENT_KEY, environment)
       provideCmdline(hostCtx, { args: [], exit: (code) => { void shutdown.shutdown(code) } })
+      // The desktop native seats: the directory-picker native capability and
+      // the gateway's default-application opener both cross to Electron main
+      // over the native channel. Text-file opening keeps the DSH native
+      // opener: the pinned Electron shell API has no text-editor intent.
+      hostCtx.provide('desktopDirectoryPick', (signal: AbortSignal) => nativeBridge.pickDirectory(signal))
+      hostCtx.provide('nativeOpeners', {
+        openPath: (path: string, signal: AbortSignal) => nativeBridge.openPath(path, signal),
+      })
     })
     const apiProxy = ctx.get('apiProxy')
     if (apiProxy === undefined) throw new Error('boot settled without the apiProxy service; the desktop runtime cannot serve transport')
@@ -127,6 +137,7 @@ async function main(): Promise<void> {
     }
     transportDispose = attachTransportRuntime(transportPort, apiProxy, { fetchDispatch })
     dispose = () => {
+      nativeBridge.dispose()
       transportDispose?.()
       return ctx.fiber.dispose()
     }

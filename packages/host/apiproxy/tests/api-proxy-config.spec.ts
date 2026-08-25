@@ -32,6 +32,8 @@ import type { RpcRequest, RpcResponse } from '../src/api/rpc.ts'
 import { RpcId } from '../src/api/rpc.ts'
 import { AGENT_DEFAULT_MODEL_SETTINGS_NAMESPACE } from '@deepseek-ai/dsh-agent-default-model'
 import { createApiProxy } from '../src/api-proxy.ts'
+import { canOpenNativePath } from '../src/native-path-opener.ts'
+import ApiProxyService from '../src/index.ts'
 
 const DEFAULTS = { defaultModelSelection: () => ({ provider: 'p', model: 'm' }), cwd: '/tmp' }
 
@@ -807,5 +809,78 @@ describe('llm.discoverModels', () => {
 
     expect(error.code).toBe('model-discovery-failed')
     expect(error.message).toContain('no model discovery is registered')
+  })
+})
+
+/**
+ * The M4 deployment opener seam: a host that carries the default-application
+ * opener itself (the desktop runtime's Electron bridge) provides the
+ * `nativeOpeners` service; the gateway consumes it as its ApiProxyDefaults
+ * opener and reports the deployment as able to open paths. By absence the
+ * package's own native openers and the platform detection stand unchanged.
+ */
+describe('ApiProxyService nativeOpeners seam', () => {
+  const makeService = (ctx: Context): ApiProxyService => {
+    // The service wires its model selection to the shared default service;
+    // host.describe reads it. The real plugin is the composition's concern.
+    ctx.provide('agentDefaultModel', {
+      currentSelection: () => ({ provider: 'p', model: 'm' }),
+      saveSelection: () => Promise.resolve(),
+    } as never)
+    return new ApiProxyService(ctx, ApiProxyService.Config({}))
+  }
+
+  it('uses the injected openPath for host.openPath', async () => {
+    const ctx = await harness()
+    const opened: Array<{ path: string; aborted: boolean }> = []
+    ctx.provide('nativeOpeners', {
+      openPath: (path: string, signal: AbortSignal) => {
+        opened.push({ path, aborted: signal.aborted })
+        return Promise.resolve()
+      },
+    })
+    const service = makeService(ctx)
+    expect(expectOk(await service.host.openPath(request({ path: '/tmp/doc.txt' }), new AbortController().signal)))
+      .toEqual({ opened: true })
+    expect(opened).toEqual([{ path: '/tmp/doc.txt', aborted: false }])
+  })
+
+  it('maps an injected openPath failure onto the DSH wire vocabulary', async () => {
+    const ctx = await harness()
+    ctx.provide('nativeOpeners', {
+      openPath: () => Promise.reject(new Error('bridge closed')),
+    })
+    const error = expectErr(await makeService(ctx).host.openPath(request({ path: '/tmp/doc.txt' }), new AbortController().signal))
+    expect(error.code).toBe('internal')
+    expect(error.message).toContain('bridge closed')
+  })
+
+  it('maps an injected openPath abort onto the cancelled code', async () => {
+    const ctx = await harness()
+    const controller = new AbortController()
+    ctx.provide('nativeOpeners', {
+      openPath: (_path: string, signal: AbortSignal) => new Promise<void>((_resolve, reject) => {
+        signal.addEventListener('abort', () => {
+          reject(new DOMException('The operation was aborted.', 'AbortError'))
+        }, { once: true })
+      }),
+    })
+    const open = makeService(ctx).host.openPath(request({ path: '/tmp/doc.txt' }), controller.signal)
+    controller.abort()
+    const error = expectErr(await open)
+    expect(error.code).toBe('cancelled')
+  })
+
+  it('reports canOpenPath true when an opener is injected', async () => {
+    const ctx = await harness()
+    ctx.provide('nativeOpeners', {
+      openPath: () => Promise.resolve(),
+    })
+    expect(expectOk(await makeService(ctx).host.describe(request({}))).canOpenPath).toBe(true)
+  })
+
+  it('keeps the platform detection when no seam is provided', async () => {
+    expect(expectOk(await makeService(await harness()).host.describe(request({}))).canOpenPath)
+      .toBe(canOpenNativePath())
   })
 })

@@ -15,7 +15,11 @@ a dumb broker in main relays the frames to the renderer, and the renderer
 the pinned DSH client/UI tree from this renderer over that transport: the
 runtime publishes the client boot graph before it reports ready, the
 renderer installs the `__DSH_TRANSPORT__` carrier seam, and `AppWebEntry`
-takes over the single application root — no second UI. See `SPEC.md`
+takes over the single application root — no second UI. Stage 5 adds the
+native capability boundary: DSH-owned OS operations (the directory chooser,
+default-application path open) cross a closed runtime↔main channel over the
+fork IPC to Electron's `dialog`/`shell`, with the renderer never calling
+Electron for them. See `SPEC.md`
 #6-#11, `ARCHITECTURE.md`, and the
 [upstream contract](./docs/upstream-contract.md) for scope, seams, the
 applied local modifications, and the open D4 question (D1, D2, and D3
@@ -62,10 +66,17 @@ pnpm test apps/desktop  # supervisor, smoke, and protocol tests
 - `tests/transport-broker.spec.ts` always runs: the main broker against
   fakes (the wire gate's drops and synthesized size refusals, bidirectional
   relay, readiness denial, channel replacement, teardown).
+- `tests/native-capabilities.spec.ts` and `tests/native-channel.spec.ts`
+  always run: the OS capability registry and the main-side channel against
+  injected fakes (the closed success/cancel/failure mapping, the bounded
+  diagnostics, duplicate refusal, malformed-request classification, and the
+  teardown cancel of every pending request).
 - `tests/security.spec.ts` and `tests/boundary.spec.ts` always run: the
   IPC sender trust rule, and the SPEC §31 architectural boundary scans
   (no DSH product imports in main, the renderer's DSH imports limited to
-  the boot set, no business literals in the transport, no HTTP listeners).
+  the boot set, no business literals in the transport or the native
+  capability layers, no native protocol knowledge in the renderer or
+  preload, no HTTP listeners).
 - `tests/dsh-carrier.spec.ts` always runs: the `__DSH_TRANSPORT__` carrier
   against a scripted fake (the seam shape, event-path vs fetch routing in
   the API client, and the bundle loader's fetch + classic-script
@@ -89,8 +100,10 @@ Note). Tooling settles in stage 11.
 
 - `src/main/` — Electron main process: window, `dsh-app://` protocol,
   session hardening, the runtime supervisor (`runtime.ts`,
-  `runtime-paths.ts`), and the dumb transport broker
-  (`transport-broker.ts`). No Node APIs reach the renderer.
+  `runtime-paths.ts`), the dumb transport broker (`transport-broker.ts`),
+  and the native capability boundary (`native-capabilities.ts`,
+  `native-channel.ts`: the closed OS registry and the request/response
+  channel over the supervisor's fork IPC). No Node APIs reach the renderer.
 - `src/preload/index.cjs` — checked-in CJS supervision bridge (a sandboxed
   preload cannot load ESM); state view, state events, restart, and
   `openTransport()` handing the renderer the live transport port.
@@ -104,5 +117,5 @@ Note). Tooling settles in stage 11.
   the loader's browser-inert `node:module` require.
 - `scripts/bundle-node.ts`, `node-versions.json` — build-time download and
   sha256 verification of the pinned Node per target.
-- `tests/` — supervisor, smoke, protocol, renderer client, broker, and
-  end-to-end tests.
+- `tests/` — supervisor, smoke, protocol, renderer client, broker, native
+  capability, and end-to-end tests.

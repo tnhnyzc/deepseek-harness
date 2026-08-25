@@ -39,6 +39,9 @@
       "path": "../../packages/host/apiproxy"
     },
     {
+      "path": "../../packages/host/directory-picker"
+    },
+    {
       "path": "../../packages/util/home-paths"
     },
     {

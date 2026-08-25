@@ -11,8 +11,11 @@ fetch 兼容的请求/响应原语与不透明的有序流，main 中的哑中�
 转给 renderer，renderer 经 `window.dshDesktop.openTransport()` 使用两者。
 stage 4 经该传输从这个 renderer 引导固定的 DSH 客户端/UI 树：运行时在
 报告就绪之前发布客户端 boot 图，renderer 装上 `__DSH_TRANSPORT__` 载体
-接缝，`AppWebEntry` 接管唯一的应用根节点——没有第二个 UI。范围、接缝、
-已应用的本地改动与未决的 D4 问题（D1、D2、D3 已在 stage 3-4 解决）见
+接缝，`AppWebEntry` 接管唯一的应用根节点——没有第二个 UI。stage 5 加入
+原生能力边界：DSH 自有的 OS 操作（目录选择器、默认应用打开路径）经一条
+封闭的 runtime↔main 通道（骑在 fork IPC 上）到达 Electron 的 `dialog`/
+`shell`，renderer 绝不为它们调用 Electron。范围、接缝、已应用的本地改动
+与未决的 D4 问题（D1、D2、D3 已在 stage 3-4 解决）见
 `SPEC.md` #6-#11、`ARCHITECTURE.md` 与[上游契约](./docs/upstream-contract.md)。
 
 ## 构建
@@ -52,9 +55,14 @@ pnpm test apps/desktop  # supervisor, smoke, and protocol tests
   生命周期，以及打开/关闭的流生命周期）。
 - `tests/transport-broker.spec.ts` 总是运行：main broker 对 fake（wire 门的
   丢弃与合成尺寸拒绝、双向中继、就绪拒绝、通道替换、拆除）。
+- `tests/native-capabilities.spec.ts` 与 `tests/native-channel.spec.ts`
+  总是运行：OS 能力注册表与 main 侧通道对注入的 fake（封闭的成功/取消/
+  失败映射、有界的诊断、重复拒绝、畸形请求分类，以及拆除时对每个在途
+  请求的取消）。
 - `tests/security.spec.ts` 与 `tests/boundary.spec.ts` 总是运行：IPC 发端
   信任规则，以及 SPEC §31 架构边界扫描（main 无 DSH 产品导入、renderer 的
-  DSH 导入限于 boot 集合、传输无业务字面量、无 HTTP 监听器）。
+  DSH 导入限于 boot 集合、传输与原生能力层无业务字面量、renderer 与
+  preload 无原生协议知识、无 HTTP 监听器）。
 - `tests/dsh-carrier.spec.ts` 总是运行：`__DSH_TRANSPORT__` 载体对脚本化
   fake（接缝形状、API 客户端里的事件路径 vs fetch 路由，以及 bundle 加载
   器的 fetch + 经典脚本执行）。
@@ -73,8 +81,10 @@ stage 1 Agent Note）。工具链在 stage 11 定案。
 ## 布局
 
 - `src/main/` — Electron main 进程：窗口、`dsh-app://` 协议、session 加固、
-  运行时监督者（`runtime.ts`、`runtime-paths.ts`）与哑传输 broker
-  （`transport-broker.ts`）。Node API 不达 renderer。
+  运行时监督者（`runtime.ts`、`runtime-paths.ts`）、哑传输 broker
+  （`transport-broker.ts`），以及原生能力边界（`native-capabilities.ts`、
+  `native-channel.ts`：封闭的 OS 注册表与经 supervisor fork IPC 的
+  请求/响应通道）。Node API 不达 renderer。
 - `src/preload/index.cjs` — 签入的 CJS 监督桥（沙箱 preload 无法加载 ESM）；
   状态视图、状态事件、重启，以及把活传输 port 交给 renderer 的
   `openTransport()`。
@@ -87,4 +97,5 @@ stage 1 Agent Note）。工具链在 stage 11 定案。
   loader 在浏览器中惰性的 `node:module` require 提供桩。
 - `scripts/bundle-node.ts`、`node-versions.json` — 构建时按目标下载并做
   sha256 校验的固定 Node。
-- `tests/` — 监督者、smoke、协议、renderer 客户端、broker 与端到端测试。
+- `tests/` — 监督者、smoke、协议、renderer 客户端、broker、原生能力与
+  端到端测试。

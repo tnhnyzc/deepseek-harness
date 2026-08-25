@@ -96,3 +96,6 @@ export {
 
 // ---- Method registry and derived generics ----
 export type { RequestPayload, ResponseValue, RpcMethodMap } from './rpc-map.ts'
+
+// ---- Deployment opener seam (M4) ----
+export type { NativeOpeners } from './native-openers.ts'

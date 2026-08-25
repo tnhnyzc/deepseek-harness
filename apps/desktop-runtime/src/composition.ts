@@ -9,6 +9,7 @@
 
 import { writeFileSync } from 'node:fs'
 import { join } from 'node:path'
+import { fileURLToPath, pathToFileURL } from 'node:url'
 import type { PatchOptions } from '@deepseek-ai/cordis-plugin-include'
 import type { EntryOptions } from '@deepseek-ai/cordis-plugin-loader'
 import {
@@ -50,14 +51,24 @@ const CONNECTION_ROW_ID = 'connection'
  * The directory-picker replacement: the web composition mounts the `auto`
  * variant, which resolves the web bind host and therefore injects
  * `webServer`. The desktop runtime is a local process, so the overlay
- * disables that row and inserts the native backend directly — the same
- * "mount -native in an overlay" treatment the web composition documents for
- * deployments that pin a picker. The API gateway's `directoryPicker`
- * requirement then resolves without a web server.
+ * disables that row and inserts the desktop provider instead: the same
+ * native seat (`kind: 'native'`), but its chooser is Electron's OS dialog in
+ * the main process, reached over the native capability channel — a forked
+ * child must not spawn osascript/Zenity/KDialog/COM choosers of its own.
+ * The API gateway's `directoryPicker` requirement then resolves without a
+ * web server.
  */
 const DESKTOP_PICKER_ROW_ID = 'directory-picker'
-const DESKTOP_PICKER_INSERT_ID = 'directory-picker-native'
-const DESKTOP_PICKER_PLUGIN_NAME = '@deepseek-ai/dsh-host-directory-picker-native'
+const DESKTOP_PICKER_INSERT_ID = 'directory-picker-desktop'
+/**
+ * The desktop picker plugin's built module, beside this runtime's entry in
+ * both the development and the packaged layouts. The Loader imports module
+ * specifiers, so the file path crosses as a file URL (platform-correct on
+ * POSIX and Windows alike).
+ */
+const DESKTOP_PICKER_MODULE_NAME = pathToFileURL(
+  fileURLToPath(new URL('./directory-picker.js', import.meta.url)),
+).href
 
 /** The session-telemetry row id the DSH_TELEMETRY_DISABLED switch targets. */
 const TELEMETRY_ROW_ID = 'session-telemetry-otel'
@@ -132,7 +143,7 @@ export function composeDesktopPatches(
   if (rows.has(DESKTOP_PICKER_ROW_ID)) {
     overlays.push({ id: DESKTOP_PICKER_ROW_ID, disabled: true })
     overlays.push({
-      insert: [{ id: DESKTOP_PICKER_INSERT_ID, name: DESKTOP_PICKER_PLUGIN_NAME }],
+      insert: [{ id: DESKTOP_PICKER_INSERT_ID, name: DESKTOP_PICKER_MODULE_NAME }],
     })
   }
   // The preset row ships its default config from the bundle; the desktop

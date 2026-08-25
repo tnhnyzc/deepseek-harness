@@ -14,6 +14,14 @@
     "./transport": {
       "types": "./lib/types/transport.d.ts",
       "default": "./dist/transport.js"
+    },
+    "./native": {
+      "types": "./lib/types/native.d.ts",
+      "default": "./dist/native.js"
+    },
+    "./directory-picker": {
+      "types": "./lib/types/directory-picker.d.ts",
+      "default": "./dist/directory-picker.js"
     }
   },
   "scripts": {
@@ -30,6 +38,7 @@
     "@deepseek-ai/dsh-cmdline": "workspace:^",
     "@deepseek-ai/dsh-home-paths": "workspace:^",
     "@deepseek-ai/dsh-host-apiproxy": "workspace:^",
+    "@deepseek-ai/dsh-host-directory-picker": "workspace:^",
     "@deepseek-ai/dsh-launch-environment": "workspace:^",
     "@deepseek-ai/dsh-web-app": "workspace:^"
   }

@@ -9,6 +9,7 @@
 
 import { fork, spawnSync, type ChildProcess } from 'node:child_process'
 import { dirname } from 'node:path'
+import { isNativeRequestMessage } from '@deepseek-ai/dsh-desktop-runtime/native'
 import { fromOpaqueTransportWire, isTransportMessage, toOpaqueTransportWire } from '@deepseek-ai/dsh-desktop-runtime/transport'
 import type {
   DshBootPayload,
@@ -57,6 +58,21 @@ export interface RuntimeTransport {
   closeChannel(): void
 }
 
+/**
+ * The supervisor's half of the native capability channel: the child issues
+ * `native.request` messages over the same fork IPC channel, and responses
+ * and cancels ride back through `send`. Like the transport relay, handlers
+ * stay installed across generations; child exit fires `onClose`.
+ */
+interface RuntimeNative {
+  /** Send one native response or cancel to the live child; a no-op when not connected. */
+  send(value: object): void
+  /** Relay inbound native requests (transport and control messages are not included). */
+  onMessage(handler: (value: object) => void): void
+  /** Fired once when the current child exits, tearing the channel down. */
+  onClose(handler: () => void): void
+}
+
 export interface RuntimeSupervisor {
   /** The current observable fact. */
   view(): RuntimeStateView
@@ -74,6 +90,8 @@ export interface RuntimeSupervisor {
   bootPayload(): DshBootPayload | undefined
   /** The transport channel relay surface for the dumb broker. */
   transport: RuntimeTransport
+  /** The native capability channel relay surface. */
+  native: RuntimeNative
 }
 
 /** The legal state transitions; anything else throws (fail loud). */
@@ -163,6 +181,8 @@ export function createRuntimeSupervisor(options: RuntimeSupervisorOptions): Runt
   let stopPromise: Promise<void> | undefined
   let transportMessageHandler: ((value: object) => void) | undefined
   let transportCloseHandler: (() => void) | undefined
+  let nativeMessageHandler: ((value: object) => void) | undefined
+  let nativeCloseHandler: (() => void) | undefined
 
   const view = (): RuntimeStateView => ({
     state,
@@ -222,10 +242,14 @@ export function createRuntimeSupervisor(options: RuntimeSupervisorOptions): Runt
   const handleExit = (code: number | null, signal: NodeJS.Signals | null): void => {
     // The channel is per-generation: any exit ends it, whatever the state.
     const close = transportCloseHandler
+    const nativeClose = nativeCloseHandler
     transportMessageHandler = undefined
     transportCloseHandler = undefined
+    nativeMessageHandler = undefined
+    nativeCloseHandler = undefined
     bootPayload = undefined
     close?.()
+    nativeClose?.()
     if (state === 'stopping') {
       finishStop()
       return
@@ -268,6 +292,11 @@ export function createRuntimeSupervisor(options: RuntimeSupervisorOptions): Runt
         // The child edge encodes byte fields; restore them for the broker.
         const decoded = fromOpaqueTransportWire(message)
         if (decoded !== null) transportMessageHandler?.(decoded)
+        return
+      }
+      if (message !== null && typeof message === 'object' && isNativeRequestMessage(message)) {
+        // The native capability channel: OS capability requests only.
+        nativeMessageHandler?.(message)
         return
       }
       if (message === null || typeof message !== 'object') return
@@ -345,6 +374,12 @@ export function createRuntimeSupervisor(options: RuntimeSupervisorOptions): Runt
     closeChannel: () => { sendToChild({ type: 'runtime.transport-closed' }) },
   }
 
+  const native: RuntimeNative = {
+    send: sendToChild,
+    onMessage: (handler) => { nativeMessageHandler = handler },
+    onClose: (handler) => { nativeCloseHandler = handler },
+  }
+
   return {
     view,
     start,
@@ -352,6 +387,7 @@ export function createRuntimeSupervisor(options: RuntimeSupervisorOptions): Runt
     requestRestart,
     bootPayload: () => bootPayload,
     transport,
+    native,
   }
 }
 

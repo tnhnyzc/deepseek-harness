@@ -14,6 +14,8 @@ import {
   runtimeCwd,
   runtimeEntryPath,
 } from './runtime-paths.ts'
+import { createNativeCapabilities } from './native-capabilities.ts'
+import { createNativeChannel } from './native-channel.ts'
 import { createRuntimeSupervisor, type RuntimeSupervisor, type RuntimeStateView } from './runtime.ts'
 import { denySessionPermissions, isTrustedIpcSender, type IpcSender } from './security.ts'
 import { createTransportBroker, TRANSPORT_OPEN_CHANNEL, wrapMainPort, type BrokerChannel } from './transport-broker.ts'
@@ -104,6 +106,15 @@ if (!singleInstance) {
         return { local: wrapMainPort(channel.port1), remote: channel.port2 }
       },
     })
+    // The native capability channel: runtime requests are validated and
+    // dispatched to the OS registry; the renderer never touches this path.
+    const nativeChannel = createNativeChannel({
+      capabilities: createNativeCapabilities(),
+      send: (message) => { supervisor?.native.send(message) },
+      getWindow: () => BrowserWindow.getAllWindows()[0],
+    })
+    supervisor.native.onMessage((value) => { nativeChannel.handle(value) })
+    supervisor.native.onClose(() => { nativeChannel.teardown('runtime generation ended') })
     ipcMain.on(TRANSPORT_OPEN_CHANNEL, (event) => {
       if (!trusted(event)) return
       broker.handleOpenRequest(event.sender)
@@ -115,6 +126,7 @@ if (!singleInstance) {
     })
     app.on('before-quit', (event) => {
       broker.teardown()
+      nativeChannel.teardown('application quitting')
       const current = supervisor
       if (current === undefined) return
       const state = current.view().state
