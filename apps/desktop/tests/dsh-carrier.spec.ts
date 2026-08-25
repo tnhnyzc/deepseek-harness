@@ -42,12 +42,14 @@ function requestBody(call: FetchCall): Record<string, unknown> {
 function fakeTransport(behavior?: {
   fetch?: (call: FetchCall) => Promise<Response>
   onStream?: (stream: ScriptedStream) => void
-}): DesktopTransport & { calls: FetchCall[]; streams: ScriptedStream[] } {
+}): DesktopTransport & { calls: FetchCall[]; streams: ScriptedStream[]; openSignals: AbortSignal[] } {
   const calls: FetchCall[] = []
   const streams: ScriptedStream[] = []
-  const transport: DesktopTransport & { calls: FetchCall[]; streams: ScriptedStream[] } = {
+  const openSignals: AbortSignal[] = []
+  const transport: DesktopTransport & { calls: FetchCall[]; streams: ScriptedStream[]; openSignals: AbortSignal[] } = {
     calls,
     streams,
+    openSignals,
     async fetch(url, init) {
       const call: FetchCall = { url: urlText(url) }
       if (init !== undefined) call.init = init
@@ -55,7 +57,8 @@ function fakeTransport(behavior?: {
       if (behavior?.fetch) return behavior.fetch(call)
       throw new Error(`fake transport: unexpected fetch ${urlText(url)}`)
     },
-    async openStream() {
+    async openStream(_url, signal) {
+      if (signal !== undefined) openSignals.push(signal)
       const stream: ScriptedStream = { frames: [], closed: false }
       streams.push(stream)
       behavior?.onStream?.(stream)
@@ -198,7 +201,8 @@ describe('DesktopApiClient routing (through the seam client)', () => {
     }).__DSH_TRANSPORT__
     const onOpen = vi.fn()
     const frameCount = { value: 0 }
-    for await (const _frame of hooks.createApiClient().events.mux({}, new AbortController().signal, onOpen)) {
+    const muxController = new AbortController()
+    for await (const _frame of hooks.createApiClient().events.mux({}, muxController.signal, onOpen)) {
       frameCount.value += 1
     }
     // The opener resolved (onOpen fired), no fetch-primitive traffic ran,
@@ -207,6 +211,9 @@ describe('DesktopApiClient routing (through the seam client)', () => {
     expect(onOpen).toHaveBeenCalledTimes(1)
     expect(transport.streams).toHaveLength(1)
     expect(transport.calls).toHaveLength(0)
+    // The caller's signal rides the open itself, so the transport owns the
+    // cancellation for the stream's whole lifetime, pending open included.
+    expect(transport.openSignals).toEqual([muxController.signal])
     expect(frameCount.value).toBe(0)
     expect(dropLog).toHaveBeenCalledWith(expect.stringContaining('/api/events.mux'), expect.anything())
     dropLog.mockRestore()

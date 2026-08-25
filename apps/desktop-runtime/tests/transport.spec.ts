@@ -4,7 +4,8 @@
  * gates on credit, and `attachTransportRuntime` serves fetch traffic through
  * the real `toFetchHandler` seam against a fake host plane (including credit
  * backpressure, abort propagation, stream framing, downlink-only enforcement,
- * and port-close teardown).
+ * the release of a pending stream open by stream.close, and port-close
+ * teardown).
  */
 
 import { MessageChannel, type MessagePort } from 'node:worker_threads'
@@ -29,6 +30,7 @@ type SessionsListRequest = Parameters<ApiProxy['sessions']['list']>[0]
 type SessionsSearchParams = Parameters<ApiProxy['sessions']['search']>
 type EventsMuxParams = Parameters<ApiProxy['events']['mux']>
 type EventsHostParams = Parameters<ApiProxy['events']['host']>
+type DownloadsSessionLogParams = Parameters<ApiProxy['downloads']['sessionLog']>
 
 function fakeApiProxy(options: {
   /** One abortable signal per hung route, keyed by route, for abort assertions. */
@@ -47,6 +49,16 @@ function fakeApiProxy(options: {
       search: async (_r: SessionsSearchParams[0], signal: SessionsSearchParams[1]) => {
         options.hungSignals.set('session.search', signal)
         return new Promise<never>((_resolve, reject) => {
+          signal.addEventListener('abort', () => { reject(new Error('aborted')) }, { once: true })
+        })
+      },
+    },
+    downloads: {
+      // A GET whose response head is withheld: the stream open built on it
+      // stays pending (no acknowledgement) until it is aborted or closed.
+      sessionLog: async (_r: DownloadsSessionLogParams[0], signal: DownloadsSessionLogParams[1]) => {
+        options.hungSignals.set('sessionLog', signal)
+        return new Promise<Response>((_resolve, reject) => {
           signal.addEventListener('abort', () => { reject(new Error('aborted')) }, { once: true })
         })
       },
@@ -594,5 +606,27 @@ describe('transport runtime adapter', () => {
     await vi.waitFor(() => {
       expect(signal.aborted).toBe(true)
     })
+  })
+
+  it('releases a pending stream open on stream.close without a late terminal', async () => {
+    attach([], false)
+    // The download GET withholds its response head: the open stays pending,
+    // no acknowledgement can go out yet.
+    post({ type: 'stream.open', streamId: 'pend', url: 'http://dsh.local/api/session.export?sessionId=s1' })
+    await vi.waitFor(() => {
+      expect(hungSignals.has('sessionLog')).toBe(true)
+    })
+    const signal = hungSignals.get('sessionLog')
+    if (signal === undefined) throw new Error('signal missing')
+    expect(signal.aborted).toBe(false)
+    post({ type: 'stream.close', streamId: 'pend', reason: 'aborted' })
+    await vi.waitFor(() => {
+      expect(signal.aborted).toBe(true)
+    })
+    // The aborted GET rejects inside the open, but the stream state is gone:
+    // no late acknowledgement, error, or close may follow.
+    const r = reader
+    if (r === undefined) throw new Error('reader missing')
+    expect(await r.next(300)).toBeUndefined()
   })
 })

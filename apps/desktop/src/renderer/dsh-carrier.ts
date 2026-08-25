@@ -93,10 +93,13 @@ class DesktopApiClient extends AbstractApiClient {
    * One downstream event stream over the stream primitive. The carrier's
    * frames are the host carrier's own SSE bytes; this only replays them into
    * a readable Response body, so the base class's SSE reader — framing,
-   * envelope and frame-schema parsing, onOpen timing — runs unchanged.
+   * envelope and frame-schema parsing, onOpen timing — runs unchanged. The
+   * caller's signal rides the open itself: the transport owns its
+   * cancellation for the stream's whole lifetime, including the pending
+   * open acknowledgement, and removes its listener on every terminal.
    */
   private streamResponse(url: URL, signal: AbortSignal | undefined): Promise<Response> {
-    return this.carrier.openStream(url.href).then((stream) => {
+    return this.carrier.openStream(url.href, signal).then((stream) => {
       const frames = stream.frames()
       const body = new ReadableStream<Uint8Array>({
         async pull(controller) {
@@ -113,10 +116,6 @@ class DesktopApiClient extends AbstractApiClient {
           stream.close()
         },
       })
-      if (signal !== undefined) {
-        if (signal.aborted) stream.close()
-        else signal.addEventListener('abort', () => { stream.close() }, { once: true })
-      }
       return new Response(body, {
         status: 200,
         statusText: 'OK',

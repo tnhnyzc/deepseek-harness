@@ -307,6 +307,109 @@ describe('renderer transport: streams', () => {
     transport.close()
   })
 
+  it('aborts a pending open with the abort terminal and a generic close', async () => {
+    const { client, peer } = peerChannel()
+    const transport = createDesktopTransport(client)
+    const controller = new AbortController()
+    const pending = transport.openStream('/api/slow-open', controller.signal)
+    const open = await peer.waitForType('stream.open')
+    // The open acknowledgement is deliberately withheld: the abort must
+    // settle the caller without it.
+    controller.abort()
+    await expect(pending).rejects.toMatchObject({ name: 'AbortError' })
+    const close = await peer.waitForType('stream.close')
+    expect(close.streamId).toBe(open.streamId)
+    expect(close.reason).toBe('aborted')
+    // A late acknowledgement cannot resurrect the cancelled open or post
+    // anything further.
+    const sentBefore = peer.received.length
+    peer.send({ type: 'stream.open.ack', streamId: open.streamId, ok: true })
+    await new Promise<void>((resolve) => { setTimeout(resolve, 50) })
+    expect(peer.received.length).toBe(sentBefore)
+    transport.close()
+  })
+
+  it('aborts an opened stream with exactly one generic close and releases it', async () => {
+    const { client, peer } = peerChannel()
+    const transport = createDesktopTransport(client)
+    const controller = new AbortController()
+    peer.on('stream.open', (message) => {
+      peer.send({ type: 'stream.open.ack', streamId: message.streamId, ok: true })
+      peer.send({ type: 'stream.frame', streamId: message.streamId, sequence: 0, data: new TextEncoder().encode('f0') })
+    })
+    const stream = await transport.openStream('/api/events.mux', controller.signal)
+    const iterator = stream.frames()[Symbol.asyncIterator]()
+    const first = await iterator.next()
+    if (first.done) throw new Error('stream ended before its first frame')
+    controller.abort()
+    // The active stream ends cleanly, the way a local close ends it.
+    const second = await iterator.next()
+    expect(second.done).toBe(true)
+    await vi.waitFor(() => {
+      expect(peer.ofType('stream.close').length).toBe(1)
+    })
+    expect(peer.ofType('stream.close')[0]?.reason).toBe('aborted')
+    await expect(stream.outcome).resolves.toBeUndefined()
+    await new Promise<void>((resolve) => { setTimeout(resolve, 50) })
+    expect(peer.ofType('stream.close').length).toBe(1) // no second close
+    // The operation is released: a send after the terminal is refused.
+    await expect(stream.send(new Uint8Array(4))).rejects.toThrow(TransportError)
+    transport.close()
+  })
+
+  it('removes the abort listener when the stream ends remotely', async () => {
+    const { client, peer } = peerChannel()
+    const transport = createDesktopTransport(client)
+    const controller = new AbortController()
+    peer.on('stream.open', (message) => {
+      peer.send({ type: 'stream.open.ack', streamId: message.streamId, ok: true })
+      peer.send({ type: 'stream.frame', streamId: message.streamId, sequence: 0, data: new TextEncoder().encode('f0') })
+      peer.send({ type: 'stream.close', streamId: message.streamId, reason: 'ended' })
+    })
+    const stream = await transport.openStream('/api/events.mux', controller.signal)
+    const iterator = stream.frames()[Symbol.asyncIterator]()
+    const first = await iterator.next()
+    if (first.done) throw new Error('stream ended before its first frame')
+    const second = await iterator.next()
+    expect(second.done).toBe(true)
+    await expect(stream.outcome).resolves.toBeUndefined()
+    // The remote terminal removed the abort listener: aborting the caller's
+    // signal now posts nothing and the operation is already released.
+    controller.abort()
+    await new Promise<void>((resolve) => { setTimeout(resolve, 50) })
+    expect(peer.ofType('stream.close').length).toBe(0)
+    await expect(stream.send(new Uint8Array(4))).rejects.toThrow(TransportError)
+    transport.close()
+  })
+
+  it('removes the abort listener when the open is refused', async () => {
+    const { client, peer } = peerChannel()
+    const transport = createDesktopTransport(client)
+    const controller = new AbortController()
+    peer.on('stream.open', (message) => {
+      peer.send({ type: 'stream.open.ack', streamId: message.streamId, ok: false, reason: 'unknown-stream' })
+    })
+    await expect(transport.openStream('/api/nope', controller.signal))
+      .rejects.toMatchObject({ name: 'TransportError', code: 'unknown-stream' })
+    // The refusal terminal removed the listener: a later abort is inert.
+    controller.abort()
+    await new Promise<void>((resolve) => { setTimeout(resolve, 50) })
+    expect(peer.ofType('stream.close').length).toBe(0)
+    transport.close()
+  })
+
+  it('rejects immediately for an already-aborted signal without opening', async () => {
+    const { client, peer } = peerChannel()
+    const transport = createDesktopTransport(client)
+    const controller = new AbortController()
+    controller.abort()
+    await expect(transport.openStream('/api/never', controller.signal)).rejects.toMatchObject({ name: 'AbortError' })
+    await new Promise<void>((resolve) => { setTimeout(resolve, 50) })
+    // The open never went out, so there is no runtime-side open to release.
+    expect(peer.ofType('stream.open').length).toBe(0)
+    transport.close()
+  })
+
   it('refuses uplink frames above the bound locally', async () => {
     const { client, peer } = peerChannel()
     const transport = createDesktopTransport(client)

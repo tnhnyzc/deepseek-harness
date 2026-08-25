@@ -23,7 +23,12 @@
  * An active request-body producer is part of that lifetime: the body pump
  * arms a cancellation hook on the operation for its whole lifetime, and
  * every terminal invokes it, so a producer stalled inside `reader.read()`
- * cannot hold the fetch past the operation's death.
+ * cannot hold the fetch past the operation's death. A stream open accepts
+ * the caller's signal for its whole lifetime, including the pending open
+ * acknowledgement: an abort while the open waits posts the generic
+ * `stream.close` that releases the runtime-side open and settles the
+ * caller with the abort terminal, while an abort after the open is the
+ * clean close a local close makes.
  *
  * @module @deepseek-ai/dsh-desktop/src/renderer/transport
  */
@@ -83,8 +88,15 @@ export interface DesktopStream {
 export interface DesktopTransport {
   /** Fetch-compatible request over the transport. */
   fetch(input: string | Request, init?: RequestInit): Promise<Response>
-  /** Open one opaque stream named by the url the DSH client would name it. */
-  openStream(url: string): Promise<DesktopStream>
+  /**
+   * Open one opaque stream named by the url the DSH client would name it.
+   * @param url - the stream name the opener would use.
+   * @param signal - optional caller cancellation for the open's whole
+   * lifetime, including the pending open acknowledgement: an abort while
+   * the acknowledgement waits posts the generic stream close that releases
+   * the runtime-side open and rejects the open with the abort terminal.
+   */
+  openStream(url: string, signal?: AbortSignal): Promise<DesktopStream>
   /** Tear the channel down: settle every pending operation. */
   close(): void
 }
@@ -184,6 +196,10 @@ interface StreamOp {
   expectedSequence: number
   /** The uplink send window; the runtime returns credit into it. */
   window: TransportSendWindow
+  /** The caller's cancellation signal, present when the opener supplied one. */
+  signal: AbortSignal | undefined
+  /** The abort listener, removed when the operation actually terminates. */
+  onAbort: (() => void) | undefined
 }
 
 /**
@@ -241,6 +257,7 @@ export function createDesktopTransport(port: TransportPortLike): DesktopTranspor
   const releaseStreamOp = (op: StreamOp): void => {
     if (!streamOps.has(op.id)) return
     streamOps.delete(op.id)
+    if (op.onAbort !== undefined) op.signal?.removeEventListener('abort', op.onAbort)
   }
 
   const endStreamOp = (op: StreamOp): void => {
@@ -507,7 +524,7 @@ export function createDesktopTransport(port: TransportPortLike): DesktopTranspor
     return new Response(nullBody ? null : body, { status: head.status, statusText: head.statusText, headers: head.headers })
   }
 
-  const openStreamFn = async (url: string): Promise<DesktopStream> => {
+  const openStreamFn = async (url: string, signal?: AbortSignal): Promise<DesktopStream> => {
     if (closed) throw transportClosedError()
     const id = crypto.randomUUID()
     const op: StreamOp = {
@@ -520,13 +537,53 @@ export function createDesktopTransport(port: TransportPortLike): DesktopTranspor
       uplinkSequence: 0,
       expectedSequence: 0,
       window: new TransportSendWindow(),
+      signal,
+      onAbort: undefined,
     }
     // `outcome` is observational: a consumer may never await it, in which
     // case a terminal failure must not surface as an unhandled rejection —
     // the stream's frames already carry the same failure to the pump.
     op.outcome.promise.catch(() => undefined)
     streamOps.set(id, op)
-    post({ type: 'stream.open', streamId: id, url: new URL(url, TRANSPORT_BASE_URL).href })
+    if (signal !== undefined) {
+      // The listener stays armed for the whole stream lifetime: a pending
+      // open must be cancellable, not only an active stream, and every
+      // terminal removes it (releaseStreamOp), so a terminal stream cannot
+      // act on a later abort of the same signal.
+      const onAbort = (): void => {
+        if (op.terminal) return
+        if (op.ackSettled) {
+          // The stream is active: the abort is the clean close a local
+          // close makes.
+          endStreamOp(op)
+          post({ type: 'stream.close', streamId: id, reason: 'aborted' })
+          return
+        }
+        // The open is still pending: release the runtime-side open with the
+        // generic close and settle the caller with the abort terminal.
+        const error = new DOMException('The operation was aborted.', 'AbortError')
+        op.terminal = true
+        releaseStreamOp(op)
+        op.window.cancel()
+        post({ type: 'stream.close', streamId: id, reason: 'aborted' })
+        op.ackSettled = true
+        op.ack.reject(error)
+        op.frames.fail(error)
+        op.outcome.reject(error)
+      }
+      op.onAbort = onAbort
+      if (signal.aborted) {
+        onAbort()
+      } else {
+        signal.addEventListener('abort', onAbort, { once: true })
+      }
+    }
+    if (!op.terminal) {
+      // A pre-armed abort already settled the open: the open itself never
+      // goes out (the close onAbort posted no-ops at the peer, the way a
+      // pre-armed fetch posts fetch.abort).
+      post({ type: 'stream.open', streamId: id, url: new URL(url, TRANSPORT_BASE_URL).href })
+    }
     const handle: DesktopStream = {
       id,
       outcome: op.outcome.promise,
