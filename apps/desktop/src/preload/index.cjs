@@ -26,6 +26,20 @@ const TRANSPORT_OPEN_CHANNEL = 'dsh-desktop:transport-open';
 const TRANSPORT_PORT_CHANNEL = 'dsh-desktop:transport-port';
 const TRANSPORT_DENIED_CHANNEL = 'dsh-desktop:transport-denied';
 const TRANSPORT_OPEN_TIMEOUT_MS = 10000;
+const COMMAND_CHANNEL = 'dsh-desktop:command';
+// The closed desktop UX command vocabulary (stage 7), mirrored here because
+// a sandboxed preload cannot load the ESM shared module. The preload is the
+// enforcement point: a payload that is not a vocabulary member never
+// reaches the page. Keep in lockstep with
+// src/shared/desktop-command.ts (the menu unit test pins both sides).
+const DESKTOP_COMMANDS = new Set([
+  'new-session',
+  'open-workspace',
+  'cancel-run',
+  'rename-session',
+  'open-settings',
+  'toggle-sidebar',
+]);
 
 const api = {
   getRuntimeState: () => ipcRenderer.invoke(GET_CHANNEL),
@@ -96,6 +110,17 @@ const api = {
       ipcRenderer.once(TRANSPORT_DENIED_CHANNEL, onDenied);
       ipcRenderer.send(TRANSPORT_OPEN_CHANNEL);
     }),
+  onDesktopCommand: (callback) => {
+    const listener = (_event, command) => {
+      if (typeof command === 'string' && DESKTOP_COMMANDS.has(command)) {
+        callback(command);
+      }
+    };
+    ipcRenderer.on(COMMAND_CHANNEL, listener);
+    return () => {
+      ipcRenderer.removeListener(COMMAND_CHANNEL, listener);
+    };
+  },
 };
 
 contextBridge.exposeInMainWorld('dshDesktop', api);

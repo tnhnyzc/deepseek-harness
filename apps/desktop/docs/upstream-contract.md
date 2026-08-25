@@ -1599,6 +1599,59 @@ parity gate allows: a single `[cordis-client-runner] syncing inspect
 providers failed: … no active Connection` transient on a cold start
 (Stage 8 race window).
 
+### Stage 7 UX resolution
+
+Stage 7 added the desktop UX (SPEC §16, Agent Note
+`2026-08-25-desktop-stage7-ux`): the window is content-sized 1280×800
+(`useContentSize`, minimum content 1024×600) with the platform chrome
+untouched, and the native application menu carries the SPEC surface (app /
+File / Edit / View / Session / Window / Help) with the platform accelerators
+(`CmdOrCtrl+N`, `CmdOrCtrl+O`, `CmdOrCtrl+,`, `CmdOrCtrl+\`; no Cmd/Ctrl+K —
+the pinned client has no command palette — no OS-global shortcuts, no Escape
+binding). Menu actions never touch Harness state from main: they express a
+closed six-member `DesktopCommand` vocabulary
+(`apps/desktop/src/shared/desktop-command.ts`, channel
+`dsh-desktop:command`) sent from main to the app window's main frame,
+re-guarded by the preload (`isDesktopCommand`), and translated by the
+renderer adapter (`apps/desktop/src/renderer/desktop-commands.ts`) into the
+existing pinned-client DOM gesture each intent names (New session, Add
+workspace → composed directory flow → `host.pickDirectory`, Stop
+generating, the selected row's first menu item — Rename, the sidebar
+settings trigger, the sidebar fold). A command the live tree cannot act on
+is a deterministic no-op; the menu is safe in every state.
+
+Facts the stage settled about the pinned tree (contract-relevant):
+
+- Blank-session reuse: `connectWorkspace`
+  (`packages/client/runtime/src/client/workspaces/service.ts:89-111`)
+  reuses the target workspace's existing non-archived blank session
+  (membership plus same cwd), and `startSession` (`:177-192`) no-ops when
+  no target resolves — "new session" from a blank current session does not
+  create a second session. DSH-owned, shared with `dsh web`.
+- Product copy is locale-painted (zh or en), so desktop-side affordance
+  matching uses the closed label set of both shipped locales per button.
+- The add-workspace chain is one click deep: the workspace browser's
+  "Add workspace" button opens the add-only `WorkspacePicker`, which
+  consumes the open and raises the composed directory flow directly
+  (`packages/client/ui-workspace/src/client/WorkspacePicker.tsx:151-157`);
+  the renderless `NativeDirectoryFlow`
+  (`packages/client/ui-directory-picker-native/src/client/index.ts`) then
+  drives `ctx.workspaces.pickDirectory()` into the desktop capability
+  channel and the native dialog.
+
+Carrier changes: `src/main/menu.ts` (pure template + installer),
+`src/shared/desktop-command.ts`, the preload's `onDesktopCommand` plus
+vocabulary mirror, `src/renderer/desktop-commands.ts`, the window sizing in
+`src/main/window.ts`, and the shell CSS full-bleed fix. Two carrier defects
+were fixed: the composition overlay now inserts the
+`@deepseek-ai/dsh-client-ui-directory-picker-native` **client** surface row
+alongside its host row (without it the composed boot graph lacked the
+native flow's client half and "Add workspace" could not raise it), and the
+`apps/desktop-runtime` build order is `tsc -b` (which emits `lib/types`)
+then tsdown, because `tsdown.config.ts` bundles the `lib/types/*.js` emits
+rather than source. No pinned-tree modification — M1–M3 remain the full
+set.
+
 ---
 
 ## Stage 0 exit-criteria answers

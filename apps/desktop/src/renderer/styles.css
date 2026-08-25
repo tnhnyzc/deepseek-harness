@@ -16,6 +16,15 @@ body {
   font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
 }
 
+/* The centering is for the shell screens only. Once the pinned DSH tree
+   owns #root (no shell screen rendered), a centered grid item sizes to
+   fit-content and would pin the client below its 1024px desktop layout
+   breakpoint; the app must fill the viewport instead. */
+#root:not(:has(> .shell-state)) {
+  justify-self: stretch;
+  align-self: stretch;
+}
+
 .shell-state {
   text-align: center;
 }

@@ -20,6 +20,8 @@ import { createRuntimeSupervisor, type RuntimeSupervisor, type RuntimeStateView 
 import { denySessionPermissions, isTrustedIpcSender, type IpcSender } from './security.ts'
 import { createTransportBroker, TRANSPORT_OPEN_CHANNEL, wrapMainPort, type BrokerChannel } from './transport-broker.ts'
 import { createAppWindow } from './window.ts'
+import { DESKTOP_APP_NAME, installApplicationMenu } from './menu.ts'
+import { DESKTOP_COMMAND_CHANNEL } from '../shared/desktop-command.ts'
 
 /** The renderer channels of the supervision bridge. */
 const STATE_CHANNEL = 'dsh-desktop:runtime-state'
@@ -56,6 +58,7 @@ if (!singleInstance) {
     }
   })
   void app.whenReady().then(() => {
+    app.name = DESKTOP_APP_NAME
     denySessionPermissions(session.defaultSession)
     handleAppProtocol(rendererDistRoot())
     // The app package directory: development checkout layout or asar root.
@@ -134,6 +137,18 @@ if (!singleInstance) {
     })
     supervisor.start()
     createAppWindow()
+    installApplicationMenu({
+      appName: DESKTOP_APP_NAME,
+      isMac: process.platform === 'darwin',
+      devToolsAvailable: !app.isPackaged,
+      // The command rides only to the app window's main frame; the preload
+      // re-checks the closed vocabulary before the page sees it.
+      sendCommand: (command) => {
+        const win = BrowserWindow.getAllWindows()[0]
+        if (win !== undefined) win.webContents.send(DESKTOP_COMMAND_CHANNEL, command)
+      },
+      showAbout: () => { app.showAboutPanel() },
+    })
     app.on('window-all-closed', () => {
       app.quit()
     })

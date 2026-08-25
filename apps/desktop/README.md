@@ -19,7 +19,13 @@ takes over the single application root — no second UI. Stage 5 adds the
 native capability boundary: DSH-owned OS operations (the directory chooser,
 default-application path open) cross a closed runtime↔main channel over the
 fork IPC to Electron's `dialog`/`shell`, with the renderer never calling
-Electron for them. See `SPEC.md`
+Electron for them. Stage 6 proves the desktop is semantically equivalent to
+`dsh web` for the normal user workflow (the eleven-surface parity suite in
+`tests/dsh-parity.spec.ts`). Stage 7 adds the desktop UX: the content-sized
+native window (1280×800, minimum 1024×600) and the native application menu,
+whose actions drive the pinned client through a closed six-member command
+vocabulary with the platform accelerators — the carrier never mutates
+Harness state. See `SPEC.md`
 #6-#11, `ARCHITECTURE.md`, and the
 [upstream contract](./docs/upstream-contract.md) for scope, seams, the
 applied local modifications, and the open D4 question (D1, D2, and D3

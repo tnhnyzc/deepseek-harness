@@ -11,12 +11,23 @@ import { hardenWebContents } from './security.ts'
  * Create the single application window with the desktop security baseline
  * and load the main application page. The window may exist while the
  * runtime is still starting: the renderer projects the startup state.
+ *
+ * The ordinary native frame is the chrome strategy on every platform (no
+ * custom titlebar, no hidden traffic lights): macOS gets its native
+ * title bar with working traffic lights, Windows/Linux their standard
+ * window controls. The size is content-bounds based so the client's
+ * 1024px desktop-layout breakpoint is met identically on every platform,
+ * and the minimum keeps the window at or above that breakpoint so the app
+ * never drops into the client's narrow (rail) regime by accident.
  * @returns the application window
  */
 export function createAppWindow(): BrowserWindow {
   const win = new BrowserWindow({
+    useContentSize: true,
     width: 1280,
     height: 800,
+    minWidth: 1024,
+    minHeight: 600,
     show: false,
     webPreferences: {
       nodeIntegration: false,

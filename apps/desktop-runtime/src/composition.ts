@@ -60,6 +60,16 @@ const CONNECTION_ROW_ID = 'connection'
  */
 const DESKTOP_PICKER_ROW_ID = 'directory-picker'
 const DESKTOP_PICKER_INSERT_ID = 'directory-picker-desktop'
+const DESKTOP_PICKER_SURFACE_ID = 'directory-picker-desktop-surface'
+/**
+ * The native surface's package name: the `auto` row the overlay disables
+ * mounts both faces of the resolved interaction (host backend AND client
+ * surface), so the desktop replacement must mount the native surface too —
+ * without it the `sidebar.workspaces.directoryFlow` hole stays empty and
+ * the workspace-adding UI has no entry point. The surface's browser half
+ * drives `host.pickDirectory`, which the desktop provider above serves.
+ */
+const DESKTOP_PICKER_SURFACE_NAME = '@deepseek-ai/dsh-client-ui-directory-picker-native'
 /**
  * The desktop picker plugin's built module, beside this runtime's entry in
  * both the development and the packaged layouts. The Loader imports module
@@ -143,7 +153,10 @@ export function composeDesktopPatches(
   if (rows.has(DESKTOP_PICKER_ROW_ID)) {
     overlays.push({ id: DESKTOP_PICKER_ROW_ID, disabled: true })
     overlays.push({
-      insert: [{ id: DESKTOP_PICKER_INSERT_ID, name: DESKTOP_PICKER_MODULE_NAME }],
+      insert: [
+        { id: DESKTOP_PICKER_INSERT_ID, name: DESKTOP_PICKER_MODULE_NAME },
+        { id: DESKTOP_PICKER_SURFACE_ID, name: DESKTOP_PICKER_SURFACE_NAME },
+      ],
     })
   }
   // The preset row ships its default config from the bundle; the desktop

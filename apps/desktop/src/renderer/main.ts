@@ -15,6 +15,7 @@
 import { AppWebEntry } from '@deepseek-ai/dsh-client-web'
 import './styles.css'
 import type { DshBootPayload, RuntimeStateView } from '../shared/runtime-state.ts'
+import { installDesktopCommands } from './desktop-commands.ts'
 import { evaluateClassicScript, installDesktopCarrier, loadClientBundle } from './dsh-carrier.ts'
 import { createDesktopTransport, type DesktopTransport } from './transport.ts'
 
@@ -223,6 +224,11 @@ async function onState(view: RuntimeStateView): Promise<void> {
       break
   }
 }
+
+// The desktop UX command bridge: live only while the DSH client tree is
+// mounted; shell-screen states are deterministic no-ops (the adapter's
+// isLive gate).
+installDesktopCommands(() => app !== undefined)
 
 window.dshDesktop.onRuntimeState((view) => {
   void onState(view)

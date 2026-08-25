@@ -87,4 +87,11 @@ export interface DshDesktopApi {
    * cached for the live runtime (before its first publication).
    */
   getBootPayload(): Promise<DshBootPayload | null>
+  /**
+   * Observe native-menu desktop UX commands (stage 7): the callback fires
+   * only for members of the closed `DesktopCommand` vocabulary; everything
+   * else on the channel is dropped before it reaches the page. Returns the
+   * unsubscribe function.
+   */
+  onDesktopCommand(callback: (command: import('./desktop-command.ts').DesktopCommand) => void): () => void
 }

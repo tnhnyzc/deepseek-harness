@@ -14,9 +14,13 @@ stage 4 经该传输从这个 renderer 引导固定的 DSH 客户端/UI 树：�
 接缝，`AppWebEntry` 接管唯一的应用根节点——没有第二个 UI。stage 5 加入
 原生能力边界：DSH 自有的 OS 操作（目录选择器、默认应用打开路径）经一条
 封闭的 runtime↔main 通道（骑在 fork IPC 上）到达 Electron 的 `dialog`/
-`shell`，renderer 绝不为它们调用 Electron。范围、接缝、已应用的本地改动
-与未决的 D4 问题（D1、D2、D3 已在 stage 3-4 解决）见
-`SPEC.md` #6-#11、`ARCHITECTURE.md` 与[上游契约](./docs/upstream-contract.md)。
+`shell`，renderer 绝不为它们调用 Electron。stage 6 证明桌面端对正常用户
+工作流与 `dsh web` 语义对等（`tests/dsh-parity.spec.ts` 的十一表面
+对等性套件）。stage 7 加入桌面 UX：内容尺寸调整的 native 窗口
+（1280×800，最小 1024×600）与 native 应用菜单，其动作经封闭的六成员
+命令词表加平台加速器驱动固定版客户端——载体从不变更 Harness 状态。
+范围、接缝、已应用的本地改动与未决的 D4 问题（D1、D2、D3 已在
+stage 3-4 解决）见 `SPEC.md` #6-#11、`ARCHITECTURE.md` 与[上游契约](./docs/upstream-contract.md)。
 
 ## 构建
 
