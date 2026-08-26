@@ -117,6 +117,43 @@ describe('runtime supervisor', () => {
     expect(statesOf(events)).toEqual(['starting', 'ready', 'failed'])
   })
 
+  it('recovers through a requested restart after an unexpected death', async () => {
+    const flagFile = nextFlagFile()
+    const { supervisor, events } = createSupervisor('crash-once', { flagFile })
+    supervisor.start()
+    await waitForState(supervisor, v => v.state === 'ready')
+    const failed = await waitForState(supervisor, v => v.state === 'failed')
+    expect(failed.reason).toContain('code 3')
+    expect(statesOf(events)).toEqual(['starting', 'ready', 'failed'])
+    supervisor.requestRestart()
+    const revived = await waitForState(supervisor, v => v.state === 'ready')
+    expect(statesOf(events)).toEqual(['starting', 'ready', 'failed', 'starting', 'ready'])
+    expect(revived.reason).toBeUndefined()
+    await expect(supervisor.stop()).resolves.toBeUndefined()
+    expect(supervisor.view().state).toBe('stopped')
+  })
+
+  it('reports a signal death and retains the killed generation diagnostics across a restart', async () => {
+    const { supervisor, events } = createSupervisor('kill')
+    supervisor.start()
+    await waitForState(supervisor, v => v.state === 'ready')
+    const failed = await waitForState(supervisor, v => v.state === 'failed')
+    expect(failed.reason).toContain('signal SIGKILL')
+    expect(failed.diagnostics ?? '').toContain('fixture: boot ok (kill)')
+    // No automatic retry after the runtime reached ready.
+    expect(statesOf(events)).toEqual(['starting', 'ready', 'failed'])
+    supervisor.requestRestart()
+    const failedAgain = await waitForState(supervisor, v => v.state === 'failed')
+    expect(statesOf(events)).toEqual(['starting', 'ready', 'failed', 'starting', 'ready', 'failed'])
+    expect(failedAgain.reason).toContain('signal SIGKILL')
+    // The ring spans generations: both deaths' output is retained in the
+    // failed view, not wiped by the restart.
+    const ring = failedAgain.diagnostics ?? ''
+    const first = ring.indexOf('fixture: boot ok (kill)')
+    expect(first).not.toBe(-1)
+    expect(ring.indexOf('fixture: boot ok (kill)', first + 1)).not.toBe(-1)
+  })
+
   it('consumes exactly one automatic retry when the runtime fails before ready', async () => {
     const flagFile = nextFlagFile()
     const { supervisor, events } = createSupervisor('fail-early', { flagFile })

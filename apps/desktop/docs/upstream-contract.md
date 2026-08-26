@@ -1788,6 +1788,60 @@ Carrier changes: none — every fix is a DSH package seam shared with
 upstream-generic modifications (stage 8)" above); M1–M3 remain the
 complete Desktop-enablement set.
 
+### Stage 9 crash recovery resolution
+
+Stage 9 proved the stages 2–7 failure/restart/reconnect path under real
+kill -9 and closed the SPEC §23 windows with no carrier change (Agent
+Note `2026-08-26-desktop-stage9-crash-recovery`).
+`apps/desktop/tests/dsh-crash-recovery.spec.ts` (8) drives the built app
+against a scripted deterministic SSE provider and injects a
+process-group SIGKILL into the runtime, discovered as the runtime-entry
+process that is a direct child of the suite's Electron main (a parallel
+suite boots its own runtime from the same entry). The pinned persistence
+repair is the crash-recovery mechanism the stage pins end to end:
+
+- **`interruptedTurnClosers`**
+  (`packages/core/session/src/repair.ts:27`) is applied on cold session
+  load by the persistence coordinator's `prepareCore`
+  (`packages/session/session-persistence/src/coordinator.ts:903`): a
+  synthetic `tool/result` error for every assistant tool request without
+  a result — `TOOL_NOT_STARTED` when no `tool/call` was recorded,
+  `TOOL_OUTCOME_UNKNOWN` when one was — then `step/end`, then
+  `turn/end { reason: { kind: 'interrupted' } }`. Deterministic:
+  sequences continue the log and timestamps reuse the last real event.
+  Shared with `dsh web` and the CLI; the desktop layer fabricates no
+  session event, and the interrupted turn is never reported completed.
+- The pinned UI renders an interrupted tool turn as `Failed` + the tool
+  name + the pinned recovery text ("The tool call was interrupted after
+  it was recorded, but no result was durably recorded. Its outcome is
+  unknown. …"); the tool description and command are not in the
+  collapsed row.
+- `approval/requested` / `question/requested` are live Mux frames
+  (§7.4): a pending interaction is runtime state a crash destroys
+  entirely; the failure screen must not pretend it survived, and the
+  recovered session carries no stale panel.
+- The real runtime is quiet in normal operation (nothing on
+  stdout/stderr), so the supervisor's diagnostics ring is legitimately
+  empty after a clean crash; the failure screen renders diagnostics only
+  when the ring is non-empty, and the fixture `kill` mode
+  (`apps/desktop/tests/fixtures/runtime-fixture.mjs`) proves the
+  retention path.
+
+The supervisor fixture gained `crash-once` (exit 3 after the first
+launch's ready) and `kill` (SIGKILL after ready) modes;
+`apps/desktop/tests/runtime.spec.ts` (10) pins the post-death restart and
+the diagnostics retention. The eight E2E properties cover a crash while
+idle, mid-generation, during a shell tool, during an approval wait,
+during a question wait, during a subagent, a second crash generation, and
+a clean quit while failed. The in-place re-boot (stage 4) proved
+deterministic under a port close — fresh Context per `AppWebEntry.run()`,
+plain-assignment module facade, lazy-CJS preload, per-generation
+`__DSH_TRANSPORT__` re-install, `teardownAll` rejecting every in-flight
+operation — so no renderer or supervisor change was required.
+
+Carrier changes: none. No new shared modification: M1–M3 and U1–U3 are
+unchanged.
+
 ---
 
 ## Stage 0 exit-criteria answers

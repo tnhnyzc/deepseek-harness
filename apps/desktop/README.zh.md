@@ -24,7 +24,12 @@ stage 8 端到端证明事件日志语义：突发折叠、已取消的运行、
 （`tests/dsh-event-correctness.spec.ts` 的五属性套件）；stage 6 的三个
 发现在 DSH 接缝解决——为 drain 属主设立的有界关闭延迟契约、在连接就绪
 接缝武装的 inspect 清单、以及被证明安全的通道替换——无任何载体变更。
-范围、接缝、已应用的本地改动与未决的 D4 问题（D1、D2、D3 已在
+stage 9 证明崩溃恢复：被杀死的运行时（kill -9）让渲染器存活并呈现携带
+死亡原因与保留诊断信息的失败屏，用户请求的重启启动新一代运行时，客户端
+从持久日志重建会话，被打断的轮次由固定版持久化修复确定性闭合为
+`interrupted`——绝不为 `completed`（`tests/dsh-crash-recovery.spec.ts`
+的八属性套件），同样无任何载体变更。范围、接缝、已应用的本地改动与未决的
+D4 问题（D1、D2、D3 已在
 stage 3-4 解决）见 `SPEC.md` #6-#11、`ARCHITECTURE.md` 与[上游契约](./docs/upstream-contract.md)。
 
 ## 构建

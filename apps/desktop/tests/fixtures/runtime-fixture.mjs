@@ -3,6 +3,9 @@
  * protocol. Modes (env FIXTURE_MODE):
  *  ok             ready after a short delay; shutdown message exits 0
  *  crash          ready, then exits 3 on its own (a runtime death)
+ *  crash-once     first launch (no flag file) exits 3 after ready; the flag
+ *                 file it creates makes the next launch behave like ok
+ *  kill           ready, then SIGKILLs itself (a signal death)
  *  fail-early     first launch (no flag file) exits 1 before ready; the flag
  *                 file it creates makes the next launch behave like ok
  *  spawn-clean    ready after spawning a grandchild; shutdown kills it
@@ -82,6 +85,26 @@ switch (mode) {
     setTimeout(() => {
       sendReady()
       setTimeout(() => { process.exit(3) }, 400)
+    }, 50)
+    break
+  case 'crash-once':
+    if (flagFile !== '' && !existsSync(flagFile)) {
+      writeFileSync(flagFile, '1')
+      process.stderr.write('fixture: boot ok (crash-once, first launch)\n')
+      setTimeout(() => {
+        sendReady()
+        setTimeout(() => { process.exit(3) }, 400)
+      }, 50)
+    } else {
+      process.stderr.write('fixture: boot ok (crash-once, retry)\n')
+      setTimeout(sendReady, 50)
+    }
+    break
+  case 'kill':
+    process.stderr.write(`fixture: boot ok (${mode})\n`)
+    setTimeout(() => {
+      sendReady()
+      setTimeout(() => { process.kill(process.pid, 'SIGKILL') }, 400)
     }, 50)
     break
   default:

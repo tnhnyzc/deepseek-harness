@@ -32,7 +32,15 @@ and questions survive a renderer reload (the five-property suite in
 `tests/dsh-event-correctness.spec.ts`); the stage 6 findings are resolved
 at DSH seams — a bounded close-deferral contract for draining owners, the
 inspect manifest armed at the connection readiness seam, and the
-proven-safe channel replacement — with no carrier changes. See `SPEC.md`
+proven-safe channel replacement — with no carrier changes. Stage 9 proves
+crash recovery: a killed runtime (kill -9) leaves the renderer alive with
+a failure screen carrying the death reason and retained diagnostics, a
+user-requested restart boots a new generation, and the client
+reconstructs the sessions from the persisted log, with an interrupted
+turn durably closed `interrupted` — never `completed` — by the pinned
+persistence repair (the eight-property suite in
+`tests/dsh-crash-recovery.spec.ts`), again with no carrier changes. See
+`SPEC.md`
 #6-#11, `ARCHITECTURE.md`, and the
 [upstream contract](./docs/upstream-contract.md) for scope, seams, the
 applied local modifications, and the open D4 question (D1, D2, and D3
