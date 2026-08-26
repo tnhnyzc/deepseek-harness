@@ -116,7 +116,11 @@ class MemoryKvUnit implements KvUnit {
  */
 export class MemoryStorageBackend implements StorageBackend {
   readonly kv: KvFacet
-  private readonly openUnits = new Set<string>()
+  // Open units by name; presence is the double-open guard, and close() closes
+  // them like the real backends do (a close that left units live would let a
+  // test pass that a real backend topology would fail).
+  private readonly openUnits = new Map<string, MemoryKvUnit>()
+  private readonly drainSettled: Set<Promise<void>> = new Set()
   private closed = false
 
   /**
@@ -147,14 +151,28 @@ export class MemoryStorageBackend implements StorageBackend {
           medium = { tables: new Map(), global: null }
           this.pool.media.set(descriptor.name, medium)
         }
-        this.openUnits.add(descriptor.name)
-        return new MemoryKvUnit(this.pool, medium, descriptor, () => this.openUnits.delete(descriptor.name))
+        const unit = new MemoryKvUnit(this.pool, medium, descriptor, () => {
+          if (this.openUnits.get(descriptor.name) === unit) this.openUnits.delete(descriptor.name)
+        })
+        this.openUnits.set(descriptor.name, unit)
+        return unit
       },
     }
   }
 
+  /**
+   * Register an owner's drain settlement (see `StorageBackend.deferClose`);
+   * `close()` waits it out before closing open units.
+   * @param settled - Settles when the registrant's last writes are done.
+   */
+  deferClose(settled: Promise<void>): void {
+    this.drainSettled.add(settled)
+  }
+
   async close(): Promise<void> {
     this.closed = true
+    await Promise.allSettled([...this.drainSettled])
+    await Promise.all([...this.openUnits.values()].map(unit => unit.close()))
     this.openUnits.clear()
   }
 }

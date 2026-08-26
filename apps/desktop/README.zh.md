@@ -19,6 +19,11 @@ stage 4 经该传输从这个 renderer 引导固定的 DSH 客户端/UI 树：�
 对等性套件）。stage 7 加入桌面 UX：内容尺寸调整的 native 窗口
 （1280×800，最小 1024×600）与 native 应用菜单，其动作经封闭的六成员
 命令词表加平台加速器驱动固定版客户端——载体从不变更 Harness 状态。
+stage 8 端到端证明事件日志语义：突发折叠、已取消的运行、流中渲染器重载
+各自保持持久日志与转录精确一致，待批审批与待答问题跨渲染器重载存活
+（`tests/dsh-event-correctness.spec.ts` 的五属性套件）；stage 6 的三个
+发现在 DSH 接缝解决——为 drain 属主设立的有界关闭延迟契约、在连接就绪
+接缝武装的 inspect 清单、以及被证明安全的通道替换——无任何载体变更。
 范围、接缝、已应用的本地改动与未决的 D4 问题（D1、D2、D3 已在
 stage 3-4 解决）见 `SPEC.md` #6-#11、`ARCHITECTURE.md` 与[上游契约](./docs/upstream-contract.md)。
 

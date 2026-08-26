@@ -55,7 +55,7 @@ message feedback 不是 Session 日志内容或 Session 投影。它不发出 `f
 
 按 Session 划分的 promise 队列覆盖检查、持久性校验、伴随记录读取、比较与整行写入。这些语义会串行化经由同一服务实例的并发变更；storage-domain 自身没有跨进程条件写。
 
-Plugin disposal 会先关闭变更接纳，排空已进入各个 Session 队列的所有操作，然后才关闭 storage domain。disposal 开始后提交的变更会以生命周期故障拒绝，不会进入正在关闭的 domain。
+Plugin disposal 会先关闭变更接纳，排空已进入各个 Session 队列的所有操作，然后才关闭 storage domain；排空注册了关闭延迟（`Domain.deferClose`），设施的卸载 `closeAll` 与后端自身的 `close()` 都不会先落地并拒绝被排空的写入。disposal 开始后提交的变更会以生命周期故障拒绝，不会进入正在关闭的 domain。
 
 ## 模型体验
 

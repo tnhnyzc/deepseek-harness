@@ -26,10 +26,10 @@ Stage 6（SPEC §15）要求在加入任何桌面端 UX 之前，先证明桌面
 
 **重启语义（证据）。** 优雅关闭链按接线正确（before-quit → supervisor 停止 → runtime `runtime.shutdown` → fiber 处置 → 写后通道静默，5 秒有界自强制）：持久日志按 seq 顺序包含全部标题事件（回退标题、provider 标题、用户重命名）。暴露出两个 DSH 所有的冷启动行为，二者均与 `dsh web` 共享，均非载体缺陷：
 
-- 重启后的**列表**行标题可能短暂显示投影缓存的检查点标题：缓存（`packages/session/session-projection-cache`；web-app 行配置 `writeEveryEvents: 200`、`writeIntervalMs: 5000`）在最后一次 `turn/end` 或会话处置时打检查点，晚于最后一次 `turn/end` 落地的重命名不在冷启动行中。打开会话会重放日志尾部，行随即改标为用户重命名；无数据丢失。
-- 重启后的客户端可能在 inspect 同步输掉连接建立竞态时记录一条瞬态 `[cordis-client-runner] syncing inspect providers failed: … no active Connection`。
+- 重启后的**列表**行标题可能短暂显示投影缓存的检查点标题：缓存（`packages/session/session-projection-cache`；web-app 行配置 `writeEveryEvents: 200`、`writeIntervalMs: 5000`）在最后一次 `turn/end` 或会话处置时打检查点，晚于最后一次 `turn/end` 落地的重命名不在冷启动行中。打开会话会重放日志尾部，行随即改标为用户重命名；无数据丢失。Stage 8 已在 DSH 接缝解决（处置 drain 现在持久地给重命名打检查点，冷列表在重启后断言最新标题；`2026-08-26-desktop-stage8-correctness.md`）。
+- 重启后的客户端可能在 inspect 同步输掉连接建立竞态时记录一条瞬态 `[cordis-client-runner] syncing inspect providers failed: … no active Connection`。Stage 8 移除了该竞态（inspect 清单暂存至连接就绪接缝；`2026-08-26-desktop-stage8-correctness.md`），门槛的放行名单也随之删除。
 
-二者均属 Stage 8 所有的竞态窗口/缓存陈旧问题（已延期：竞态窗口、事件丢失、重连病理、跨渲染器重载的悬置交互、对抗性断连），不在 stage 6 范围内。重启测试断言真实的对等结果 —— 会话恢复、无运行中会话、历史重开、行在打开时改标为用户重命名、重命名在日志中持久、欢迎通知不再出现 —— 并对任何其他渲染器错误失败，仅按消息前缀放行那一条瞬态。
+二者均属 Stage 8 所有的竞态窗口/缓存陈旧问题（已延期：竞态窗口、事件丢失、重连病理、跨渲染器重载的悬置交互、对抗性断连），不在 stage 6 范围内。重启测试断言真实的对等结果 —— 会话恢复、无运行中会话、历史重开、行在打开时改标为用户重命名、重命名在日志中持久、欢迎通知不再出现 —— 并对任何渲染器错误失败（stage 6 对那条 inspect 瞬态的放行名单已删除，门槛完全严格）。
 
 **修复的载体缺陷（组合）。** `apps/desktop-runtime/package.json` 原先只声明两个 bundle 包（`dsh-base`、`dsh-web-app`）；组合后的 web-app 配置在启动时还会经 profile `node_modules` 解析 preset/工具行（agent-tool-presentation、persona、terminal、terminal-bash、tool-ask-user、tool-bash-persistent、tool-cordis、tool-pwsh-persistent），因此会话创建失败。八个包全部作为 workspace 依赖补上；knip 的 `apps/desktop-runtime` `ignoreDependencies` 从两个具名 bundle 泛化为 `@deepseek-ai/.+`，因为运行时图由 cordis 组合解析，而非静态导入。
 
@@ -39,7 +39,7 @@ Stage 6（SPEC §15）要求在加入任何桌面端 UX 之前，先证明桌面
 - 固定版客户端树在 stage 6 **零**改动；stage 4 集合（M1–M3）仍是唯一分歧。
 - 对等性套件兼作构建产物冒烟（它跑的就是 `dist/` 输出加运行时与打包 node），并为整条旅程守住控制台门槛。
 - 完整桌面端套件：125/125（114 基线 + 11 对等）。
-- 两条待上报上游的 DSH 发现：投影缓存冷启动标题陈旧（打开会话后自愈）与冷启动 inspect 同步竞态。
+- 两条暴露出的 DSH 发现（均已在 stage 8 解决，`2026-08-26-desktop-stage8-correctness.md`）：投影缓存冷启动标题陈旧（现由处置 drain 打检查点）与冷启动 inspect 同步竞态（现于连接就绪接缝武装）。
 - `DEEPSEEK_BASE_URL` 脚本化 provider 接缝成为桌面端面向 provider 行为的常设无 key 证明载体；真实 API 验证仍归 web 线 e2e。
 
 ## Alternatives considered

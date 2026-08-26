@@ -50,6 +50,8 @@ interface Bench {
     packageId: CordisDynamicPackageId
     pluginRunId: CordisDynamicPluginRunId
   } }
+  /** Inspect manifest syncs the namespace received, in order (provider ids per sync). */
+  synced: string[][]
   /** Resolutions the host received. */
   resolved: { requestId: string; resolution: unknown }[]
   /** What the namespace received. */
@@ -77,9 +79,15 @@ interface Bench {
   settle: () => Promise<void>
 }
 
-/** Mount the browser half over a module table and a loader standing on real fibers. */
-async function boot(): Promise<Bench> {
+/**
+ * Mount the browser half over a module table and a loader standing on real
+ * fibers. `connection` stands in for the wire service: when absent, the
+ * gateway-side strict get that precedes every manifest sync would refuse,
+ * exactly as on a cold boot before the first connection/reset.
+ */
+async function boot(options?: { connection?: unknown }): Promise<Bench> {
   const ctx = new Context()
+  if (options?.connection !== undefined) ctx.provide('connection', options.connection)
   await ctx.plugin(SlotRegistry)
   const factories = new Map<string, () => unknown>()
   const fibers = new Map<string, { fiber: unknown }>()
@@ -121,8 +129,12 @@ async function boot(): Promise<Bench> {
   // Every generated Remote method resolves to a RemoteResult: the carrier folds
   // its own failures into the error branch, and only an assembly fault rejects.
   const answered = <T>(value: T): Promise<{ ok: true; value: T }> => Promise.resolve({ ok: true as const, value })
+  const synced: Bench['synced'] = []
   const namespace = {
-    syncInspectManifest: () => answered(null),
+    syncInspectManifest: (providers: readonly { id: string }[]) => {
+      synced.push(providers.map(provider => provider.id))
+      return answered(null)
+    },
     resolveInspectQuery: () => answered({ accepted: true }),
     runHostHalf: () => answered({
       ok: true, pluginId: PLUGIN, packageId: PACKAGE, pluginRunId: RUN, waitingFor: [], startedHere: true,
@@ -185,6 +197,7 @@ async function boot(): Promise<Bench> {
   return {
     ctx,
     source,
+    synced,
     resolved,
     invoked,
     invokeResult,
@@ -435,6 +448,40 @@ describe('browser half', () => {
     await bench.dispose()
     await bench.settle()
     expect(runner.getSnapshot()).toEqual([])
+  })
+
+  it('defers the first manifest sync until the connection/reset readiness seam (cold boot)', async () => {
+    const errors = vi.spyOn(console, 'error').mockImplementation(() => {})
+    const bench = await boot() // no connection service: the gateway-side strict get would refuse
+    await bench.settle()
+    // No sync attempt before the seam: nothing could fail with
+    // "no active Connection" on cold boot.
+    expect(bench.synced).toEqual([])
+    ;(bench.ctx.emit as (type: string) => void)('connection/reset')
+    await bench.settle()
+    // The first reset arms the publisher: one sync of the complete staged manifest.
+    expect(bench.synced).toEqual([['Service', 'Event', 'Builtin', 'Slots', 'Theme']])
+    expect(errors.mock.calls.filter(call => String(call[0]).includes('syncing inspect providers'))).toEqual([])
+    errors.mockRestore()
+  })
+
+  it('publishes immediately when the connection is already resolvable (late entry, no empty retraction)', async () => {
+    const bench = await boot({ connection: {} })
+    await bench.settle()
+    // One complete-manifest sync — no empty-manifest retraction between arm and registration.
+    expect(bench.synced).toEqual([['Service', 'Event', 'Builtin', 'Slots', 'Theme']])
+  })
+
+  it('re-publishes the manifest on every later connection reset (reconnect behavior preserved)', async () => {
+    const bench = await boot()
+    ;(bench.ctx.emit as (type: string) => void)('connection/reset')
+    await bench.settle()
+    ;(bench.ctx.emit as (type: string) => void)('connection/reset')
+    await bench.settle()
+    expect(bench.synced).toEqual([
+      ['Service', 'Event', 'Builtin', 'Slots', 'Theme'],
+      ['Service', 'Event', 'Builtin', 'Slots', 'Theme'],
+    ])
   })
 })
 

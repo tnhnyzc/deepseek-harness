@@ -41,12 +41,30 @@ export class ClientCordisInspectRegistry {
   private readonly active = new Map<CordisInspectRequestId, AbortController>()
   private publishQueued = false
   private syncChain = Promise.resolve()
+  private armed = false
 
   /** @param host - folded manifest and query result transport. */
   constructor(private readonly host: ClientCordisInspectHost) {}
 
   /**
-   * Register one Client provider and publish a new complete manifest.
+   * Arm the manifest publisher: from now on, register/dispose sync the
+   * complete manifest, and this call publishes the already-staged set (an
+   * empty set syncs nothing, so a late caller arming before its first
+   * registration does not retract a previous generation's mirror). Until
+   * it, registrations stage providers locally without a sync attempt — for
+   * callers whose transport (the Connection the gateway resolves before
+   * every sync) is not active yet; the staged manifest goes out with the
+   * first arm instead of failing the sync. Idempotent.
+   */
+  arm(): void {
+    if (this.armed) return
+    this.armed = true
+    if (this.providers.size > 0) this.publish()
+  }
+
+  /**
+   * Register one Client provider and publish a new complete manifest
+   * (a no-op publish while the transport is un-armed).
    * @param registration - provider manifest and local handler.
    * @returns idempotent disposer.
    */
@@ -72,9 +90,9 @@ export class ClientCordisInspectRegistry {
     }
   }
 
-  /** Publish the current complete manifest, including after reconnect. */
+  /** Publish the current complete manifest, including after reconnect. No-op while the transport is un-armed. */
   publish(): void {
-    if (this.publishQueued) return
+    if (!this.armed || this.publishQueued) return
     this.publishQueued = true
     queueMicrotask(() => {
       this.publishQueued = false

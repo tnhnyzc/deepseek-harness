@@ -59,6 +59,8 @@ export class SqliteStorageBackend implements StorageBackend {
   private readonly ready: Promise<DatabaseSync>
   /** Open (or still-opening) units by name; presence is the double-open guard. */
   private readonly units = new Map<string, Promise<SqliteKvUnit>>()
+  // Drain settlements a close() must wait out before closing open units.
+  private readonly drainSettled: Set<Promise<void>> = new Set()
   private closing: Promise<void> | undefined
 
   /**
@@ -132,6 +134,15 @@ export class SqliteStorageBackend implements StorageBackend {
     return this.closing
   }
 
+  /**
+   * Register an owner's drain settlement (see {@link StorageBackend.deferClose});
+   * `close()` waits it out before closing open units.
+   * @param settled - Settles when the registrant's last writes are done.
+   */
+  deferClose(settled: Promise<void>): void {
+    this.drainSettled.add(settled)
+  }
+
   private async doClose(): Promise<void> {
     let db: DatabaseSync
     try {
@@ -141,6 +152,7 @@ export class SqliteStorageBackend implements StorageBackend {
       // every unit call, so there is nothing left to release here.
       return
     }
+    await Promise.allSettled([...this.drainSettled])
     for (const pending of [...this.units.values()]) {
       const unit = await pending.catch(() => undefined)
       await unit?.close()

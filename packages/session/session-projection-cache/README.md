@@ -15,7 +15,7 @@ A stored row `(key → {ver, seq, val})` is a fold shortcut, never an authority:
 
 ## Write policy
 
-Two mandatory points, throttled in between:
+Two mandatory points, throttled in between, drained at plugin disposal:
 
 | Trigger | Nature |
 |---|---|
@@ -23,6 +23,7 @@ Two mandatory points, throttled in between:
 | Session disposal (detach) | Mandatory — the live-to-cold moment; after it the cold ladder serves this session. |
 | `writeEveryEvents` committed events | Config throttle (count). |
 | `writeIntervalMs` since the first dirty event | Config throttle (interval). |
+| Plugin disposal | Awaited drain — settles in-flight writes, durably flushes every still-dirty session, then closes the domain; the drain registers a close deferral (`Domain.deferClose`) so neither the facility's unmount `closeAll` nor the routed backend's own `close()` lands first and rejects its final writes. A clean shutdown therefore never leaves the final checkpoint (e.g. a rename after the last write) un-written and the cold list serving a stale row. |
 
 Both `Config` fields are required (no defaults): flush cadence is a deployment choice with no universally correct value, stated in cordis.yml.
 

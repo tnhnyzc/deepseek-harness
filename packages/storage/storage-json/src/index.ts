@@ -40,7 +40,10 @@ export class JsonStorageBackend implements StorageBackend {
   // Reserved synchronously at open() entry so a concurrent open of the same
   // unit fails, and close() can await opens still in flight.
   private readonly opening = new Map<string, Promise<KvUnit>>()
+  // Drain settlements a close() must wait out before closing open units.
+  private readonly drainSettled: Set<Promise<void>> = new Set()
   private closed = false
+  private closeRun?: Promise<void>
 
   constructor(private readonly root: string) {}
 
@@ -74,10 +77,25 @@ export class JsonStorageBackend implements StorageBackend {
     return unit
   }
 
-  async close(): Promise<void> {
-    if (!this.closed) {
-      this.closed = true
-    }
+  /**
+   * Register an owner's drain settlement (see {@link StorageBackend.deferClose});
+   * `close()` waits it out before closing open units.
+   * @param settled - Settles when the registrant's last writes are done.
+   */
+  deferClose(settled: Promise<void>): void {
+    this.drainSettled.add(settled)
+  }
+
+  close(): Promise<void> {
+    // One teardown run: concurrent close() calls must not close units while
+    // the first call is still waiting out a registered deferral.
+    this.closeRun ??= this.runClose()
+    return this.closeRun
+  }
+
+  private async runClose(): Promise<void> {
+    this.closed = true
+    await Promise.allSettled([...this.drainSettled])
     await Promise.allSettled([...this.opening.values()])
     for (const unit of [...this.open.values()]) {
       await unit.close()

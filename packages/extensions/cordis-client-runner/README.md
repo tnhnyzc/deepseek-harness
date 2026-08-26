@@ -20,6 +20,8 @@ Loads converge by `(id, rev)` against live state: loading a revision this page a
 
 Nothing loads at activation, and nothing is restored after a refresh — a page runs a dynamic package only when someone answers a run request or asks for it here.
 
+The inspect-manifest sync follows the same seam: registration stages providers locally, and the first sync goes out only once the Connection can carry it (the gateway resolves `connection` before every sync, and a sync before the first `connection/reset` would fail it). The first reset arms the publisher; a plugin that applies after the reset (a late entry, e.g. HMR) probes the same strict get the gateway checks and arms immediately. Every later reset re-publishes the whole manifest.
+
 ## What a run surface reads and calls
 
 `ctx.dynamicCordisRunner` is the whole face:

@@ -20,6 +20,8 @@
 
 激活时什么都不装，刷新之后也不恢复 —— 一页只在有人回答了一次 run 请求、或有人在这一页主动要求时，才运行动态包。
 
+inspect 清单同步走同一个 seam：注册时只在本地暂存 provider，第一次同步要等到 Connection 能够承载它才发出（gateway 在每次同步前都会解析 `connection`，第一次 `connection/reset` 之前的同步会被它拒绝）。第一个 reset 武装发布者；在 reset 之后才 apply 的插件（晚到者，例如 HMR）会探测 gateway 检查的同一个 strict get，随即武装。之后每次 reset 都会重新发布完整清单。
+
 ## run 界面读什么、调什么
 
 `ctx.dynamicCordisRunner` 就是全部的面:

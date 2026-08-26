@@ -88,6 +88,23 @@ export function runKvBackendContract(label: string, create: () => Promise<KvBack
       await reopened.close()
     })
 
+    it('close waits out a registered drain deferral before closing units', async () => {
+      // A kv backend's close() closes open units, so it must defer: an owner
+      // whose drain still writes through a unit (fibers tear down
+      // concurrently) registers its settlement and close() waits it out.
+      const { backend } = await create()
+      expect(typeof backend.deferClose).toBe('function')
+      const unit = await backend.kv!.open(DESCRIPTOR)
+      let release: () => void = () => {}
+      backend.deferClose!(new Promise<void>((resolve) => { release = resolve }))
+      const closing = backend.close()
+      // The unit stays writable for the owner's drain while the close waits.
+      await unit.putRecord('alpha', 'held', { ok: true })
+      release()
+      await closing
+      await expect(unit.putRecord('alpha', 'late', { ok: true })).rejects.toMatchObject({ code: 'closed' })
+    })
+
     it('rejects operations after unit close, and close is idempotent', async () => {
       const { backend } = await create()
       const unit = await backend.kv!.open(DESCRIPTOR)

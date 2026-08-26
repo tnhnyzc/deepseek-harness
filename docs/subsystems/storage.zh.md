@@ -41,6 +41,19 @@ interface StorageBackend {
    * @returns resolution after the medium is released.
    */
   close(): Promise<void>
+
+  /**
+   * Defer the close of already-open units until `settled` resolves. A
+   * backend whose `close()` closes open units must implement this: an owner
+   * whose disposal drain still writes through an open unit (its fiber tears
+   * down concurrently with the backend plugin's fiber) registers its drain
+   * settlement at open time, and `close()` awaits every registered settlement
+   * before closing units. A backend whose `close()` leaves open units to
+   * their owners omits it. A settlement must settle: a non-settling
+   * deferral stalls `close()`.
+   * @param settled - Settles when the registrant's last writes are done.
+   */
+  deferClose?(settled: Promise<void>): void
 }
 ```
 
@@ -92,6 +105,21 @@ interface Domain<S extends DomainSpec> {
    * @returns resolution after the unit is released.
    */
   close(): Promise<void>
+
+  /**
+   * Defer an infrastructure-initiated close until `settled` resolves. An
+   * owner whose disposal drain still writes to the domain registers this at
+   * open time: plugin fibers tear down concurrently, so without the
+   * deferral the facility's unmount `closeAll` — or the routed backend's own
+   * `close()`, which closes open units — lands first and rejects the
+   * owner's final writes. The owner's own `close()` is never deferred — it
+   * is the owner's explicit teardown. The promise must settle (typically at
+   * the end of the owner's drain, in a `finally`): a non-settling deferral
+   * stalls the facility's unmount and the backend's close, bounded only by
+   * the process-shutdown grace at exit.
+   * @param settled - Settles when the owner's last writes are done.
+   */
+  deferClose(settled: Promise<void>): void
 }
 ```
 
@@ -196,6 +224,10 @@ get(name: string): DomainImpl | undefined
  * Close every domain still open on this facility. The unmount path for
  * consumers that never called `Domain.close()` themselves; closing is
  * idempotent, so double-closing an already-closed domain is harmless.
+ * Plugin fibers tear down concurrently, so a domain whose owner registered
+ * a drain deferral (its disposal drain still writes) is waited out before
+ * its close — a close that lands first would reject the owner's final
+ * writes. An owner that never deferred closes immediately as before.
  * @returns resolution after every unit is released.
  */
 async closeAll(): Promise<void>

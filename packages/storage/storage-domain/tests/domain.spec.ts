@@ -338,6 +338,36 @@ describe('close and lifecycle', () => {
     expect(() => ctx.storage.form('domain')).toThrow(/not mounted/)
   })
 
+  it('closeAll waits out a registered drain deferral before closing the domain', async () => {
+    const pool = new MemoryMediaPool()
+    const { facility } = await harness({ pool })
+    const domain = await facility.open(bareSpec)
+    const table = domain.table('rows')
+    let release: () => void = () => {}
+    domain.deferClose(new Promise<void>((resolve) => { release = resolve }))
+    const closing = facility.closeAll()
+    // The close is held: the domain stays writable while the owner's drain runs.
+    await expect(table.put('a', { label: 'x', count: 1 })).resolves.toBeUndefined()
+    release()
+    await closing
+    await expect(table.put('b', { label: 'y', count: 2 })).rejects.toMatchObject({ code: 'closed' })
+    expect(pool.media.get('bare')!.tables.get('rows')!.get('a')).toEqual({ label: 'x', count: 1 })
+  })
+
+  it('the owner close is never deferred by a registered drain', async () => {
+    const { facility } = await harness()
+    const domain = await facility.open(bareSpec)
+    const table = domain.table('rows')
+    let release: () => void = () => {}
+    domain.deferClose(new Promise<void>((resolve) => { release = resolve }))
+    await table.put('a', { label: 'x', count: 1 })
+    // An explicit owner close must not wait for a drain that never settles.
+    await domain.close()
+    release()
+    await facility.closeAll()
+    await expect(table.put('b', { label: 'y', count: 2 })).rejects.toMatchObject({ code: 'closed' })
+  })
+
   it('contains a throwing domain/changed listener without rejecting the committed write', async () => {
     const pool = new MemoryMediaPool()
     const { ctx, facility, changes } = await harness({ pool })

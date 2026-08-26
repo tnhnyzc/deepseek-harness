@@ -116,6 +116,21 @@ export interface Domain<S extends DomainSpec> {
    * @returns resolution after the unit is released.
    */
   close(): Promise<void>
+
+  /**
+   * Defer an infrastructure-initiated close until `settled` resolves. An
+   * owner whose disposal drain still writes to the domain registers this at
+   * open time: plugin fibers tear down concurrently, so without the
+   * deferral the facility's unmount `closeAll` — or the routed backend's own
+   * `close()`, which closes open units — lands first and rejects the
+   * owner's final writes. The owner's own `close()` is never deferred — it
+   * is the owner's explicit teardown. The promise must settle (typically at
+   * the end of the owner's drain, in a `finally`): a non-settling deferral
+   * stalls the facility's unmount and the backend's close, bounded only by
+   * the process-shutdown grace at exit.
+   * @param settled - Settles when the owner's last writes are done.
+   */
+  deferClose(settled: Promise<void>): void
 }
 
 /** Internal boundary handing table handles their domain-owned write machinery. */
@@ -152,6 +167,8 @@ export class DomainImpl {
   /** Set when close finishes (chain drained, unit closed): reads reject from here on. */
   private closed = false
   private disposal?: Promise<void>
+  /** The owner's drain settlement a facility-initiated close must wait for (absent: none). */
+  private drainSettled?: Promise<void>
 
   /**
    * @param ctx - Context that carries `domain/changed` emissions.
@@ -164,6 +181,9 @@ export class DomainImpl {
    * when the medium held none; `undefined` when the spec declares no global.
    * @param onClosed - Facility hook run once after teardown completes; frees
    * the domain name for a later open.
+   * @param onDeferral - Facility hook forwarding a registered drain
+   * settlement to the routed backend (whose `close()` may also close open
+   * units); a no-op when the backend never defers.
    */
   constructor(
     private readonly ctx: Context,
@@ -172,6 +192,7 @@ export class DomainImpl {
     records: Map<string, Map<string, unknown>>,
     globalValue: unknown,
     private readonly onClosed: () => void,
+    private readonly onDeferral: (settled: Promise<void>) => void,
   ) {
     this.name = spec.name
     const host: TableHost = {
@@ -231,6 +252,26 @@ export class DomainImpl {
   close(): Promise<void> {
     this.disposal ??= this.runClose()
     return this.disposal
+  }
+
+  /**
+   * Register the owner's drain settlement for an infrastructure-initiated
+   * close (see {@link Domain.deferClose}); the owner's own `close()` never
+   * consults it. The settlement is forwarded to the routed backend as well.
+   * @param settled - Settles when the owner's last writes are done.
+   */
+  deferClose(settled: Promise<void>): void {
+    this.drainSettled = settled
+    this.onDeferral(settled)
+  }
+
+  /**
+   * The registered drain settlement, for the facility's unmount `closeAll`
+   * (same-package boundary; typed consumers hold the {@link Domain} handle).
+   * @returns the settlement promise, or `undefined` when the owner deferred nothing.
+   */
+  closeDeferral(): Promise<void> | undefined {
+    return this.drainSettled
   }
 
   private async runClose(): Promise<void> {

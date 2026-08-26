@@ -25,7 +25,14 @@ Electron for them. Stage 6 proves the desktop is semantically equivalent to
 native window (1280×800, minimum 1024×600) and the native application menu,
 whose actions drive the pinned client through a closed six-member command
 vocabulary with the platform accelerators — the carrier never mutates
-Harness state. See `SPEC.md`
+Harness state. Stage 8 proves the event-log semantics end to end: a burst
+fold, a cancelled run, and a renderer reload mid-stream each keep the
+durable log and the transcript in exact agreement, and pending approvals
+and questions survive a renderer reload (the five-property suite in
+`tests/dsh-event-correctness.spec.ts`); the stage 6 findings are resolved
+at DSH seams — a bounded close-deferral contract for draining owners, the
+inspect manifest armed at the connection readiness seam, and the
+proven-safe channel replacement — with no carrier changes. See `SPEC.md`
 #6-#11, `ARCHITECTURE.md`, and the
 [upstream contract](./docs/upstream-contract.md) for scope, seams, the
 applied local modifications, and the open D4 question (D1, D2, and D3

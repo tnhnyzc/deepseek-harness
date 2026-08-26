@@ -9,7 +9,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { Context } from '@deepseek-ai/cordis'
 import { z } from 'zod'
-import Storage from '@deepseek-ai/dsh-storage'
+import Storage, { storageBackendServiceKey } from '@deepseek-ai/dsh-storage'
 import { DomainFacility } from '@deepseek-ai/dsh-storage-domain'
 import SessionStore, { SessionId } from '@deepseek-ai/dsh-session'
 import type { Session, SessionEvent } from '@deepseek-ai/dsh-session'
@@ -70,6 +70,7 @@ const headerOf = (id: SessionId, createdAt = 0, cwd?: string) =>
 
 interface HarnessOptions {
   pool?: MemoryMediaPool
+  backend?: MemoryStorageBackend
   config?: { writeEveryEvents: number; writeIntervalMs: number }
   stateVersion?: number
   logs?: Map<string, SessionEvent[]>
@@ -83,7 +84,7 @@ async function harness(options: HarnessOptions = {}) {
   const ctx = new Context()
   contexts.push(ctx)
   await ctx.plugin(Storage)
-  ctx.storage.backend.register('memory', new MemoryStorageBackend(pool))
+  ctx.storage.backend.register('memory', options.backend ?? new MemoryStorageBackend(pool))
   const facility = new DomainFacility(ctx, { backend: 'memory', routes: {} })
   ctx.storage.mount('domain', facility)
   ctx.provide('storageDomain', facility)
@@ -191,7 +192,7 @@ describe('SessionProjectionCache write policy', () => {
     await expect(ctx.sessionProjectionCache.write(clean)).rejects.toThrow('not losslessly JSON-serializable')
   })
 
-  it('plugin disposal clears armed interval timers and leaves cleaned sessions alone', async () => {
+  it('plugin disposal drains armed dirty checkpoints durably and kills their interval timers', async () => {
     vi.useFakeTimers()
     const { ctx, pool, fiber } = await harness({ config: { writeEveryEvents: 100, writeIntervalMs: 5000 } })
     const armed = ctx.sessions.create(SessionId('armed'))
@@ -201,9 +202,104 @@ describe('SessionProjectionCache write policy', () => {
     endTurn(cleaned) // mandatory write; markClean leaves {pending: 0, timer: undefined} in the map
     await vi.advanceTimersByTimeAsync(0)
     await fiber.dispose()
-    // The armed timer died with the plugin: advancing time writes nothing.
+    // The disposal drain durably checkpointed the armed session's pending state.
+    expect(storedRows(pool, armed.id)?.['cache-test/marks']?.val).toEqual({ marks: ['pending'] })
+    // ...and killed the interval timer: advancing time writes nothing further.
     await vi.advanceTimersByTimeAsync(10_000)
-    expect(storedRows(pool, armed.id)).toBeUndefined()
+    expect(storedRows(pool, armed.id)?.['cache-test/marks']?.val).toEqual({ marks: ['pending'] })
+  })
+
+  it('disposal drains a rename after the last mandatory checkpoint (clean shutdown leaves no stale cold row)', async () => {
+    const { ctx, pool, fiber } = await harness()
+    const session = ctx.sessions.create(SessionId('renamed'))
+    mark(session, ['first'])
+    endTurn(session) // mandatory checkpoint at the first title
+    await settle()
+    expect(storedRows(pool, session.id)?.['cache-test/marks']?.val).toEqual({ marks: ['first'] })
+    // A rename after the last checkpoint: dirty again, no mandatory point, far
+    // from any throttle trigger — the state only the disposal drain can save.
+    mark(session, ['renamed'])
+    await fiber.dispose() // clean shutdown: must wait for the final write
+    expect(storedRows(pool, session.id)?.['cache-test/marks']?.val).toEqual({ marks: ['renamed'] })
+  })
+
+  it('disposal waits for an in-flight mandatory write before completing', async () => {
+    let release: () => void = () => {}
+    const gate = new Promise<void>((resolve) => { release = resolve })
+    const pool = new MemoryMediaPool()
+    const backend = new MemoryStorageBackend(pool)
+    const originalOpen = backend.kv.open.bind(backend.kv)
+    backend.kv.open = async (descriptor) => {
+      const unit = await originalOpen(descriptor)
+      const originalPut = unit.putRecord.bind(unit)
+      return {
+        loadAll: unit.loadAll.bind(unit),
+        deleteRecord: unit.deleteRecord.bind(unit),
+        setGlobal: unit.setGlobal.bind(unit),
+        close: unit.close.bind(unit),
+        putRecord: (table: string, key: string, value: unknown) => gate.then(() => originalPut(table, key, value)),
+      }
+    }
+    const { ctx, fiber } = await harness({ pool, backend })
+    const session = ctx.sessions.create(SessionId('gated'))
+    mark(session, ['pending'])
+    endTurn(session) // mandatory write gated: in flight, not durable
+    let disposed = false
+    const disposing = fiber.dispose().then(() => { disposed = true })
+    await new Promise((resolve) => { setTimeout(resolve, 0) })
+    expect(disposed).toBe(false) // disposal is blocked on the gated final write
+    release()
+    await disposing
+    expect(storedRows(pool, session.id)?.['cache-test/marks']?.val).toEqual({ marks: ['pending'] })
+  })
+
+  it('disposal drain lands its final write even when the storage facility unmounts in parallel', async () => {
+    // The real storage-domain plugin mounts the facility as a sibling plugin:
+    // on tree teardown its unmount effect closes every open domain while this
+    // plugin's disposal drain is still writing (plugin fibers tear down
+    // concurrently). A close that lands before the drain's final write must
+    // not reject it — the facility waits out the owner's drain deferral.
+    const pool = new MemoryMediaPool()
+    const backend = new MemoryStorageBackend(pool)
+    let release: () => void = () => {}
+    const gate = new Promise<void>((resolve) => { release = resolve })
+    const originalOpen = backend.kv.open.bind(backend.kv)
+    backend.kv.open = async (descriptor) => {
+      const unit = await originalOpen(descriptor)
+      const originalPut = unit.putRecord.bind(unit)
+      return {
+        loadAll: unit.loadAll.bind(unit),
+        deleteRecord: unit.deleteRecord.bind(unit),
+        setGlobal: unit.setGlobal.bind(unit),
+        close: unit.close.bind(unit),
+        putRecord: (table: string, key: string, value: unknown) => gate.then(() => originalPut(table, key, value)),
+      }
+    }
+    const ctx = new Context()
+    contexts.push(ctx)
+    await ctx.plugin(Storage)
+    ctx.storage.backend.register('memory', backend)
+    const disposeBackend = ctx.provide(storageBackendServiceKey('memory'), backend)
+    const DomainPlugin = await import('@deepseek-ai/dsh-storage-domain')
+    await ctx.plugin(DomainPlugin, { backend: 'memory' })
+    await ctx.plugin(SessionStore)
+    await ctx.plugin(SessionProjectionRegistry)
+    ctx.sessionProjections.register(marksUnit())
+    ctx.provide('sessionPersistence', fakePersistence(new Map()) as never)
+    await ctx.plugin(SessionProjectionCache, { writeEveryEvents: 100, writeIntervalMs: 60_000 })
+    const session = ctx.sessions.create(SessionId('parallel-unmount'))
+    mark(session, ['base'])
+    const warn = vi.spyOn(ctx.logger, 'warn').mockImplementation(() => {})
+    endTurn(session) // mandatory write held at the gate: in flight at disposal
+    mark(session, ['final']) // dirty after it: only the disposal drain can save it
+    const disposing = ctx.fiber.dispose()
+    release()
+    await disposing
+    disposeBackend()
+    // The drain's final checkpoint is durable — no write was rejected by a
+    // facility close that landed first.
+    expect(storedRows(pool, session.id)?.['cache-test/marks']?.val).toEqual({ marks: ['final'] })
+    expect(warn).not.toHaveBeenCalled()
   })
 
   it('contains a durable write failure: logs a warning, event path unharmed, next write self-heals', async () => {

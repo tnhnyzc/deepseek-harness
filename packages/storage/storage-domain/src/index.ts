@@ -137,6 +137,11 @@ export class DomainFacility {
         const domain: DomainImpl = new DomainImpl(this.ctx, spec, unit, tables, globalValue, () => {
           this.domains.delete(spec.name)
           this.reserved.delete(spec.name)
+        }, (settled) => {
+          // The backend's own close() (its plugin fiber unmounts concurrently
+          // with the owner's drain) closes open units too: it must wait out
+          // the same drain settlement as the facility's closeAll.
+          backend.deferClose?.(settled)
         })
         this.domains.set(spec.name, domain)
         // The single type-erasure point: DomainImpl is the untyped runtime,
@@ -170,10 +175,18 @@ export class DomainFacility {
    * Close every domain still open on this facility. The unmount path for
    * consumers that never called `Domain.close()` themselves; closing is
    * idempotent, so double-closing an already-closed domain is harmless.
+   * Plugin fibers tear down concurrently, so a domain whose owner registered
+   * a drain deferral (its disposal drain still writes) is waited out before
+   * its close — a close that lands first would reject the owner's final
+   * writes. An owner that never deferred closes immediately as before.
    * @returns resolution after every unit is released.
    */
   async closeAll(): Promise<void> {
-    await Promise.all([...this.domains.values()].map(domain => domain.close()))
+    await Promise.all([...this.domains.values()].map(async (domain) => {
+      const settled = domain.closeDeferral()
+      if (settled !== undefined) await settled
+      await domain.close()
+    }))
   }
 }
 

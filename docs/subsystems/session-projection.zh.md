@@ -112,7 +112,7 @@ Generated from source by `scripts/gen-cordis-catalog.ts` (verified fresh by `pnp
 
 ### `ctx.sessionProjectionCache` — `SessionProjectionCache`
 
-The persisted projection cache service. Opens the `session_projcache` domain at init, checkpoints live sessions on a throttled write-behind (count/interval triggers from Config) plus two mandatory points — `turn/end` and session disposal (the live-to-cold moment) — and serves the cold-read ladder: cached row, persistence `readFrom` tail, registry `restore`, durable write-back. Every durable write is fail-soft: failures log a warning and the cache self-heals on the next write or cold read.
+The persisted projection cache service. Opens the `session_projcache` domain at init, checkpoints live sessions on a throttled write-behind (count/interval triggers from Config) plus two mandatory points — `turn/end` and session disposal (the live-to-cold moment) — and serves the cold-read ladder: cached row, persistence `readFrom` tail, registry `restore`, durable write-back. Every durable write is fail-soft: failures log a warning and the cache self-heals on the next write or cold read. Plugin disposal drains the write-behind: it settles in-flight writes and durably flushes every still-dirty session, so a clean shutdown never leaves the final checkpoint (for example a rename after the last write) un-written and the cold list serving a stale row.
 
 ```ts cordis-catalog
 /**
@@ -132,12 +132,16 @@ cachedSnapshot(meta: SessionHeader): ProjectionSnapshot | undefined
 /**
  * Durably checkpoint one live session NOW (both mandatory points call
  * this; tests and carriers may too). The registry cut is snapshotted at
- * this boundary (states are live references), then the whole record is
- * replaced. NOT fail-soft — callers on the fail-soft paths contain it.
+ * this boundary (states are live references — a checkpoint taken later,
+ * after teardown retires the units' registrations, would fold stale or
+ * partial state), then the store pass is queued on the session's write
+ * chain so concurrent stores land in the order their cuts were taken and a
+ * slow older cut can never clobber a newer one. NOT fail-soft — callers on
+ * the fail-soft paths contain it.
  * @param session - the live session to checkpoint.
  * @returns resolution after durability and event emission.
  */
-async write(session: Session): Promise<void>
+write(session: Session): Promise<void>
 
 /**
  * Cold-read one persisted session's projections with zero full-log load:

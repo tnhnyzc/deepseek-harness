@@ -10,6 +10,8 @@ Document-per-row: each unit table becomes a physical `"u_<unit>_<table>" (key TE
 
 Every write primitive is a single prepared statement — SQLite's per-statement atomicity satisfies the KV contract without explicit transactions, and write ordering stays the caller's responsibility (the domain layer's write chain). Missing directories and database files are created owner-only (`0o700`/`0o600`), matching the session-persistence SQLite backend.
 
+`close()` closes every open unit, but only after `deferClose` has awaited every registered drain settlement: an owner still draining writes through a unit (its fiber tears down concurrently with this plugin's) registers at open time, so its final writes are not rejected by the teardown.
+
 ## Configuration (schemastery)
 
 ```ts

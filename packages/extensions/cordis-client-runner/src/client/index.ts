@@ -15,6 +15,7 @@ import type {
   ApprovalRequestId, CordisDynamicPluginId, DynamicCordisInvokeResult, JsonValue,
   DynamicCordisInventoryRow,
 } from '@deepseek-ai/dsh-api-remotes/client'
+import type { ConnectionHandle } from '@deepseek-ai/dsh-client-connection/client'
 import type { ClientModuleSystem } from '@deepseek-ai/dsh-client-modules/client'
 import type { SlotRegistry } from '@deepseek-ai/dsh-client-runtime/client'
 // The Client Remote assembly is the one place the two planes meet: it mounts the
@@ -197,10 +198,24 @@ export function apply(ctx: Context): void {
     },
   })
   provideClientCordisInspect(ctx, inspect)
+  // The first manifest sync must wait until the Connection can carry it: the
+  // gateway resolves `connection` before every sync, and before the first
+  // connection/reset it may not resolve it yet — a sync attempted in that
+  // window fails with a benign "no active Connection" and is re-published by
+  // the first reset anyway. The client runtime (the sole owner of the
+  // connection stream) activates only once `connection` resolves, and emits
+  // connection/reset for every (re-)established generation, so the first
+  // reset is the readiness seam. A runner that applies after that reset (a
+  // late entry, e.g. HMR) probes instead — the same strict get the gateway
+  // checks, so the probe can never pass while a sync would still fail it.
+  if ((ctx.get('connection') as ConnectionHandle | undefined) !== undefined) inspect.arm()
   for (const provider of clientInspectProviders(ctx)) {
     ctx.effect(() => inspect.register(provider), `cordis-client-runner: inspect ${provider.manifest.id}`)
   }
-  ctx.on('connection/reset', () => { inspect.publish() })
+  ctx.on('connection/reset', () => {
+    inspect.arm()
+    inspect.publish()
+  })
 
   const runner = new DynamicCordisPackageRunner({
     ctx,

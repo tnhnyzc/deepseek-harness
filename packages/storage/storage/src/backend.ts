@@ -24,6 +24,19 @@ export interface StorageBackend {
    * @returns resolution after the medium is released.
    */
   close(): Promise<void>
+
+  /**
+   * Defer the close of already-open units until `settled` resolves. A
+   * backend whose `close()` closes open units must implement this: an owner
+   * whose disposal drain still writes through an open unit (its fiber tears
+   * down concurrently with the backend plugin's fiber) registers its drain
+   * settlement at open time, and `close()` awaits every registered settlement
+   * before closing units. A backend whose `close()` leaves open units to
+   * their owners omits it. A settlement must settle: a non-settling
+   * deferral stalls `close()`.
+   * @param settled - Settles when the registrant's last writes are done.
+   */
+  deferClose?(settled: Promise<void>): void
 }
 
 /** The key-value data shape: whole-unit snapshots plus per-record durable writes. */

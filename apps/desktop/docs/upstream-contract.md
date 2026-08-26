@@ -1578,12 +1578,15 @@ Facts the stage settled about the pinned tree (contract-relevant):
   first user message. A user rename appends the `session/title` event with
   `source: { kind: 'user' }` and pins the title
   (`packages/session/session-title/src/index.ts:355-374`).
-- Projection cache (`packages/session/session-projection-cache`; web-app row
+- Projection cache   (`packages/session/session-projection-cache`; web-app row
   `writeEveryEvents: 200`, `writeIntervalMs: 5000`; mandatory checkpoints at
   `turn/end` and session disposal): the cold-start session **list** can carry
   a checkpoint title older than a later user rename; opening the session
   replays the log tail and relabels the row. DSH-owned, shared with
-  `dsh web`, no data loss — Stage 8 (race windows) owns it.
+  `dsh web`, no data loss. The Stage 6 staleness observation was resolved
+  in Stage 8 (disposal-drain durability, section "Stage 8 correctness
+  resolution"): the clean-shutdown drain now checkpoints the rename, so the
+  cold list shows the latest title after a restart.
 - Workspace registry seeding: a version-2 registry at
   `<DSH_HOME>/storages/workspace.json` (`unit: { name: 'workspace',
   version: 2 }`, `tables.workspaces`) is selected by the client's
@@ -1594,10 +1597,11 @@ Facts the stage settled about the pinned tree (contract-relevant):
 Carrier changes: `apps/desktop-runtime` gains the eight preset/tool packages
 the composed web-app configuration resolves at boot (dependency declaration
 only; knip `ignoreDependencies` → `@deepseek-ai/.+`). No pinned-tree
-modification — M1–M3 remain the full set. The one console exception the
-parity gate allows: a single `[cordis-client-runner] syncing inspect
-providers failed: … no active Connection` transient on a cold start
-(Stage 8 race window).
+modification — M1–M3 remain the full set. Stage 6 allowed one console
+exception — a single `[cordis-client-runner] syncing inspect providers
+failed: … no active Connection` transient on a cold start — and deferred it
+to Stage 8, which removed the race at the runner seam; the parity gate's
+console check is now fully strict.
 
 ### Stage 7 UX resolution
 
@@ -1651,6 +1655,119 @@ native flow's client half and "Add workspace" could not raise it), and the
 then tsdown, because `tsdown.config.ts` bundles the `lib/types/*.js` emits
 rather than source. No pinned-tree modification — M1–M3 remain the full
 set.
+
+### Stage 8 correctness resolution
+
+Stage 8 closed the three Stage 6 findings at their DSH seams (no carrier
+workarounds — `apps/desktop` and `apps/desktop-runtime` are untouched, and
+M1–M3 remain the full pinned-tree modification set), then proved with a
+dedicated suite that Desktop preserves the pinned DSH event-log semantics
+exactly: no event lost, duplicated, reordered, or fabricated (Agent Note
+`2026-08-26-desktop-stage8-correctness`).
+`apps/desktop/tests/dsh-event-correctness.spec.ts` drives the built app
+against a scripted deterministic SSE provider and pins five end-to-end
+properties: a burst turn folded in exact order and multiplicity with the
+durable log's sequence order; a cancelled run whose transcript and log agree
+token for token; a renderer reload mid-stream; a pending approval answered
+after a renderer reload; and a pending question answered after a renderer
+reload. As in the parity suite, it self-skips without the built artifacts
+and fails on any renderer `console.error` or page error.
+
+**Finding 1 — cold list can show a stale title after a rename — four root
+causes, all fixed at DSH seams.** The rename was durable, but the
+projection-cache write carrying it could be lost because disposal closed
+storage out from under the cache's own write chain:
+
+- A — the storage facility `closeAll` closed domains in parallel with the
+  owner's `close()` drain, so the drain's final put raced the unit close
+  (`packages/storage/storage-domain/src/index.ts`);
+- B — `session-projection-cache` started a fresh store per `write()`, so two
+  in-flight stores of one session interleaved read-modify-put and an older
+  write could clobber a newer one; fixed with a per-session write chain
+  (`queueWrite`) whose registration-boundary cut is taken eagerly;
+- C — the rename cut was registered late, letting a pre-cut write store
+  after the cut and resurrect the old title; fixed by cutting eagerly at
+  the admission boundary;
+- D — the remaining E2E failure: the storage plugin's disposer calls
+  `backend.close()`, which force-closed every open unit under a
+  still-draining domain (`packages/storage/storage-json/src/index.ts`), so
+  the drain's final put failed with `unit … is closed` even with A–C fixed.
+  The in-memory conformance backend hid D by not closing its units.
+
+The DSH-wide fix is a bounded close-deferral contract.
+`Domain.deferClose(settled)` (`packages/storage/storage-domain/src/domain.ts`)
+lets an owner register a settlement that infrastructure-initiated closes
+await: the facility `closeAll` and, via the `DomainImpl` `onDeferral` hook,
+the routed backend's `close()`. The owner's own `close()` is never deferred,
+so a deferral can never deadlock disposal; settlement is bounded by the
+process-shutdown grace. `StorageBackend.deferClose?(settled)`
+(`packages/storage/storage/src/backend.ts`) is optional for a backend whose
+close never touches open units but required for kv backends by the
+conformance suite (`packages/storage/storage/tests/contract.ts`); json and
+sqlite await deferrals before closing units, and the json close is run-once
+so a concurrent second `close()` cannot close units while the first still
+waits. The projection cache and message feedback each register their drain
+settlement and settle it in `finally`. Verification: the deterministic
+facility-unmount repro in `cache.spec.ts` (reverting A fails it), the
+storage-domain deferral contract tests, and the E2E rename → clean shutdown
+→ restart → cold-list title assertion in the parity suite.
+
+**Finding 2 — cold-start inspect-sync transient — fixed at the
+cordis-client-runner seam.** The first inspect-manifest sync could run
+before the `connection` the gateway resolves before every sync is active;
+the attempt then failed with a benign "no active Connection" and the first
+`connection/reset` re-published anyway. The registry now stages
+un-armed: registrations stage providers locally until `arm()`, and the
+runner arms at the first `connection/reset` — the readiness seam, since the
+client runtime activates only once `connection` resolves and emits a reset
+per (re-)established generation (`packages/extensions/cordis-client-runner/
+src/client/index.ts`). A runner that applies after that reset (late entry,
+HMR) probes the same strict `ctx.get('connection')` the gateway checks, so
+the probe can never pass while a sync would still fail it. The transient is
+gone: the parity suite's cold-restart console gate is fully strict (the
+Stage 6 "one console exception" no longer exists), and the restarted client
+boots clean.
+
+**Finding 3 — transport channel replacement — no fix required.** The broker
+may replace the channel on re-open while a previous client object still
+holds a port. That is safe: the renderer transport addresses operations by
+`crypto.randomUUID()`, and a new client silently drops frames for unknown
+ids, so stale in-flight responses from a replaced channel cannot be
+misattributed (`apps/desktop/src/renderer/transport.ts`);
+`RuntimeTransport.onMessage`/`onClose` are single-slot replacements
+(`apps/desktop/src/main/runtime.ts:373-375`), so no listener accumulates;
+the product flow never replaces a channel with a live old client (a window
+tears down its port before any re-open, and `main.ts` starts the app only
+when no live app exists); and when the port closes the broker's
+`closeChannel()` reaches the child, whose transport-runtime disposer aborts
+every in-flight operation. No DSH or carrier change; the correctness suite
+exercises the reload/re-attach path.
+
+Facts the stage settled about the pinned tree (contract-relevant):
+
+- The durable `assistant/chunk` records are the streaming protocol itself —
+  `block-start` / `text-delta` / `block-end` / `usage` / `finish`. A
+  `block-end` repeats the block's full text, so per-chunk correctness must
+  be measured on the `text-delta` records, not substrings of the log.
+- Every prompt is durably spliced: an `agent/inbox/spliced` inserts the
+  user message into the next-turn inbox and a second splices it out at turn
+  start. Prompt text therefore also appears in the log as the splice.
+- A renderer reload detaches the client without cancelling the run: the
+  turn keeps executing in the runtime and completes, and the reconnected
+  client folds the durable log (every chunk exactly once) instead of a
+  detach-time snapshot. Pending approvals and questions are runtime state
+  and survive the reload answerable.
+- `approval/asked` carries `{ id, toolName, callId, reason }`; the escalated
+  tool's arguments live in the `tool/call` record, and `approval/decided`
+  links back by `id`. A user stop ends the turn with
+  `turn/end { reason: { kind: 'aborted', reason: { kind: 'user' } } }`; a
+  completed turn ends `{ reason: { kind: 'completed' } }`.
+- `session.list` rows carry the projection baseline
+  (`projections: { asOfSeq, values }`), which is the cold list's title
+  source; the parity suite now asserts the renamed title there post-restart.
+
+Carrier changes: none — every fix is a DSH package seam shared with
+`dsh web`. No pinned-tree modification — M1–M3 remain the full set.
 
 ---
 

@@ -55,7 +55,7 @@ A matching-version no-op returns the already stored item with unchanged version 
 
 A per-Session promise queue encloses inspection, durability validation, sidecar read, comparison, and whole-row write. These semantics serialize concurrent mutations through one service instance; storage-domain itself has no cross-process conditional write.
 
-Plugin disposal closes mutation admission, drains every operation already accepted into the per-Session queues, and only then closes the storage domain. A mutation submitted after disposal begins rejects as a lifecycle failure instead of entering a closing domain.
+Plugin disposal closes mutation admission, drains every operation already accepted into the per-Session queues, and only then closes the storage domain; the drain registers a close deferral (`Domain.deferClose`) so neither the facility's unmount `closeAll` nor the backend's own `close()` can land first and reject the drained writes. A mutation submitted after disposal begins rejects as a lifecycle failure instead of entering a closing domain.
 
 ## Model Experience
 

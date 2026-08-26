@@ -9,6 +9,7 @@ JSON backend for the [storage hub](../storage/README.md): one human-readable `<u
 - The in-memory unit state is authoritative; every write primitive republishes the whole file via temp-write + fsync + atomic `rename()` replace. A unit file is always the complete current net state — legibility is this backend's reason to exist; scale is the SQLite backend's job.
 - A missing file opens as an empty unit and materializes on the first write. A foreign or unparsable file rejects with `malformed-medium`; a stored version differing from the descriptor rejects with `version-mismatch` (no migration, pre-release stance).
 - Write ordering across calls belongs to the caller (the domain layer's write chain); each single call is atomic and durable once resolved.
+- `close()` closes every open unit, but only after `deferClose` has awaited every registered drain settlement: an owner still draining writes through a unit (its fiber tears down concurrently with this plugin's) registers at open time, so its final writes are not rejected by the teardown.
 
 ## Config
 

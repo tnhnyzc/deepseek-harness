@@ -230,6 +230,8 @@ interface SessionSummary {
   blank: boolean
   running: boolean
   cwd?: string
+  /** Projection baseline for the row (the cold list's title hint). */
+  projections?: { asOfSeq: number; values: Record<string, unknown> }
 }
 
 /**
@@ -574,6 +576,11 @@ describe.skipIf(!guiAvailable() || !runtimeBuilt)('desktop DSH web parity', () =
     await expect.poll(async () => (await rpc<{ items: SessionSummary[] }>('session.list', {})).items.length, { timeout: 30_000 }).toBe(2)
     const sessions = await rpc<{ items: SessionSummary[] }>('session.list', {})
     expect(sessions.items.every(item => !item.running)).toBe(true)
+    // The cold list reads the title from the persisted projection cache: the
+    // projection cache's disposal drain durably checkpointed the rename during
+    // the clean shutdown above, so the latest title shows without opening the
+    // session (a rename after the last checkpoint must not stay invisible).
+    expect(sessions.items.some(item => item.projections?.values.title === 'Parity renamed')).toBe(true)
     // The session that carried the turns reopens with its rendered history.
     // Only a non-blank session row carries its row-menu button, which names the
     // durable row (the blank sibling renders a New Session placeholder).
@@ -584,18 +591,14 @@ describe.skipIf(!guiAvailable() || !runtimeBuilt)('desktop DSH web parity', () =
     await expect.poll(() => win.evaluate(() => document.body.innerText.includes('QUESTION_E_DONE')), { timeout: 30_000 }).toBe(true)
     await expect.poll(() => win.evaluate(() => document.body.innerText.includes('TOOL_B_DONE')), { timeout: 15_000 }).toBe(true)
     // The durable user rename is reflected once the session's log is replayed
-    // on open. (The cold-start list may briefly show the projection-cache
-    // checkpoint title, which lags a rename that landed after the last
-    // turn/end; that DSH-owned staleness is a Stage 8 concern.)
+    // on open.
     await expect.poll(async () => (await sessionRow.innerText()).split('\n')[0], { timeout: 15_000 }).toBe('Parity renamed')
     // Durability: the user rename is the durable title in the log.
     const postRestartTitles = Object.values(sessionLogTitles()).flat()
     expect(postRestartTitles.some(row => row.title === 'Parity renamed' && row.source === 'user')).toBe(true)
-    // Console: fail on any renderer error other than the bounded cold-start
-    // inspect-sync race (the restarted client can lose its bring-up race);
-    // that race window is Stage 8's.
-    const unexpected = consoleErrors.filter(line => !line.startsWith('[cordis-client-runner] syncing inspect providers failed:'))
-    expect(unexpected).toEqual([])
+    // Console: the restarted client's first inspect-manifest sync waits for the
+    // Connection readiness seam, so cold boot must come up clean.
+    expect(consoleErrors).toEqual([])
     expect(pageErrors).toEqual([])
   }, 240_000)
 })

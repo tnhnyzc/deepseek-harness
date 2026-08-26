@@ -159,6 +159,8 @@ export class MessageFeedbackService extends TypertRemoteService {
   private table?: KvTable<SessionId, MessageFeedbackRow>
   private readonly operationTails = new Map<SessionId, Promise<void>>()
   private mutationAdmissionOpen = true
+  /** Settles the facility close deferral when the disposal drain finishes (its `finally`). */
+  private disposalSettled?: () => void
 
   /**
    * @param ctx - Host context carrying persistence and the storage-domain form.
@@ -172,10 +174,20 @@ export class MessageFeedbackService extends TypertRemoteService {
   /** Open and own the one message-feedback sidecar domain. */
   protected async [Service.init](): Promise<void> {
     const domain = await this.ctx.storageDomain.open(messageFeedbackDomainSpec)
+    // The facility unmounts concurrently with this drain and would otherwise
+    // close the domain under an in-flight mutation: defer its close until the
+    // drain settles (settled in the drain's `finally`, so a drain failure
+    // cannot stall the facility's unmount).
+    const settled = new Promise<void>((resolve) => { this.disposalSettled = resolve })
+    domain.deferClose(settled)
     this.ctx.effect(() => async () => {
-      this.mutationAdmissionOpen = false
-      await Promise.all(this.operationTails.values())
-      await domain.close()
+      try {
+        this.mutationAdmissionOpen = false
+        await Promise.all(this.operationTails.values())
+        await domain.close()
+      } finally {
+        this.disposalSettled?.()
+      }
     }, 'message-feedback.domainClose')
     this.table = domain.table('sessions')
   }

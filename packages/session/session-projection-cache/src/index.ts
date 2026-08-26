@@ -20,7 +20,7 @@ import type { Session, SessionEvent, SessionHeader, SessionId } from '@deepseek-
 // (`ctx.sessionPersistence`), which this service reads on the cold path.
 import type {} from '@deepseek-ai/dsh-session-persistence'
 import type { ProjectionCheckpoint, ProjectionSnapshot } from '@deepseek-ai/dsh-session-projection'
-import type { KvTable } from '@deepseek-ai/dsh-storage-domain'
+import type { Domain, KvTable } from '@deepseek-ai/dsh-storage-domain'
 import { projectionCacheDomainSpec } from './spec.ts'
 import type { CheckpointIdentity, CheckpointRecord } from './spec.ts'
 
@@ -67,6 +67,10 @@ interface DirtyState {
  * cold-read ladder: cached row, persistence `readFrom` tail, registry
  * `restore`, durable write-back. Every durable write is fail-soft: failures
  * log a warning and the cache self-heals on the next write or cold read.
+ * Plugin disposal drains the write-behind: it settles in-flight writes and
+ * durably flushes every still-dirty session, so a clean shutdown never
+ * leaves the final checkpoint (for example a rename after the last write)
+ * un-written and the cold list serving a stale row.
  */
 export class SessionProjectionCache extends Service {
   static inject = ['storageDomain', 'sessionProjections', 'sessionPersistence', 'sessions']
@@ -75,6 +79,12 @@ export class SessionProjectionCache extends Service {
 
   private table?: KvTable<SessionId, CheckpointRecord>
   private readonly dirty = new Map<Session, DirtyState>()
+  /** In-flight fail-soft checkpoint writes that disposal must settle. */
+  private readonly inFlight = new Set<Promise<void>>()
+  /** Per-session tail of the durable write chain (a session absent is clean). */
+  private readonly writeTails = new Map<Session, Promise<void>>()
+  /** Settles the facility close deferral when the disposal drain finishes (its `finally`). */
+  private disposalSettled?: () => void
 
   constructor(ctx: Context, public config: Config) {
     super(ctx, 'sessionProjectionCache')
@@ -83,9 +93,14 @@ export class SessionProjectionCache extends Service {
   /** Open the domain and install the write-behind listeners. */
   protected async [Service.init](): Promise<void> {
     const domain = await this.ctx.storageDomain.open(projectionCacheDomainSpec)
-    this.ctx.effect(() => () => domain.close(), 'sessionProjectionCache.domainClose')
     this.table = domain.table('sessions')
-    this.installWritePath()
+    // The facility unmounts concurrently with this plugin's drain and would
+    // otherwise close the domain under it: defer its close until the drain
+    // settles (settled in the drain's `finally`, so a drain failure cannot
+    // stall the facility's unmount).
+    const settled = new Promise<void>((resolve) => { this.disposalSettled = resolve })
+    domain.deferClose(settled)
+    this.installWritePath(domain)
   }
 
   /**
@@ -132,21 +147,35 @@ export class SessionProjectionCache extends Service {
   /**
    * Durably checkpoint one live session NOW (both mandatory points call
    * this; tests and carriers may too). The registry cut is snapshotted at
-   * this boundary (states are live references), then the whole record is
-   * replaced. NOT fail-soft — callers on the fail-soft paths contain it.
+   * this boundary (states are live references — a checkpoint taken later,
+   * after teardown retires the units' registrations, would fold stale or
+   * partial state), then the store pass is queued on the session's write
+   * chain so concurrent stores land in the order their cuts were taken and a
+   * slow older cut can never clobber a newer one. NOT fail-soft — callers on
+   * the fail-soft paths contain it.
    * @param session - the live session to checkpoint.
    * @returns resolution after durability and event emission.
    */
-  async write(session: Session): Promise<void> {
+  write(session: Session): Promise<void> {
     const rows = this.ctx.sessionProjections.checkpoint(session)
     this.markClean(session)
-    // Durability barrier: the checkpoint cut was taken above, so flushing
-    // AFTER it guarantees every event inside the cut is durably logged
-    // before the cache row lands — a crash can leave the cache behind the
-    // log (longer tail replay) but never ahead of it (phantom values folded
-    // from events no stored log contains). At detach the store entry is
-    // already gone; persistence's own retirement drain covers that path and
-    // any residual overreach is caught by the cold read's anchored floor.
+    return this.queueWrite(session, () => this.storeAfterBarrier(session, rows))
+  }
+
+  /**
+   * One write-chain slot: the durability barrier, then the whole-record store.
+   * @param session - the session whose store is serialized on its chain.
+   * @param rows - The cut snapshotted at the {@link write} boundary.
+   * @returns resolution after durability and event emission.
+   */
+  private async storeAfterBarrier(session: Session, rows: ProjectionCheckpoint): Promise<void> {
+    // Durability barrier: the checkpoint cut was taken before this slot, so
+    // flushing AFTER it guarantees every event inside the cut is durably
+    // logged before the cache row lands — a crash can leave the cache behind
+    // the log (longer tail replay) but never ahead of it (phantom values
+    // folded from events no stored log contains). At detach the store entry
+    // is already gone; persistence's own retirement drain covers that path
+    // and any residual overreach is caught by the cold read's anchored floor.
     if (this.ctx.sessions.get(session.id) === session) await this.ctx.sessions.flush(session)
     await this.put(session.id, identityOf(session.header), rows)
   }
@@ -197,44 +226,95 @@ export class SessionProjectionCache extends Service {
 
   // --- write-behind (throttle + mandatory points) ---
 
-  private installWritePath(): void {
-    // Every committed event advances the dirty counter; turn/end is a
-    // mandatory point (the durable value most reads want is the turn-final
-    // one), count/interval throttle the in-turn stream.
-    this.ctx.on('session/event', (session: Session, event: SessionEvent) => {
+  private installWritePath(domain: Domain<typeof projectionCacheDomainSpec>): void {
+    // One disposer: a fiber tears its effects down in parallel, so the drain
+    // and the domain close must be a single unit — the drain writes through
+    // the domain, so it has to finish before the close lands. A clean
+    // shutdown must leave every committed event's projection state durably
+    // checkpointed: the mandatory detach write is fire-and-forget from its
+    // listener, so without this drain a rename after the last checkpoint
+    // would stay un-written and the cold list would serve a stale row.
+    const disposeEvent = this.ctx.on('session/event', (session: Session, event: SessionEvent) => {
       if (event.type === 'turn/end') {
-        void this.flushSoft(session, 'turn/end')
+        this.track(this.flushSoft(session, 'turn/end'))
         return
       }
       const state = this.dirty.get(session) ?? { pending: 0, timer: undefined }
       this.dirty.set(session, state)
       state.pending += 1
       if (state.pending >= this.config.writeEveryEvents) {
-        void this.flushSoft(session, 'count threshold')
+        this.track(this.flushSoft(session, 'count threshold'))
         return
       }
       state.timer ??= setTimeout(() => {
-        void this.flushSoft(session, 'interval')
+        this.track(this.flushSoft(session, 'interval'))
       }, this.config.writeIntervalMs)
     })
 
     // Detach (the live-to-cold moment): the second mandatory point. After
     // this write the cold-read ladder serves the session from the cache.
-    // flushSoft's synchronous prefix reads and resets the dirty state, so
-    // dropping it (timer already cleared by markClean) right after is safe.
-    this.ctx.on('session/disposed', (session: Session) => {
-      void this.flushSoft(session, 'detach')
+    // The listener cannot await, so the write is tracked: the disposal drain
+    // settles it before shutdown completes. flushSoft's synchronous prefix
+    // reads and resets the dirty state, so dropping it right after is safe.
+    const disposeDisposed = this.ctx.on('session/disposed', (session: Session) => {
+      this.track(this.flushSoft(session, 'detach'))
       this.markClean(session)
       this.dirty.delete(session)
     })
 
-    // Clear pending timers with the plugin (their sessions outlive the cache).
-    this.ctx.effect(() => () => {
-      for (const state of this.dirty.values()) {
-        if (state.timer !== undefined) clearTimeout(state.timer)
+    this.ctx.effect(() => async () => {
+      try {
+        // Close admission FIRST, in this disposer: effects on one fiber tear
+        // down concurrently, so the listener disposers cannot be relied on to
+        // run ahead of this drain. Once admission is closed, `inFlight` is a
+        // complete set — a detach write from an already-dispatching store
+        // lands in it synchronously and the settle loop below still catches
+        // it — and no newer dirty state or write can appear.
+        disposeEvent()
+        disposeDisposed()
+        for (const state of this.dirty.values()) {
+          if (state.timer !== undefined) clearTimeout(state.timer)
+        }
+        while (this.inFlight.size > 0) await Promise.allSettled([...this.inFlight])
+        for (const [session, state] of this.dirty) {
+          if (state.pending > 0) this.track(this.flushSoft(session, 'disposal drain'))
+        }
+        while (this.inFlight.size > 0) await Promise.allSettled([...this.inFlight])
+        this.dirty.clear()
+        await domain.close()
+      } finally {
+        this.disposalSettled?.()
       }
-      this.dirty.clear()
-    }, 'sessionProjectionCache.timers')
+    }, 'sessionProjectionCache.disposal')
+  }
+
+  /** Retain one fail-soft write until settlement so disposal can settle it. */
+  private track(run: Promise<void>): void {
+    this.inFlight.add(run)
+    const forget = (): void => { this.inFlight.delete(run) }
+    void run.then(forget, forget)
+  }
+
+  /**
+   * Queue one checkpoint-and-store pass behind this session's prior passes.
+   * A checkpoint's cut is taken at its chain slot, so passes land in the
+   * order they were queued: a slow older cut (one that stalled on its
+   * durability barrier) can never overwrite a newer one. A failed pass still
+   * lets the next one run — the cache self-heals on the next write.
+   * @param session - the session whose passes serialize.
+   * @param run - One checkpoint-and-store pass.
+   * @returns the pass's own settlement (rejections propagate to the caller;
+   *   the chain itself moves on).
+   */
+  private queueWrite(session: Session, run: () => Promise<void>): Promise<void> {
+    const previous = this.writeTails.get(session) ?? Promise.resolve()
+    const result = previous.then(run, run)
+    const tail = result.then(() => undefined, () => undefined)
+    this.writeTails.set(session, tail)
+    void tail.then(() => {
+      if (this.writeTails.get(session) === tail) this.writeTails.delete(session)
+    })
+    return result
   }
 
   /**
