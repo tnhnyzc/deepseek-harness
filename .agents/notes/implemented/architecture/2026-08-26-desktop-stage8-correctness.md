@@ -12,7 +12,7 @@ Stage 8 (SPEC §22) must prove that Desktop preserves the pinned DSH event-log s
 2. **Cold-start inspect-sync transient.** One `[cordis-client-runner] syncing inspect providers failed: … no active Connection` console error on cold boot that the parity gate had to special-case.
 3. **Transport channel replacement.** The broker replaces the channel on re-open; Stage 6 could not exclude that a replaced channel misdelivers a stale in-flight response.
 
-The carrier-only rule is strict: a shared DSH defect gets a DSH-seam fix (shared with `dsh web`), never a desktop-side workaround, and the pinned tree stays untouched (M1–M3 remain the full local modification set).
+The carrier-only rule is strict: a shared DSH defect gets a DSH-seam fix (shared with `dsh web`), never a desktop-side workaround, and the Desktop carrier packages stay untouched (the stage 4 carrier set M1–M3 is unchanged; the fixes themselves become the new shared fork-delta set U1–U3, accounted in `apps/desktop/docs/upstream-contract.md`).
 
 ## Decision
 
@@ -39,7 +39,7 @@ The fix is a DSH-wide contract with a bounded scope: `Domain.deferClose(settled)
 
 ## Consequences
 
-- Stage 8 exit criterion met: the three Stage 6 findings are resolved at DSH seams with no carrier changes and no pinned-tree modification (M1–M3 remain the full set), and the correctness suite proves the event-preservation properties end to end.
+- Stage 8 exit criterion met: the three Stage 6 findings are resolved at DSH seams with no carrier changes; the pinned-source delta is the shared U1–U3 set (upstream-contract.md), M1–M3 remain the complete Desktop-enablement set, and the correctness suite proves the event-preservation properties end to end.
 - Full desktop suite: 152 (147 baseline + 5 event correctness).
 - The deferral contract is now load-bearing DSH API: any future owner that drains on disposal must register its settlement, and any kv backend whose `close()` touches open units must implement `deferClose` (the conformance suite enforces both).
 - The storage-json run-once close removed a latent concurrent-close asymmetry (a second `close()` could close units while the first still awaited deferrals) that affected every consumer, not just Desktop.

@@ -20,7 +20,7 @@ Stage 7（SPEC §16）要在 stage 6 的功能对等之上加入桌面端专属�
 - 产品文案按活动语言涂绘（zh 或 en），因此每个手势匹配两个已发布语言的封闭标签集合，而非单一语言的字符串。
 - 当 shell 屏幕在位（无活动客户端树）以及树无法动作的状态（无选中行、无生成中、无可渲染的可供性）下，命令是确定性空操作：菜单在任何状态都保持安全，而非由页面猜。
 
-没有新增 wire 方法，main 从不变更 Harness 状态，固定版树保持零改动 —— M1–M3 仍是本地修改的完整集合。
+没有新增 wire 方法，main 从不变更 Harness 状态，固定版客户端树保持零改动 —— stage 7 未新增修改（stage 8 的共享集 U1–U3 在其后；`2026-08-26-desktop-stage8-correctness.md`）。
 
 **本阶段修复的载体缺陷。**（1）桌面端组合覆盖层（`apps/desktop-runtime/src/composition.ts`）原先只插入原生目录选择器的*宿主*行；组合后的 boot 图还需要 `@deepseek-ai/dsh-client-ui-directory-picker-native` 的*客户端*行，缺了它 "Add workspace" 可供性永远不会拉起原生流（探针证明缺失：`addWorkspace:false`）。覆盖层现在插入两行，`apps/desktop-runtime` 把该 surface 包声明为 workspace 依赖。（2）构建顺序：`apps/desktop-runtime/tsdown.config.ts` 打包的是 `lib/types/*.js` 条目 —— 是 **tsc 产物，不是源码** —— 因此单独跑 tsdown 会静默打包陈旧产物。运行时按 `tsc -b`（产出 `lib/types`）然后 tsdown 的顺序构建；根目录 `pnpm run typecheck` 完成该产物步骤。
 
@@ -34,7 +34,7 @@ Stage 7（SPEC §16）要在 stage 6 的功能对等之上加入桌面端专属�
 
 ## Consequences
 
-- Stage 7 退出标准达成：桌面端专属价值（native 外观、带平台加速器的 native 菜单、菜单驱动的 UX 动作）就位，全部 Harness 语义留在固定版 DSH 客户端，固定版树零改动（M1–M3 仍是完整集合）。
+- Stage 7 退出标准达成：桌面端专属价值（native 外观、带平台加速器的 native 菜单、菜单驱动的 UX 动作）就位，全部 Harness 语义留在固定版 DSH 客户端，stage 7 对固定版客户端树零改动（stage 8 的共享集 U1–U3 在其后）。
 - 完整桌面端套件：146（125 基线 + 11 菜单 + 10 桌面 UX）。
 - 封闭命令词表是后续阶段的常设接缝：后续阶段新增的菜单可供性是一个词表成员加一个适配器手势加其测试，绝不是一条新 wire 路径。
 - 桌面 UX 表面经 DOM 手势驱动固定版客户端：未来固定版客户端改标签或重排布局会打断适配器的标签集合，桌面 UX E2E 即其绊线。

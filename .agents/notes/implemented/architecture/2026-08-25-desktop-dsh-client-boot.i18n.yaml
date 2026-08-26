@@ -2,5 +2,5 @@
 # side as of the last confirmed-consistent state. Both languages carry equal authority;
 # after editing either side, bring the other along and re-record with:
 #   pnpm run verify-translation-pairing --write .agents/notes/implemented/architecture/2026-08-25-desktop-dsh-client-boot.md
-2026-08-25-desktop-dsh-client-boot.md: e80991d7a39b86126fd76f4e656fd04231da10d8
-2026-08-25-desktop-dsh-client-boot.zh.md: da9811805daeaf0d22f7625afaa96b60bf611da4
+2026-08-25-desktop-dsh-client-boot.md: 1ba1ae6669b541290a30c1abc926a4334cd25251
+2026-08-25-desktop-dsh-client-boot.zh.md: b0814ae49ae7890d9d1e50f69676b8e4fe40b465

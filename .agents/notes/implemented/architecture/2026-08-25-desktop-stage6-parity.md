@@ -36,7 +36,7 @@ Both are race-window / cache-staleness concerns owned by Stage 8 (deferred: race
 ## Consequences
 
 - Stage 6 exit criterion met: every SPEC-listed surface is proven on the pinned UI over the desktop transport with DSH semantics untouched; the only surface not proven automatically is the native directory-dialog click (manual smoke).
-- The pinned client tree gains **zero** stage 6 modifications; the stage 4 set (M1–M3) remains the only divergence.
+- The pinned client tree gains **zero** stage 6 modifications (the later shared stage 8 set U1–U3 is the next divergence; `2026-08-26-desktop-stage8-correctness.md`).
 - The parity suite doubles as the built-artifact smoke (it runs the `dist/` output plus the runtime and bundled node) and holds the console gate for the whole journey.
 - Full desktop suite: 125/125 (114 baseline + 11 parity).
 - Two DSH findings surfaced (both resolved in stage 8, `2026-08-26-desktop-stage8-correctness.md`): projection-cache cold-start title staleness (now checkpointed by the disposal drain) and the cold-start inspect-sync race (now armed at the connection readiness seam).

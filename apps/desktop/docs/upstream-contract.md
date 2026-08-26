@@ -1534,15 +1534,32 @@ Classification of every anticipated desktop need:
 
 ### Applied local modifications (stage 4)
 
-The pinned source is modified in exactly three places, each guarded so the
-web app's HTTP behavior is untouched (rationale in Agent Note
-`2026-08-25-desktop-dsh-client-boot`):
+Stage 4 applied three Desktop-enablement modifications to the pinned
+source, each guarded so the web app's HTTP behavior is untouched (rationale
+in Agent Note `2026-08-25-desktop-dsh-client-boot`). They remain the full
+set of Desktop-carrier modifications; the separate shared upstream-generic
+set from stage 8 is accounted in the next section:
 
 | # | File | Change |
 | --- | --- | --- |
 | M1 | `packages/client/modules/src/index.ts` | `ClientModuleRegistry` injects `['loader']` only; the `/plugins` bundle route and the `webserver/index-inject` rows register only when `ctx.get('webServer')` is present — the composed graph and bundle table serve non-HTTP carriers |
 | M2 | `packages/client/connection/src/index.ts` | `inject = []`; the `/api` route and the WebSocket downlinks register only when a webserver is present; the `HostConnectionService` and `createSharedFetchHandler` (in-process RPC dispatch) are provided unconditionally |
 | M3 | `packages/client/connection/src/rpc-host.ts` | `register()` returns a no-op disposer when no webserver exists: a channel on a non-HTTP host is unreachable over HTTP, not an error |
+
+### Shared upstream-generic modifications (stage 8)
+
+Stage 8 resolved the stage 6 findings at their DSH seams rather than the
+carrier. Until upstream contains equivalent fixes, these shared packages are
+part of this fork's delta against the pinned SHA — distinct from M1–M3 (which
+enable the Desktop carrier) and auditable the same way. Every one is a
+generic DSH fix that `dsh web` benefits from as well, and all are candidates
+for upstreaming (rationale and verification in the Stage 8 section below):
+
+| # | File(s) | Change |
+| --- | --- | --- |
+| U1 | `packages/session/session-projection-cache/src/index.ts` | Projection-cache shutdown and write-order correctness: a per-session serialized write chain (an older in-flight store can no longer clobber a newer one), the registration-boundary checkpoint cut taken eagerly (a pre-cut write can no longer store after the cut), and the disposal drain registered as a close deferral on the domain |
+| U2 | `packages/storage/storage-domain/src/domain.ts`, `packages/storage/storage-domain/src/index.ts`, `packages/storage/storage/src/backend.ts`, `packages/storage/storage-json/src/index.ts`, `packages/storage/storage-sqlite/src/index.ts`, `packages/feedback/message-feedback/src/index.ts` | Storage close-deferral contract: `Domain.deferClose` (infrastructure-initiated closes await a registered settlement; the owner's own `close()` is never deferred), the deferral-aware facility `closeAll` forwarding to the routed backend, optional `StorageBackend.deferClose` implemented by json (run-once close) and sqlite, and the message-feedback drain registration. Generated consequence: the `tool-cordis` API catalog recompute (`packages/extensions/tool-cordis/src/api-catalog.ts`) |
+| U3 | `packages/extensions/cordis-client-runner/src/client/index.ts`, `packages/extensions/cordis-client-runner/src/client/inspect-registry.ts` | Inspect-manifest publication waits for the connection readiness seam: registrations stage while the registry is un-armed; `arm()` (first `connection/reset`; late runners probe the strict `connection` get the gateway checks) publishes |
 
 ### Stage 6 parity resolution
 
@@ -1596,8 +1613,8 @@ Facts the stage settled about the pinned tree (contract-relevant):
 
 Carrier changes: `apps/desktop-runtime` gains the eight preset/tool packages
 the composed web-app configuration resolves at boot (dependency declaration
-only; knip `ignoreDependencies` → `@deepseek-ai/.+`). No pinned-tree
-modification — M1–M3 remain the full set. Stage 6 allowed one console
+only; knip `ignoreDependencies` → `@deepseek-ai/.+`). Stage 6 added no
+pinned-source modification. Stage 6 allowed one console
 exception — a single `[cordis-client-runner] syncing inspect providers
 failed: … no active Connection` transient on a cold start — and deferred it
 to Stage 8, which removed the race at the runner seam; the parity gate's
@@ -1653,14 +1670,14 @@ alongside its host row (without it the composed boot graph lacked the
 native flow's client half and "Add workspace" could not raise it), and the
 `apps/desktop-runtime` build order is `tsc -b` (which emits `lib/types`)
 then tsdown, because `tsdown.config.ts` bundles the `lib/types/*.js` emits
-rather than source. No pinned-tree modification — M1–M3 remain the full
-set.
+rather than source. Stage 7 added no pinned-source modification.
 
 ### Stage 8 correctness resolution
 
 Stage 8 closed the three Stage 6 findings at their DSH seams (no carrier
-workarounds — `apps/desktop` and `apps/desktop-runtime` are untouched, and
-M1–M3 remain the full pinned-tree modification set), then proved with a
+workarounds — `apps/desktop` and `apps/desktop-runtime` are untouched; the
+pinned-source delta is the shared U1–U3 set, "Shared upstream-generic
+modifications (stage 8)" above), then proved with a
 dedicated suite that Desktop preserves the pinned DSH event-log semantics
 exactly: no event lost, duplicated, reordered, or fabricated (Agent Note
 `2026-08-26-desktop-stage8-correctness`).
@@ -1767,7 +1784,9 @@ Facts the stage settled about the pinned tree (contract-relevant):
   source; the parity suite now asserts the renamed title there post-restart.
 
 Carrier changes: none — every fix is a DSH package seam shared with
-`dsh web`. No pinned-tree modification — M1–M3 remain the full set.
+`dsh web`. The pinned-source delta is the U1–U3 set ("Shared
+upstream-generic modifications (stage 8)" above); M1–M3 remain the
+complete Desktop-enablement set.
 
 ---
 

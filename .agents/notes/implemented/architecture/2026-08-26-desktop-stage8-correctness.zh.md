@@ -12,7 +12,7 @@ Stage 8（SPEC §22）必须证明桌面端精确保持固定版 DSH 事件日�
 2. **冷启动 inspect 同步瞬态。** 冷启动时一条 `[cordis-client-runner] syncing inspect providers failed: … no active Connection` 控制台错误，对等门槛不得不为它开特例。
 3. **传输通道替换。** 代理在重开时替换通道；Stage 6 无法排除被替换通道误投递陈旧在途响应的可能。
 
-载体规则是严格的：共享 DSH 缺陷必须在 DSH 接缝修复（与 `dsh web` 共享），绝不做桌面端绕行，固定版树保持零改动（M1–M3 仍是本地修改的完整集合）。
+载体规则是严格的：共享 DSH 缺陷必须在 DSH 接缝修复（与 `dsh web` 共享），绝不做桌面端绕行，桌面载体包保持零改动（stage 4 载体集 M1–M3 不变；修复本身构成新的共享 fork 差异集 U1–U3，记录于 `apps/desktop/docs/upstream-contract.md`）。
 
 ## Decision
 
@@ -39,7 +39,7 @@ Stage 8（SPEC §22）必须证明桌面端精确保持固定版 DSH 事件日�
 
 ## Consequences
 
-- Stage 8 退出标准达成：三个 Stage 6 发现在 DSH 接缝解决，无载体变更、无固定版树修改（M1–M3 仍是完整集合），正确性套件端到端证明事件保持属性。
+- Stage 8 退出标准达成：三个 Stage 6 发现在 DSH 接缝解决，无载体变更；固定版源码差异为共享的 U1–U3 集（upstream-contract.md），M1–M3 仍是完整的桌面端启用集，正确性套件端到端证明事件保持属性。
 - 完整桌面端套件：152（147 基线 + 5 事件正确性）。
 - 延迟契约现在是承重 DSH API：未来任何处置时 drain 的属主都必须登记其结算，任何关闭会触碰打开单元的 kv 后端都必须实现 `deferClose`（一致性套件强制两者）。
 - storage-json 的 run-once 关闭消除了一个潜在的并发关闭不对称（第二次 `close()` 可在第一次仍等待延迟时关闭单元），它影响的是所有消费者，不只是桌面端。

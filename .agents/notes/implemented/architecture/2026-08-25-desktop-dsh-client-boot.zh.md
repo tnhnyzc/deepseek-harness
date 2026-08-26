@@ -29,7 +29,7 @@ stage 4（SPEC stage 4）必须在 desktop 的 renderer 里引导真实的固定
 ## Consequences
 
 - D1 与 D3 已解决（契约「未知」清单）：图走子进程 IPC，bundle 走传输 fetch；协议主机为 `127.0.0.1`。
-- 固定源码现在恰好分叉于三处（如上）；web app 不受影响，因为三处改动都以 webserver 存在与否为守卫。
+- 固定源码在这三处桌面端启用改动上分叉（如上）；web app 不受影响，因为三处改动都以 webserver 存在与否为守卫。（stage 8 其后新增共享正确性集 U1–U3，记录于上游契约 —— M1–M3 仍是完整的载体集。）
 - renderer 按源码消费四个 DSH 包（`client-web`、`client-connection`、`client-modules`、`host-apiproxy`）；边界测试的 renderer 白名单就是该集合加那一个 `api-path.ts` 源导入，其余一律显式失败。
 - broker 保持按代单通道；应用的 boot 通道即运行时存活期内应用的通道，运行时冒烟测试经该通道上应用自己的载体驱动其往返（第二个通道会替换 boot 通道，boot 流量的在途响应会与测试竞态）。
 - `__DSH_TRANSPORT__.fetch` 是通用 RPC fetch：冒烟测试的无密钥 `session.list` 往返是常设的端到端证明（renderer port → broker → 子进程 IPC → 适配器 → 进程内 dispatch）。

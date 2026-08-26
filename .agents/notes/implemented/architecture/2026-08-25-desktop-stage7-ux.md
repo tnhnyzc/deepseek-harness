@@ -20,7 +20,7 @@ Stage 7 (SPEC §16) adds the desktop-specific value on top of stage 6's function
 - Product copy is locale-painted (zh or en), so each gesture matches the closed label set of both shipped locales, not one language's strings.
 - While the shell screens are up (no live client tree) and in states the tree cannot act on (no selected row, nothing generating, no rendered affordance), the command is a deterministic no-op: the menu stays safe in every state instead of the page guessing.
 
-No wire method is added, main never mutates Harness state, and the pinned tree stays untouched — M1–M3 remain the full set of local modifications.
+No wire method is added, main never mutates Harness state, and the pinned client tree stays untouched — stage 7 added no modification (the stage 8 shared set U1–U3 is later; `2026-08-26-desktop-stage8-correctness.md`).
 
 **Carrier defects fixed in this stage.** (1) The desktop composition overlay (`apps/desktop-runtime/src/composition.ts`) inserted only the native directory picker's *host* row; the composed boot graph also needs the *client* row of `@deepseek-ai/dsh-client-ui-directory-picker-native`, and without it the "Add workspace" affordance never raises the native flow (proven absent by probe: `addWorkspace:false`). The overlay now inserts both rows and `apps/desktop-runtime` declares the surface package as a workspace dependency. (2) Build order: `apps/desktop-runtime/tsdown.config.ts` bundles `lib/types/*.js` entries — **tsc emits, not source** — so running tsdown alone silently bundles stale emits. The runtime builds as `tsc -b` (which emits `lib/types`) then tsdown; the root `pnpm run typecheck` performs that emit.
 
@@ -34,7 +34,7 @@ No wire method is added, main never mutates Harness state, and the pinned tree s
 
 ## Consequences
 
-- Stage 7 exit criterion met: the desktop-specific value (native chrome, native menu with platform accelerators, menu-driven UX actions) is in place with every harness semantic staying in the pinned DSH client and the pinned tree unmodified (M1–M3 remain the full set).
+- Stage 7 exit criterion met: the desktop-specific value (native chrome, native menu with platform accelerators, menu-driven UX actions) is in place with every harness semantic staying in the pinned DSH client and the pinned client tree unmodified by stage 7 (the stage 8 shared set U1–U3 is later).
 - Full desktop suite: 146 (125 baseline + 11 menu + 10 desktop UX).
 - The closed command vocabulary is the standing seam for later stages: a menu affordance added by a later stage is one vocabulary member plus one adapter gesture plus its tests, never a new wire path.
 - The desktop UX surface drives the pinned client through DOM gestures: a future pinned-client relabel or re-layout breaks the adapter's label sets, and the desktop-UX E2E is the tripwire.

@@ -29,7 +29,7 @@ Stage 4 (SPEC stage 4) must boot the real pinned DSH client/UI tree inside the d
 ## Consequences
 
 - D1 and D3 are resolved (contract "unknown" list): graph over the child IPC, bundles over the transport fetch; `127.0.0.1` protocol host.
-- The pinned source now diverges in exactly three places (above); the web app is untouched because all three edits are guarded on webserver presence.
+- The pinned source diverges in these three Desktop-enablement places (above); the web app is untouched because all three edits are guarded on webserver presence. (Stage 8 later adds the shared correctness set U1–U3, accounted in the upstream contract — M1–M3 remain the full carrier set.)
 - The renderer consumes four DSH packages by source (`client-web`, `client-connection`, `client-modules`, `host-apiproxy`); the boundary spec's renderer allowlist is that set plus the one `api-path.ts` source import, and anything else fails loud.
 - The broker stays single-channel per generation; the app's boot channel is the app's channel for the runtime's lifetime, and the runtime smoke drives its round trip through the app's own carrier on that channel (a second channel would replace the boot channel, and the boot traffic's in-flight responses would race the test).
 - `__DSH_TRANSPORT__.fetch` is the generic RPC fetch: the smoke's keyless `session.list` round trip is the standing end-to-end proof (renderer port → broker → child IPC → adapter → in-process dispatch).
