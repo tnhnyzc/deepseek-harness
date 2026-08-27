@@ -149,13 +149,17 @@ describe('renderer content-security-policy', () => {
   it('is the pinned minimized policy', () => {
     const html = readFileSync(join(DESKTOP_ROOT, 'src', 'renderer', 'index.html'), 'utf8')
     const content = /http-equiv="Content-Security-Policy"\s+content="([^"]+)"/.exec(html)?.[1]
-    // The pinned policy: no 'unsafe-inline' in script-src; blob: is the
-    // carrier's classic-script execution path; 'unsafe-eval' is the pinned
-    // Cordis loader's module-scope new Function (the stage 10 finding).
-    // Editing the policy requires re-justifying it here.
+    // The pinned policy: no 'unsafe-inline' in script-src; script-src blob:
+    // is the carrier's classic-script execution path; 'unsafe-eval' is the
+    // pinned Cordis loader's module-scope new Function (the stage 10
+    // finding); img-src blob: is the pinned DSH image-preview path —
+    // ui-conversation's draft attachments (service.ts
+    // browserDraftAttachment) and historical images (resolveImage) are
+    // URL.createObjectURL results rendered as <img src>. Editing the policy
+    // requires re-justifying it here.
     expect(content).toBe(
       "default-src 'self'; script-src 'self' blob: 'unsafe-eval'; style-src 'self' 'unsafe-inline'; "
-      + "img-src 'self' data:; font-src 'self' data:; connect-src 'self'; object-src 'none'; base-uri 'none'; form-action 'none'",
+      + "img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self'; object-src 'none'; base-uri 'none'; form-action 'none'",
     )
   })
 })

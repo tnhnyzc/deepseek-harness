@@ -7,6 +7,8 @@
     "bwrap",
     "icacls",
     "musl-gcc",
+    "pbcopy",
+    "pbpaste",
     "python3",
     "sandbox-exec",
     "tar",

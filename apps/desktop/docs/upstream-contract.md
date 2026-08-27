@@ -1926,11 +1926,12 @@ BrowserWindow explicitly carries `webviewTag: false` (a future Electron
 default change cannot silently re-enable embedding) and
 `devTools: !app.isPackaged` (packaged builds deny the DevTools API itself;
 the menu's development-only DevTools item stays). The session installs
-**both** the permission-request and the permission-check handler as
-deny-all. The preload installs the closed six-method bridge in the main
-frame only (a top-level `window.top !== window.self` guard); the main-side
-`isTrustedIpcSender` check still refuses subframe IPC independently, so
-neither half is the single line of defense.
+**both** the permission-request and the permission-check handler on the
+same default-deny predicate, with the single source-proven exception the
+correction below records. The preload installs the closed six-method
+bridge in the main frame only (a top-level `window.top !== window.self`
+guard); the main-side `isTrustedIpcSender` check still refuses subframe
+IPC independently, so neither half is the single line of defense.
 
 **The private protocol closes the decode gap.** `decodePathname`
 (`apps/desktop/src/main/protocol.ts`) now rejects a NUL byte in the
@@ -1959,6 +1960,56 @@ the closed command vocabulary. `shell.openExternal` sees only
 path strings that Electron's `shell.openPath` opens as files (it never
 interprets them as URLs).
 
+**Stage 10 correction: two source-backed compatibility exceptions.**
+The hardened policy broke two legitimate pinned-client behaviors, and each
+fix is the narrowest source-proven exception — the threat model, surface
+pins, and bounds are untouched.
+
+- `img-src` gains exactly `blob:`: the pinned conversation client previews
+  attachment images as `URL.createObjectURL` results rendered as
+  `<img src>` — draft attachments from a `File`
+  (`packages/client/ui-conversation/src/client/service.ts`
+  `browserDraftAttachment`) and historical images from a `Blob` (the same
+  file's `resolveImage`, whose `data:` fallback engages only where
+  `createObjectURL` is absent — never in Electron) — via
+  `packages/client/ui-attachment` (`ComposerAttachments.tsx`,
+  `MessageImage.tsx` including the lightbox). Local object URLs of the
+  app's own origin only: no remote JavaScript, no general remote
+  resource, no other directive change. The shell smoke proves both
+  preview shapes load under the served policy while a remote image is
+  refused with an `img-src` violation.
+- The permission policy is default-deny with one exact exception: the
+  pinned DSH clipboard write. The pinned helper
+  (`packages/client/ui-primitives/src/clipboard.ts`) prefers
+  `navigator.clipboard.writeText` and reports failure when the browser
+  declines — its `execCommand('copy')` fallback engages only where the
+  async API is *absent*, not *denied* — so the deny-all broke every Copy
+  affordance. An Electron 43 probe on the `dsh-app://127.0.0.1` origin
+  (a secure context by the privileged scheme registration): no handlers →
+  the write lands on the pasteboard; deny-all → `NotAllowedError`; the
+  write consults the permission **request** handler with the exact
+  permission `clipboard-sanitized-write` (a window-type webContents on the
+  app URL) — the check handler is never consulted for the write, and
+  `navigator.permissions.query` for the name throws `TypeError`. Both
+  hooks now share one default-deny predicate; the single grant is
+  `clipboard-sanitized-write` from a window-type webContents whose
+  main-frame URL is on the app protocol (the check hook additionally
+  requires the exact app origin — its load-time Chromium capability
+  probes carry an empty origin and URL and are unverifiable). Electron's
+  permission callbacks expose no requesting frame, so the main-frame
+  restriction runs through the window type plus the main-frame URL, and
+  the app renders no subframes (`webviewTag` off, no third-party
+  frames). No other permission is grantable; no Electron clipboard module
+  is exposed to preload or renderer — the DSH helper stays the sole
+  clipboard authority. The standing proof is a real built-app macOS E2E:
+  a scripted turn renders a code block, the real Copy affordance flips
+  its success feedback, and the pasteboard holds the block's exact text
+  (`apps/desktop/tests/desktop-clipboard-security.spec.ts`).
+
+Both fixes remain desktop security policy: no pinned-source
+modification, no new `M*`/`U*` entry, no new preload or native clipboard
+surface.
+
 Facts the stage settled:
 
 - The module-scope `new Function` executes when the `@deepseek-ai/cordis`
@@ -1975,12 +2026,14 @@ Facts the stage settled:
 Carrier changes: `apps/desktop-runtime` `src/transport.ts`,
 `src/transport-runtime.ts`, `src/native.ts`; `apps/desktop`
 `src/main/window.ts`, `src/main/security.ts`, `src/main/protocol.ts`,
-`src/main/runtime.ts`, `src/preload/index.cjs`; tests
-`apps/desktop/tests/desktop-security-hardening.spec.ts` (new), plus the
-extended `transport.spec.ts`, `native-protocol.spec.ts`,
-`protocol.spec.ts`, `security.spec.ts`, `boundary.spec.ts`,
-`shell.spec.ts`. No pinned-source modification; no new `M*`/`U*` entry.
-The Windows job object (D4) remains stage 11.
+`src/main/runtime.ts`, `src/main/index.ts`, `src/preload/index.cjs`,
+`src/renderer/index.html`; tests
+`apps/desktop/tests/desktop-security-hardening.spec.ts` (new),
+`apps/desktop/tests/desktop-clipboard-security.spec.ts` (new, stage 10
+correction), plus the extended `transport.spec.ts`,
+`native-protocol.spec.ts`, `protocol.spec.ts`, `security.spec.ts`,
+`boundary.spec.ts`, `shell.spec.ts`. No pinned-source modification; no
+new `M*`/`U*` entry. The Windows job object (D4) remains stage 11.
 
 ---
 

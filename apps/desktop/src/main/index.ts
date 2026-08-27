@@ -17,7 +17,7 @@ import {
 import { createNativeCapabilities } from './native-capabilities.ts'
 import { createNativeChannel, type NativeChannelOptions } from './native-channel.ts'
 import { createRuntimeSupervisor, type RuntimeSupervisor, type RuntimeStateView } from './runtime.ts'
-import { denySessionPermissions, isTrustedIpcSender, type IpcSender } from './security.ts'
+import { installSessionPermissionPolicy, isTrustedIpcSender, type IpcSender } from './security.ts'
 import { createTransportBroker, TRANSPORT_OPEN_CHANNEL, wrapMainPort, type BrokerChannel } from './transport-broker.ts'
 import { createAppWindow } from './window.ts'
 import { DESKTOP_APP_NAME, installApplicationMenu } from './menu.ts'
@@ -59,7 +59,9 @@ if (!singleInstance) {
   })
   void app.whenReady().then(() => {
     app.name = DESKTOP_APP_NAME
-    denySessionPermissions(session.defaultSession)
+    // Default-deny with the single source-proven exception: the pinned DSH
+    // clipboard write (see installSessionPermissionPolicy).
+    installSessionPermissionPolicy(session.defaultSession)
     handleAppProtocol(rendererDistRoot())
     // The app package directory: development checkout layout or asar root.
     const desktopDir = app.getAppPath()

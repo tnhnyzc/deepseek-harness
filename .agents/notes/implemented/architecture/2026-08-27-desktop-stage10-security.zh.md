@@ -27,6 +27,16 @@ Stage 10（SPEC §24）是横跨 Electron 渲染器/preload/主进程/运行时�
 
 **零 TCP 监听器是结构性事实，现由扫描钉住。** 桌面组合禁用了 `webserver`/`web-runtime` 行 —— web 配置里仅有的 HTTP 监听器 —— 并经由进程内 carrier 服务；边界扫描现在拒绝桌面生产源码中的任何套接字创建（`createServer(`、`new net|http|https.Server`、`.listen(`），把 stage 1 的"无 HTTP 监听器"检查强化为"无网络监听器"。
 
+## 最终修正：两个有源码出处的兼容缺口
+
+加固后的策略暴露了两处它弄坏的合法固定版客户端行为。两处修正都是最小的、有源码出处的例外；stage 10 的威胁模型、面钉与界原样未动。
+
+**`img-src` 只增加 `blob:` —— 固定版图片预览路径。** 固定版会话客户端把附件图片预览为 `URL.createObjectURL` 结果并渲染成 `<img src>`：草稿附件来自 `File`（`packages/client/ui-conversation/src/client/service.ts` 的 `browserDraftAttachment`），历史图片来自 `Blob`（同文件 `resolveImage`，仅在宿主没有 `createObjectURL` 时回退到 `data:` URL —— Electron 有该 API，所以 blob 路径才是活路径），由 `packages/client/ui-attachment`（`ComposerAttachments.tsx`、`MessageImage.tsx` 含灯箱）渲染。在 `img-src 'self' data:` 下两种预览都在加载时死亡。修正是 `img-src 'self' data: blob:` —— 仅限应用自身 origin 的本地对象 URL：不放行任何远程 JavaScript、任何一般远程资源、也不改动其他指令；服务的策略仍由冒烟与加固套件钉住整串，冒烟现证明两种预览形态都能加载、而远程图片以 `img-src` 违规被拒。
+
+**权限策略是默认拒绝加一个精确例外：固定版剪贴板写入。** 固定版助手（`packages/client/ui-primitives/src/clipboard.ts`）优先 `navigator.clipboard.writeText`，浏览器拒绝它时即报告失败 —— 它的 `execCommand('copy')` 回退只在异步 API **缺失**时生效，不在**被拒**时生效 —— 因此 stage 10 的一律拒绝弄坏了一切复制控件。在 `dsh-app://127.0.0.1` origin 上的 Electron 43 确定性探针（由特权方案注册保证的 secure context）确立了行为：无处理器时写入落到剪贴板；一律拒绝的处理器下 `writeText` 以 `NotAllowedError` 拒绝；写入咨询的是权限**请求**处理器、权限名恰为 `clipboard-sanitized-write`（window 类型 webContents、app URL 上）—— 检查处理器对写入从不被咨询；对该名的 `navigator.permissions.query` 抛 `TypeError`。修正在两个钩子上安装同一个默认拒绝谓词，唯一放行：来自 window 类型 webContents、主 frame URL 在 app 协议上的 `clipboard-sanitized-write`（检查钩子额外要求精确的 app origin，因为它在加载期收到的 Chromium 能力探测携带空的 origin 与 URL、无法核验）。Electron 的权限回调**不暴露请求 frame** —— 主 frame 限制经由 window 类型加主 frame URL 执行，且应用不渲染子 frame（`webviewTag` 关闭、无第三方 frame）。其余权限一律不可授；不把 Electron 剪贴板模块暴露给 preload 或渲染器 —— DSH 助手保持唯一剪贴板权威。常设证明是一个真实构建应用的 E2E（macOS）：一个脚本化回合渲染出代码块，真实复制控件翻起成功反馈，剪贴板持有代码块的精确文本（`apps/desktop/tests/desktop-clipboard-security.spec.ts`）。
+
+两处修正都留在桌面安全策略一侧：无固定版源码改动、无新增 `M*`/`U*` 条目、无新的 preload 或原生剪贴板面。
+
 ## Facts the stage settled
 
 - 迫使 `unsafe-eval` 的 `new Function` 在**模块导入**时运行，因此对固定版树而言 CSP 要求是加载期的；它是 vendor 钉的属性，不是桌面代码的属性。
@@ -38,8 +48,8 @@ Stage 10（SPEC §24）是横跨 Electron 渲染器/preload/主进程/运行时�
 ## Consequences
 
 - Stage 10 出口标准在零固定版源码改动下达成：M1–M3 与 U1–U3 未变，无新增 `M*`/`U*` 条目。
-- 桌面端安全面现由源码与测试双重钉住：BrowserWindow 标志集、确切的 CSP 整串、仅主 frame 的封闭六方法桥、一律拒绝的权限处理器、元数据界、操作上限、无监听器的组合。
-- 新增套件/覆盖：`apps/desktop/tests/desktop-security-hardening.spec.ts`（7 条：经 CJS 求值验证的 preload 主 frame 守卫 + 封闭面、启动图界、CSP 钉、BrowserWindow 标志钉），外加扩展后的 `transport.spec.ts`（26 条）、`native-protocol.spec.ts`、`protocol.spec.ts`、`security.spec.ts`、`boundary.spec.ts`、`shell.spec.ts`（沙箱可观测量、封闭桥面、`HTMLWebViewElement` 缺失、确切服务的 CSP、树挂载启动证明）。
+- 桌面端安全面现由源码与测试双重钉住：BrowserWindow 标志集、确切的 CSP 整串、仅主 frame 的封闭六方法桥、默认拒绝的权限策略加唯一有源码出处的剪贴板写入例外、元数据界、操作上限、无监听器的组合。
+- 新增套件/覆盖：`apps/desktop/tests/desktop-security-hardening.spec.ts`（7 条：经 CJS 求值验证的 preload 主 frame 守卫 + 封闭面、启动图界、CSP 钉、BrowserWindow 标志钉）、`apps/desktop/tests/desktop-clipboard-security.spec.ts`（真实构建应用复制集成，macOS），外加扩展后的 `transport.spec.ts`（26 条）、`native-protocol.spec.ts`、`protocol.spec.ts`、`security.spec.ts`（权限策略的放行/拒绝矩阵）、`boundary.spec.ts`、`shell.spec.ts`（沙箱可观测量、封闭桥面、`HTMLWebViewElement` 缺失、确切服务的 CSP、树挂载启动证明、钉住 CSP 下的 blob 图片预览）。
 - D4（带 KILL_ON_JOB_CLOSE 的 Windows 作业对象）仍是 stage 11 打包工作的常设条目，打包层面的其余一切（签名、公证、更新器、Electron Fuse）同理。
 
 ## Alternatives considered

@@ -67,14 +67,16 @@ describe.skipIf(!guiAvailable() || !built)('desktop shell smoke', () => {
         expect(['booting-desktop', 'stopped', 'starting', 'ready', 'stopping', 'failed']).toContain(state)
 
         // The served policy is the pinned minimized CSP (the stage 10
-        // finding): no 'unsafe-inline' in script-src; blob: is the carrier's
-        // classic-script path; 'unsafe-eval' is the pinned loader's.
+        // finding and its correction): no 'unsafe-inline' in script-src;
+        // script-src blob: is the carrier's classic-script path;
+        // 'unsafe-eval' is the pinned loader's; img-src blob: is the pinned
+        // DSH image-preview path (URL.createObjectURL results as <img src>).
         const csp = await win.evaluate(() =>
           document.querySelector('meta[http-equiv="Content-Security-Policy"]')?.getAttribute('content') ?? '',
         )
         expect(csp).toBe(
           "default-src 'self'; script-src 'self' blob: 'unsafe-eval'; style-src 'self' 'unsafe-inline'; "
-          + "img-src 'self' data:; font-src 'self' data:; connect-src 'self'; object-src 'none'; base-uri 'none'; form-action 'none'",
+          + "img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self'; object-src 'none'; base-uri 'none'; form-action 'none'",
         )
 
         const globals = await win.evaluate(() => {
@@ -104,6 +106,68 @@ describe.skipIf(!guiAvailable() || !built)('desktop shell smoke', () => {
 
         expect(warnings).toEqual([])
         expect(external).toEqual([])
+      } finally {
+        await app.close()
+      }
+    },
+    120_000,
+  )
+
+  it(
+    'loads blob-backed image previews under the pinned CSP and still refuses remote images',
+    async () => {
+      // The stage 10 correction: the pinned DSH conversation client previews
+      // attachment images as URL.createObjectURL results — draft attachments
+      // from a File (ui-conversation browserDraftAttachment) and historical
+      // images from a Blob (ui-conversation resolveImage) — rendered as
+      // <img src="blob:…">. This exercises both exact shapes under the
+      // production CSP on the dsh-app origin, where Chromium enforces it.
+      const app = await electron.launch({ args: [appDir] })
+      try {
+        const win = await app.firstWindow()
+        const violations: string[] = []
+        win.on('console', (message) => {
+          const text = message.text()
+          if (text.includes('Content Security Policy')) violations.push(text)
+        })
+        await win.reload()
+        await win.waitForLoadState('domcontentloaded')
+
+        const facts = await win.evaluate(async () => {
+          // A real 1x1 PNG so a successful load means the bytes decoded.
+          const b64 = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg=='
+          const bytes = Uint8Array.from(atob(b64), c => c.charCodeAt(0))
+          const load = (url: string): Promise<{ ok: boolean; naturalWidth: number }> => new Promise((resolve) => {
+            const img = new Image()
+            img.onload = () => { resolve({ ok: true, naturalWidth: img.naturalWidth }) }
+            img.onerror = () => { resolve({ ok: false, naturalWidth: 0 }) }
+            img.src = url
+          })
+          // Draft shape: File -> object URL (browserDraftAttachment).
+          const file = new File([bytes], 'draft.png', { type: 'image/png' })
+          const draft = await load(URL.createObjectURL(file))
+          // Historical shape: Blob -> object URL (resolveImage).
+          const historical = await load(URL.createObjectURL(new Blob([bytes.buffer], { type: 'image/png' })))
+          // Negative control: a remote image must stay refused by img-src.
+          const remote = await load('https://example.com/probe.png')
+          return { draft, historical, remote }
+        })
+
+        // Both pinned preview shapes load; the remote control is refused.
+        expect(facts.draft).toEqual({ ok: true, naturalWidth: 1 })
+        expect(facts.historical).toEqual({ ok: true, naturalWidth: 1 })
+        expect(facts.remote.ok).toBe(false)
+
+        // Give Chromium a beat to deliver the violation console message,
+        // then assert the remote image was refused by the img-src
+        // directive and that no CSP violation names a blob: *resource*
+        // (the quoted directive itself mentions blob:; a refused blob
+        // resource appears as 'blob:…').
+        await new Promise((resolve) => { setTimeout(resolve, 300) })
+        const remoteViolations = violations.filter(text => text.includes('https://example.com/probe.png'))
+        expect(remoteViolations.length).toBe(1)
+        expect(remoteViolations[0]).toContain('img-src')
+        expect(violations.filter(text => text.includes("'blob:")).length).toBe(0)
       } finally {
         await app.close()
       }
