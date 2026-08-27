@@ -1,8 +1,9 @@
 /**
  * Supervisor behavior over the real fork IPC channel, driven by the
  * runtime fixture: the state machine, readiness, death, the single
- * automatic pre-ready retry, spawn errors, graceful shutdown, and the
- * forced process-tree kill for a runtime that refuses to stop.
+ * automatic pre-ready retry, spawn errors, graceful shutdown, the forced
+ * process-tree kill for a runtime that refuses to stop, and the
+ * dead-generation descendant cleanup for an unexpected root death.
  */
 
 import { mkdtempSync, readFileSync, rmSync } from 'node:fs'
@@ -82,6 +83,15 @@ async function readGrandchildPid(flagFile: string): Promise<number> {
       if (Date.now() > deadline) throw new Error('fixture never wrote its grandchild pid')
       await new Promise((resolveSleep) => { setTimeout(resolveSleep, 25) })
     }
+  }
+}
+
+/** Poll until the pid is gone; the deadline names what the survival means. */
+async function waitForGone(pid: number, timeoutMs = 10_000): Promise<void> {
+  const deadline = Date.now() + timeoutMs
+  while (processAlive(pid)) {
+    if (Date.now() > deadline) throw new Error(`pid ${String(pid)} survived where it must have been cleaned up`)
+    await new Promise((resolveSleep) => { setTimeout(resolveSleep, 25) })
   }
 }
 
@@ -218,6 +228,28 @@ describe('runtime supervisor', () => {
     await expect(supervisor.stop()).resolves.toBeUndefined()
     await new Promise((resolveSleep) => { setTimeout(resolveSleep, 100) })
     expect(processAlive(grandchildPid)).toBe(false)
+    expect(supervisor.view().state).toBe('stopped')
+  })
+
+  it('cleans the dead generation descendants when the root dies unexpectedly after ready', async () => {
+    const flagFile = nextFlagFile()
+    const { supervisor, events } = createSupervisor('crash-orphans', { flagFile })
+    supervisor.start()
+    await waitForState(supervisor, v => v.state === 'ready')
+    const grandchildPid = await readGrandchildPid(flagFile)
+    expect(processAlive(grandchildPid)).toBe(true)
+    // Only the root exits: the fixture kills nothing, so the descendant
+    // outlives the root and only supervisor-owned cleanup may end it.
+    const failed = await waitForState(supervisor, v => v.state === 'failed')
+    expect(statesOf(events)).toEqual(['starting', 'ready', 'failed'])
+    expect(failed.reason).toContain('code 4')
+    await waitForGone(grandchildPid)
+    // No automatic retry after ready, and the user restart still boots a
+    // healthy fresh generation.
+    supervisor.requestRestart()
+    await waitForState(supervisor, v => v.state === 'ready')
+    expect(statesOf(events)).toEqual(['starting', 'ready', 'failed', 'starting', 'ready'])
+    await expect(supervisor.stop()).resolves.toBeUndefined()
     expect(supervisor.view().state).toBe('stopped')
   })
 })

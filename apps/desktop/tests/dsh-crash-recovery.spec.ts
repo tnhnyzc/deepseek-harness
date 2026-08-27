@@ -2,16 +2,18 @@
  * Stage 9 runtime crash recovery (SPEC §23): a real runtime crash, injected
  * as a process-group SIGKILL of the standalone desktop-runtime child, during
  * each of idle, model generation, tool (shell command) execution, the
- * approval wait, the user-question wait, and subagent execution. After every
- * crash: the renderer stays alive, the generation's transport is dead and
- * every pending request rejects, the failure screen shows the reason and the
- * retained runtime diagnostics, and a user restart boots a fresh generation
- * whose client tree reboots in place and reconnects from the persisted DSH
- * state. The interrupted turn is closed by the pinned persistence repair
- * (`turn/end` with the `interrupted` reason — never `completed`), and the
- * session stays resumable. Real Electron + real desktop-runtime + real pinned
- * DSH composition; the only non-real element is the scripted deterministic
- * LLM provider on the `DEEPSEEK_BASE_URL` seam, as in the stage 6/8 suites.
+ * approval wait, the user-question wait, and subagent execution — plus one
+ * root-only SIGKILL (the group untouched) that the supervisor's own
+ * dead-generation descendant cleanup must answer. After every crash: the
+ * renderer stays alive, the generation's transport is dead and every pending
+ * request rejects, the failure screen shows the reason and the retained
+ * runtime diagnostics, and a user restart boots a fresh generation whose
+ * client tree reboots in place and reconnects from the persisted DSH state.
+ * The interrupted turn is closed by the pinned persistence repair (`turn/end`
+ * with the `interrupted` reason — never `completed`), and the session stays
+ * resumable. Real Electron + real desktop-runtime + real pinned DSH
+ * composition; the only non-real element is the scripted deterministic LLM
+ * provider on the `DEEPSEEK_BASE_URL` seam, as in the stage 6/8 suites.
  * Self-skips without built artifacts or a GUI session.
  */
 import { execFileSync, spawnSync } from 'node:child_process'
@@ -69,6 +71,16 @@ const TURNS: Record<string, TurnStep[]> = {
     {
       kind: 'tool', name: 'bash',
       args: { command: 'sleep 8 && echo crash-tool-done > ct-out.txt', description: 'long sleep the crash interrupts' },
+    },
+  ],
+  // A long-running command for the root-only crash: its tree is DSH's own
+  // detached group (the pinned subprocess design), outside the runtime's
+  // group, so the supervisor's group-scoped cleanup must not reach it and
+  // it completes as an orphan after the root dies.
+  'crash root tool': [
+    {
+      kind: 'tool', name: 'bash',
+      args: { command: 'sleep 6 && echo crash-root-done > crt-out.txt', description: 'long sleep the root-only crash interrupts' },
     },
   ],
   // Escalated in read-only mode: the crash lands while the approval wait is
@@ -491,6 +503,39 @@ async function killRuntime(): Promise<void> {
   await awaitGone(pid)
 }
 
+/**
+ * Kill only the runtime root process, not its group: the descendant cleanup
+ * under test is the supervisor's own.
+ */
+async function killRuntimeRootOnly(): Promise<void> {
+  const mainPid = app.process().pid
+  if (mainPid === undefined) throw new Error('the electron main pid is unknown')
+  const pid = findRuntimePid(mainPid)
+  process.kill(pid, 'SIGKILL')
+  await awaitGone(pid)
+}
+
+/**
+ * A direct child of the given pid whose command line contains the probe:
+ * DSH command trees are spawned as direct children (bash -c) that lead
+ * their own detached groups.
+ */
+async function findDirectChild(parentPid: number, probe: string, timeoutMs = 60_000): Promise<number> {
+  const deadline = Date.now() + timeoutMs
+  for (;;) {
+    const rows = execFileSync('ps', ['-axwww', '-o', 'pid=,ppid=,command='], { encoding: 'utf8' })
+    for (const row of rows.split('\n')) {
+      if (!row.includes(probe)) continue
+      const fields = row.trimStart().split(/\s+/)
+      const pid = Number(fields[0])
+      const ppid = Number(fields[1])
+      if (Number.isFinite(pid) && pid > 0 && ppid === parentPid) return pid
+    }
+    if (Date.now() > deadline) throw new Error(`no direct child of ${String(parentPid)} matching ${probe}`)
+    await new Promise((resolve) => { setTimeout(resolve, 100) })
+  }
+}
+
 // ── shell and recovery helpers ───────────────────────────────────────────────
 
 function rootState(): Promise<string | undefined> {
@@ -744,6 +789,51 @@ describe.skipIf(!guiAvailable() || !runtimeBuilt)('desktop DSH crash recovery (s
     // The recovered turn renders failed with the pinned recovery text for
     // the interrupted call — the tool outcome is unknown, never completed.
     await expect.poll(() => bodyText().then(text => text.includes('interrupted after it was recorded')), { timeout: 30_000 }).toBe(true)
+    await assertNothingRunning()
+    assertNoPageErrors()
+  }, 300_000)
+
+  it('crashes the runtime root only: the supervisor fails, restarts, and its cleanup stays group-scoped', async () => {
+    await sendPrompt('crash root tool')
+    // The tool is durably recorded and its command tree — the runtime's
+    // direct child, leading its own detached group by the pinned subprocess
+    // design — is running.
+    await waitForLog(list => list.some(r => r.type === 'tool/call' && JSON.stringify(r.data).includes('sleep 6')))
+    const call = findToolCall('sleep 6')
+    expect(call, 'the interrupted shell call must be durably recorded').toBeDefined()
+    if (call === undefined) throw new Error('the interrupted shell call must be durably recorded')
+    const mainPid = app.process().pid
+    if (mainPid === undefined) throw new Error('the electron main pid is unknown')
+    const rootPid = findRuntimePid(mainPid)
+    const treePid = await findDirectChild(rootPid, 'crt-out.txt')
+    expect(processAlive(treePid)).toBe(true)
+    // Kill only the root: the group is untouched, so any descendant
+    // cleanup is supervisor-owned.
+    await killRuntimeRootOnly()
+    await awaitState('failed')
+    const facts = await failureScreenFacts()
+    expect(facts.status).toContain('signal SIGKILL')
+    assertNoPageErrors()
+    // The command tree is outside the dead root's group: the group-scoped
+    // cleanup must not reach it (no unrelated process is killed).
+    expect(processAlive(treePid), 'the detached command tree must outlive the root-only crash').toBe(true)
+    // A user restart boots a healthy fresh generation.
+    await win.locator('button.shell-restart').click()
+    await awaitState('ready')
+    await awaitClientLive()
+    await openTurnSession()
+    // The pinned repair closed the interrupted tool turn like any other
+    // crash: unknown outcome, interrupted end.
+    await waitForLog(() => callOutcome(call.callId) === 'TOOL_OUTCOME_UNKNOWN')
+    await waitForLog(() => turnInterrupted(call.turn))
+    // The orphaned tree completes its work — the pinned design: a detached
+    // command tree outlives the runtime root and the CLI has the same
+    // exposure — so the marker file the command writes does appear.
+    const fileDeadline = Date.now() + 60_000
+    while (!existsSync(join(workspaceDir, 'crt-out.txt'))) {
+      if (Date.now() > fileDeadline) throw new Error('the orphaned command tree never completed its command')
+      await new Promise((resolve) => { setTimeout(resolve, 250) })
+    }
     await assertNothingRunning()
     assertNoPageErrors()
   }, 300_000)

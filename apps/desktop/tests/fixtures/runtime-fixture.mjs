@@ -5,6 +5,8 @@
  *  crash          ready, then exits 3 on its own (a runtime death)
  *  crash-once     first launch (no flag file) exits 3 after ready; the flag
  *                 file it creates makes the next launch behave like ok
+ *  crash-orphans  ready after spawning a grandchild, then the root exits 4
+ *                 without killing it (the descendant outlives the root)
  *  kill           ready, then SIGKILLs itself (a signal death)
  *  fail-early     first launch (no flag file) exits 1 before ready; the flag
  *                 file it creates makes the next launch behave like ok
@@ -99,6 +101,16 @@ switch (mode) {
       process.stderr.write('fixture: boot ok (crash-once, retry)\n')
       setTimeout(sendReady, 50)
     }
+    break
+  case 'crash-orphans':
+    // The root dies alone: the grandchild stays in the root's process group
+    // and outlives it, so only supervisor-owned cleanup can end it.
+    process.stderr.write(`fixture: boot ok (${mode})\n`)
+    setTimeout(() => {
+      spawnGrandchild()
+      sendReady()
+      setTimeout(() => { process.exit(4) }, 400)
+    }, 50)
     break
   case 'kill':
     process.stderr.write(`fixture: boot ok (${mode})\n`)

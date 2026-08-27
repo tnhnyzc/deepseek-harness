@@ -3,11 +3,14 @@
  * runtime process — spawn, readiness, failure, restart, and shutdown — over
  * a fork IPC channel. The protocol is one typed message each way
  * (`runtime.ready` up, `runtime.shutdown` down); logs ride the piped stdio,
- * never the channel, and readiness is never inferred from a port.
+ * never the channel, and readiness is never inferred from a port. An
+ * unexpected root death also ends the dead generation's surviving
+ * descendants (its own process group on POSIX; its parentage tree
+ * best-effort on Windows) before any replacement generation may spawn.
  * @module @deepseek-ai/dsh-desktop/src/main/runtime
  */
 
-import { fork, spawnSync, type ChildProcess } from 'node:child_process'
+import { fork, spawn, spawnSync, type ChildProcess } from 'node:child_process'
 import { dirname } from 'node:path'
 import { isNativeAbortMessage, isNativeRequestMessage } from '@deepseek-ai/dsh-desktop-runtime/native'
 import { fromOpaqueTransportWire, isTransportMessage, toOpaqueTransportWire } from '@deepseek-ai/dsh-desktop-runtime/transport'
@@ -225,6 +228,74 @@ export function createRuntimeSupervisor(options: RuntimeSupervisorOptions): Runt
     }
   }
 
+  /**
+   * End the dead generation's surviving descendants. Only an unexpected
+   * root death calls this, synchronously in the exit handler and before any
+   * replacement generation may spawn: on POSIX the dead root led its own
+   * process group, so the group signal is addressed to exactly the dead
+   * generation (no live process can share or re-acquire that group id
+   * before this call returns), and ESRCH means nothing survived; on
+   * Windows the dead root's parentage tree is walked best-effort, because
+   * taskkill /T resolves its root as a live process and cannot walk a dead
+   * one. DSH's own detached command trees — each its own group by the
+   * pinned subprocess design — are outside the dead root's group by design
+   * and outlive the crash as self-contained orphans, the same exposure the
+   * CLI has when it is killed mid-command.
+   * @param deadPid - the dead root's pid, captured before the child pointer moved.
+   * @param exitEpochMs - the death instant; Windows descendants created after it belong to a newer generation.
+   */
+  const killDeadGenerationTree = (deadPid: number, exitEpochMs: number): void => {
+    if (process.platform !== 'win32') {
+      try {
+        process.kill(-deadPid, 'SIGKILL')
+      } catch {
+        // ESRCH: no member of the dead generation's group outlived the root.
+      }
+      return
+    }
+    // The parentage edges of a dead root survive in the process table
+    // (Windows does not re-parent orphans), so walk them: every live
+    // descendant created before the root's exit is force-stopped. The
+    // creation-time cut structurally excludes a replacement generation.
+    const script = [
+      `$root = ${deadPid}`,
+      `$exitUtc = [datetime]::new(1970, 1, 1, 0, 0, 0, [datetimekind]::Utc).AddMilliseconds(${exitEpochMs})`,
+      '$procs = Get-CimInstance Win32_Process -ErrorAction SilentlyContinue',
+      '$kids = @{}',
+      'foreach ($p in $procs) {',
+      '  if ($null -eq $p.ParentProcessId) { continue }',
+      '  if ($kids.ContainsKey($p.ParentProcessId)) { $kids[$p.ParentProcessId] = $kids[$p.ParentProcessId] + $p.ProcessId }',
+      '  else { $kids[$p.ParentProcessId] = ,@($p.ProcessId) }',
+      '}',
+      '$descendants = [System.Collections.Generic.HashSet[int32]]::new()',
+      '$queue = [System.Collections.Generic.Queue[int32]]::new()',
+      '$queue.Enqueue($root)',
+      'while ($queue.Count -gt 0) {',
+      '  $current = $queue.Dequeue()',
+      '  if (-not $descendants.Add($current)) { continue }',
+      '  $children = $kids[$current]',
+      '  if ($null -ne $children) {',
+      '    foreach ($child in $children) { if (-not $descendants.Contains($child)) { $queue.Enqueue($child) } }',
+      '  }',
+      '}',
+      '$descendants.Remove($root) | Out-Null',
+      'foreach ($descendant in $descendants) {',
+      '  try {',
+      '    $process = Get-Process -Id $descendant -ErrorAction Stop',
+      '    if ($process.StartTime.ToUniversalTime() -lt $exitUtc) { Stop-Process -Id $descendant -Force -ErrorAction SilentlyContinue }',
+      '  } catch {',
+      '  }',
+      '}',
+    ].join('\n')
+    try {
+      const worker = spawn('powershell', ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-Command', script], { stdio: 'ignore', windowsHide: true })
+      worker.unref()
+    } catch {
+      // No PowerShell: cleanup stays best-effort; the orphans remain and
+      // the failure state is already reported.
+    }
+  }
+
   const clearForceTimer = (): void => {
     if (forceTimer !== undefined) {
       clearTimeout(forceTimer)
@@ -241,6 +312,11 @@ export function createRuntimeSupervisor(options: RuntimeSupervisorOptions): Runt
   }
 
   const handleExit = (code: number | null, signal: NodeJS.Signals | null): void => {
+    // The dead generation's process identity, captured before any handler
+    // clearing or replacement spawn can move the child pointer: its
+    // descendant cleanup must stay bound to this dead root, never to a
+    // generation that replaces it.
+    const deadPid = child?.pid
     // The channel is per-generation: any exit ends it, whatever the state.
     const close = transportCloseHandler
     const nativeClose = nativeCloseHandler
@@ -258,6 +334,10 @@ export function createRuntimeSupervisor(options: RuntimeSupervisorOptions): Runt
     if (state !== 'starting' && state !== 'ready') return
     reason = `runtime exited unexpectedly (${signal === null ? `code ${String(code)}` : `signal ${signal}`})`
     transition('failed')
+    // The dead root's surviving descendants are supervisor-owned cleanup:
+    // run synchronously here so the dead group id cannot be recycled under
+    // the replacement child the pre-ready retry is about to spawn.
+    if (deadPid !== undefined) killDeadGenerationTree(deadPid, Date.now())
     // One automatic retry is acceptable only when the runtime failed before
     // reaching ready, and only when the launch itself succeeded: a spawn
     // error (missing executable) will not repair itself by retrying.

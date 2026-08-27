@@ -1793,11 +1793,13 @@ complete Desktop-enablement set.
 Stage 9 proved the stages 2–7 failure/restart/reconnect path under real
 kill -9 and closed the SPEC §23 windows with no carrier change (Agent
 Note `2026-08-26-desktop-stage9-crash-recovery`).
-`apps/desktop/tests/dsh-crash-recovery.spec.ts` (8) drives the built app
+`apps/desktop/tests/dsh-crash-recovery.spec.ts` (9) drives the built app
 against a scripted deterministic SSE provider and injects a
-process-group SIGKILL into the runtime, discovered as the runtime-entry
-process that is a direct child of the suite's Electron main (a parallel
-suite boots its own runtime from the same entry). The pinned persistence
+process-group SIGKILL into the runtime — catastrophic whole-tree death —
+plus one root-only SIGKILL that only the supervisor's own descendant
+cleanup answers; the runtime is discovered as the runtime-entry process
+that is a direct child of the suite's Electron main (a parallel suite
+boots its own runtime from the same entry). The pinned persistence
 repair is the crash-recovery mechanism the stage pins end to end:
 
 - **`interruptedTurnClosers`**
@@ -1828,16 +1830,46 @@ repair is the crash-recovery mechanism the stage pins end to end:
   retention path.
 
 The supervisor fixture gained `crash-once` (exit 3 after the first
-launch's ready) and `kill` (SIGKILL after ready) modes;
-`apps/desktop/tests/runtime.spec.ts` (10) pins the post-death restart and
-the diagnostics retention. The eight E2E properties cover a crash while
-idle, mid-generation, during a shell tool, during an approval wait,
+launch's ready), `crash-orphans` (ready after spawning a grandchild, then
+the root exits 4 without killing it), and `kill` (SIGKILL after ready)
+modes; `apps/desktop/tests/runtime.spec.ts` (11) pins the post-death
+restart, the diagnostics retention, and the dead-generation descendant
+cleanup. The nine E2E properties cover a crash while idle, mid-generation,
+during a shell tool, a root-only runtime death, during an approval wait,
 during a question wait, during a subagent, a second crash generation, and
 a clean quit while failed. The in-place re-boot (stage 4) proved
 deterministic under a port close — fresh Context per `AppWebEntry.run()`,
 plain-assignment module facade, lazy-CJS preload, per-generation
 `__DSH_TRANSPORT__` re-install, `teardownAll` rejecting every in-flight
-operation — so no renderer or supervisor change was required.
+operation — so no renderer change was required.
+
+**Correction — unexpected root death must clean surviving descendants.**
+The stage's E2E group kill proved reconstruction after catastrophic
+whole-tree death, but the supervisor's `handleExit` originally ended no
+descendant when only the root died. It now captures the dead root's pid
+in the exit handler and, after the `failed` transition — synchronously,
+before the pre-ready retry can spawn a replacement — ends the dead
+generation's descendants (`apps/desktop/src/main/runtime.ts`): on POSIX a
+group SIGKILL to the dead root's own group (the `detached` fork made the
+root the group leader, so the group id is the dead generation's and
+nothing live can share or re-acquire it; ESRCH = nothing survived); on
+Windows a best-effort parentage walk, because `taskkill /T` resolves its
+root as a live process and cannot walk a dead one while Windows orphans
+keep their dead parent's pid; the walk force-stops live descendants
+created before the death instant, a cut that structurally excludes a
+replacement generation. The robust Windows containment — a job object
+with KILL_ON_JOB_CLOSE — needs a native handle Node cannot create; it is
+stage 11 packaging territory (D4). Pinned-composition facts bounding the
+reach: the DSH local subprocess provider detaches every command tree into
+its own group (`packages/subprocess/subprocess-local/src/spawn.ts:358-360`)
+and the desktop subagent providers are in-process — so the group kill
+reaches exactly the dead root's own-group survivors, while DSH's command
+trees are self-contained units that outlive a root crash as orphans and
+complete their work, the same exposure the CLI has when killed
+mid-command. Proven by the fixture regression (root-only death cleans the
+group survivor, then a healthy restart) and the real-app root-only test
+(failure + healthy restart with the detached command tree un-killed and
+its marker file written by the orphaned completion).
 
 Carrier changes: none. No new shared modification: M1–M3 and U1–U3 are
 unchanged.
