@@ -13,8 +13,19 @@ import { afterAll, describe, expect, it, vi } from 'vitest'
 import { RpcId, type ApiProxy } from '@deepseek-ai/dsh-host-apiproxy'
 import {
   TRANSPORT_CREDIT_BYTES,
+  TRANSPORT_MAX_CODE_CHARS,
+  TRANSPORT_MAX_CONCURRENT_OPERATIONS,
   TRANSPORT_MAX_FRAME_BYTES,
+  TRANSPORT_MAX_HEADER_COUNT,
+  TRANSPORT_MAX_HEADER_NAME_CHARS,
+  TRANSPORT_MAX_HEADER_VALUE_CHARS,
+  TRANSPORT_MAX_ID_CHARS,
+  TRANSPORT_MAX_MESSAGE_CHARS,
+  TRANSPORT_MAX_METHOD_CHARS,
+  TRANSPORT_MAX_REASON_CHARS,
   TRANSPORT_MAX_REQUEST_BYTES,
+  TRANSPORT_MAX_STATUS_TEXT_CHARS,
+  TRANSPORT_MAX_URL_CHARS,
   TransportErrorCode,
   TransportProtocolError,
   TransportSendWindow,
@@ -183,6 +194,70 @@ describe('transport protocol', () => {
     }
   })
 
+  it('rejects metadata fields above the protocol bounds', () => {
+    const overBound = (message: object): void => {
+      expect(() => parseTransportMessage(message)).toThrow(TransportProtocolError)
+    }
+    const open = (overrides: Record<string, unknown>): object => ({
+      type: 'fetch.open', requestId: 'r', url: 'u', method: 'GET', headers: [], ...overrides,
+    })
+    overBound(open({ requestId: 'x'.repeat(TRANSPORT_MAX_ID_CHARS + 1) }))
+    overBound(open({ url: 'u'.repeat(TRANSPORT_MAX_URL_CHARS + 1) }))
+    overBound(open({ method: 'm'.repeat(TRANSPORT_MAX_METHOD_CHARS + 1) }))
+    overBound(open({ headers: Array(TRANSPORT_MAX_HEADER_COUNT + 1).fill(['a', 'b']) }))
+    overBound(open({ headers: [['n'.repeat(TRANSPORT_MAX_HEADER_NAME_CHARS + 1), 'v']] }))
+    overBound(open({ headers: [['n', 'v'.repeat(TRANSPORT_MAX_HEADER_VALUE_CHARS + 1)]] }))
+    overBound({ type: 'fetch.open', requestId: 'x'.repeat(TRANSPORT_MAX_ID_CHARS + 1), url: 'u'.repeat(TRANSPORT_MAX_URL_CHARS + 1), method: 'GET', headers: [] })
+    overBound({ type: 'fetch.response.head', requestId: 'r', status: 1000, statusText: 'OK', headers: [] })
+    overBound({ type: 'fetch.response.head', requestId: 'r', status: -1, statusText: 'OK', headers: [] })
+    overBound({ type: 'fetch.response.head', requestId: 'r', status: 200, statusText: 't'.repeat(TRANSPORT_MAX_STATUS_TEXT_CHARS + 1), headers: [] })
+    overBound({ type: 'fetch.error', requestId: 'r', code: 'c'.repeat(TRANSPORT_MAX_CODE_CHARS + 1), message: 'm' })
+    overBound({ type: 'fetch.error', requestId: 'r', code: 'c', message: 'm'.repeat(TRANSPORT_MAX_MESSAGE_CHARS + 1) })
+    overBound({ type: 'fetch.abort', requestId: 'r', reason: 'r'.repeat(TRANSPORT_MAX_REASON_CHARS + 1) })
+    overBound({ type: 'stream.open', streamId: 's', url: 'u'.repeat(TRANSPORT_MAX_URL_CHARS + 1) })
+    overBound({ type: 'stream.open.ack', streamId: 's', ok: false, reason: 'r'.repeat(TRANSPORT_MAX_REASON_CHARS + 1) })
+    overBound({ type: 'stream.close', streamId: 's', reason: 'r'.repeat(TRANSPORT_MAX_REASON_CHARS + 1) })
+    overBound({ type: 'stream.error', streamId: 's', code: 'c', message: 'm'.repeat(TRANSPORT_MAX_MESSAGE_CHARS + 1) })
+  })
+
+  it('accepts metadata fields at the exact bounds', () => {
+    const requestId = 'x'.repeat(TRANSPORT_MAX_ID_CHARS)
+    const url = 'u'.repeat(TRANSPORT_MAX_URL_CHARS)
+    const method = 'm'.repeat(TRANSPORT_MAX_METHOD_CHARS)
+    const headers: Array<[string, string]> = [
+      ['n'.repeat(TRANSPORT_MAX_HEADER_NAME_CHARS), 'v'.repeat(TRANSPORT_MAX_HEADER_VALUE_CHARS)],
+    ]
+    expect(parseTransportMessage({ type: 'fetch.open', requestId, url, method, headers }))
+      .toEqual({ type: 'fetch.open', requestId, url, method, headers })
+    expect(parseTransportMessage({
+      type: 'fetch.response.head',
+      requestId: 'r',
+      status: 999,
+      statusText: 't'.repeat(TRANSPORT_MAX_STATUS_TEXT_CHARS),
+      headers: [],
+    })).toEqual({
+      type: 'fetch.response.head',
+      requestId: 'r',
+      status: 999,
+      statusText: 't'.repeat(TRANSPORT_MAX_STATUS_TEXT_CHARS),
+      headers: [],
+    })
+    expect(parseTransportMessage({
+      type: 'fetch.error',
+      requestId: 'r',
+      code: 'c'.repeat(TRANSPORT_MAX_CODE_CHARS),
+      message: 'm'.repeat(TRANSPORT_MAX_MESSAGE_CHARS),
+    })).toEqual({
+      type: 'fetch.error',
+      requestId: 'r',
+      code: 'c'.repeat(TRANSPORT_MAX_CODE_CHARS),
+      message: 'm'.repeat(TRANSPORT_MAX_MESSAGE_CHARS),
+    })
+    const reason = 'r'.repeat(TRANSPORT_MAX_REASON_CHARS)
+    expect(parseTransportMessage({ type: 'fetch.abort', requestId: 'r', reason }))
+      .toEqual({ type: 'fetch.abort', requestId: 'r', reason })
+  })
+
   it('discriminates transport from control messages', () => {
     expect(isTransportMessage({ type: 'fetch.open', requestId: 'r', url: 'u', method: 'GET', headers: [] })).toBe(true)
     expect(isTransportMessage({ type: 'runtime.ready' })).toBe(false)
@@ -330,6 +405,25 @@ describe('transport runtime adapter', () => {
     const badSequence = await reader?.ofType('fetch.error')
     expect(badSequence?.requestId).toBe('seq')
     expect(badSequence?.code).toBe(TransportErrorCode.badSequence)
+  })
+
+  it('refuses new operations above the concurrent-operation bound', async () => {
+    attach([], false)
+    // Opens that never complete their bodies stay in the adapter's
+    // operation map and hold the bound: one per slot, no carrier traffic.
+    for (let index = 0; index < TRANSPORT_MAX_CONCURRENT_OPERATIONS; index++) {
+      post({ type: 'fetch.open', requestId: `hold-${index}`, url: 'http://dsh.local/api/session.list', method: 'POST', headers: JSON_HEADERS })
+    }
+    post({ type: 'fetch.open', requestId: 'over-fetch', url: 'http://dsh.local/api/session.list', method: 'POST', headers: JSON_HEADERS })
+    const refused = await reader?.ofType('fetch.error')
+    expect(refused?.requestId).toBe('over-fetch')
+    expect(refused?.code).toBe(TransportErrorCode.tooManyRequests)
+
+    post({ type: 'stream.open', streamId: 'over-stream', url: 'http://dsh.local/api/downloads/session.log' })
+    const refusal = await reader?.ofType('stream.open.ack')
+    expect(refusal?.streamId).toBe('over-stream')
+    expect(refusal?.ok).toBe(false)
+    expect(refusal?.reason).toBe(TransportErrorCode.tooManyRequests)
   })
 
   it('drops malformed frames without replying', async () => {

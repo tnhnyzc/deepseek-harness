@@ -114,6 +114,18 @@ const DEFAULT_GRACEFUL_TIMEOUT_MS = 7_500
 const DIAGNOSTIC_BYTES = 64 * 1024
 const DIAGNOSTIC_TAIL_LINES = 80
 
+/**
+ * The boot-graph wire bounds. The child's publication crosses a wire
+ * boundary into the supervisor's cache (and then to the renderer), so its
+ * fields are bound-checked like any other inbound message: an over-bound
+ * payload is dropped whole, and the generation simply reports no boot
+ * artifacts instead of forcing an allocation on the main process.
+ */
+const BOOT_GRAPH_MAX_SCRIPT_CHARS = 1024 * 1024
+const BOOT_GRAPH_MAX_LIST_ITEMS = 256
+const BOOT_GRAPH_MAX_URL_CHARS = 8192
+const BOOT_GRAPH_MAX_REVISION_CHARS = 128
+
 /** Bounded retention of the runtime's stdout/stderr. */
 class DiagnosticRing {
   private chunks: string[] = []
@@ -472,29 +484,41 @@ export function createRuntimeSupervisor(options: RuntimeSupervisorOptions): Runt
   }
 }
 
+/** The bounded-string check: a string at or under the bound, nothing else. */
+function boundedString(value: unknown, max: number): value is string {
+  return typeof value === 'string' && value.length <= max
+}
+
 /**
  * Wire validation for the child's boot-artifact publication: the renderer
  * re-parses the graph through the pinned manifest parser, so the supervisor
- * only checks the shape it caches and serves.
+ * only checks the shape it caches and serves — plus the protocol's field
+ * bounds, so an over-bound publication is dropped at the wire.
  * @param message - the raw `runtime.boot-graph` child message.
- * @returns the validated payload, or `undefined` when the shape is not the
- * boot-artifact message (dropped silently; a generation without it simply
- * reports none).
+ * @returns the validated payload, or `undefined` when the shape or a field
+ * bound is not the boot-artifact message (dropped silently; a generation
+ * without it simply reports none).
  */
-function parseBootGraphMessage(message: unknown): DshBootPayload | undefined {
+export function parseBootGraphMessage(message: unknown): DshBootPayload | undefined {
   if (typeof message !== 'object' || message === null) return undefined
   const candidate = message as Record<string, unknown>
   const graph = candidate.graph
   if (typeof graph !== 'object' || graph === null) return undefined
   const graphValue = graph as Record<string, unknown>
-  if (typeof graphValue.rev !== 'string' || !Array.isArray(graphValue.entries)) return undefined
+  if (!boundedString(graphValue.rev, BOOT_GRAPH_MAX_REVISION_CHARS) || !Array.isArray(graphValue.entries)) return undefined
+  if (graphValue.entries.length > BOOT_GRAPH_MAX_LIST_ITEMS) return undefined
   for (const row of graphValue.entries) {
     if (typeof row !== 'object' || row === null) return undefined
     const entry = row as Record<string, unknown>
-    if (typeof entry.id !== 'string' || typeof entry.url !== 'string' || typeof entry.rev !== 'string') return undefined
+    if (!boundedString(entry.id, BOOT_GRAPH_MAX_URL_CHARS) || !boundedString(entry.url, BOOT_GRAPH_MAX_URL_CHARS)
+      || !boundedString(entry.rev, BOOT_GRAPH_MAX_REVISION_CHARS)) return undefined
+    if (entry.external !== undefined
+      && (!Array.isArray(entry.external) || entry.external.length > BOOT_GRAPH_MAX_LIST_ITEMS
+        || entry.external.some(name => !boundedString(name, BOOT_GRAPH_MAX_URL_CHARS)))) return undefined
   }
-  if (typeof candidate.moduleLoaderScript !== 'string') return undefined
-  if (!Array.isArray(candidate.preloadBundles) || candidate.preloadBundles.some(url => typeof url !== 'string')) return undefined
+  if (!boundedString(candidate.moduleLoaderScript, BOOT_GRAPH_MAX_SCRIPT_CHARS)) return undefined
+  if (!Array.isArray(candidate.preloadBundles) || candidate.preloadBundles.length > BOOT_GRAPH_MAX_LIST_ITEMS
+    || candidate.preloadBundles.some(url => !boundedString(url, BOOT_GRAPH_MAX_URL_CHARS))) return undefined
   return {
     graph: graph as DshBootPayload['graph'],
     moduleLoaderScript: candidate.moduleLoaderScript,

@@ -56,15 +56,18 @@ export function isAppUrl(rawUrl: string): boolean {
 /**
  * Decode a URL pathname for filesystem mapping.
  * @param pathname - URL pathname
- * @returns the decoded path, or undefined for invalid percent sequences or embedded null bytes
+ * @returns the decoded path, or undefined for invalid percent sequences or
+ *   a null byte in the encoded or the decoded form (`%00` decodes to one)
  */
 export function decodePathname(pathname: string): string | undefined {
   if (pathname.includes('\u0000')) return undefined
+  let decoded: string
   try {
-    return decodeURIComponent(pathname)
+    decoded = decodeURIComponent(pathname)
   } catch {
     return undefined
   }
+  return decoded.includes('\u0000') ? undefined : decoded
 }
 
 /**

@@ -28,9 +28,14 @@ stage 9 证明崩溃恢复：被杀死的运行时（kill -9）让渲染器存�
 死亡原因与保留诊断信息的失败屏，用户请求的重启启动新一代运行时，客户端
 从持久日志重建会话，被打断的轮次由固定版持久化修复确定性闭合为
 `interrupted`——绝不为 `completed`（`tests/dsh-crash-recovery.spec.ts`
-的八属性套件），同样无任何载体变更。范围、接缝、已应用的本地改动与未决的
-D4 问题（D1、D2、D3 已在
-stage 3-4 解决）见 `SPEC.md` #6-#11、`ARCHITECTURE.md` 与[上游契约](./docs/upstream-contract.md)。
+的九属性套件），同样无任何载体变更。stage 10 是安全加固阶段：渲染器、
+preload、主进程与运行时之间的每条信任边界现在都有界并钉住——传输线缆约束
+全部元数据并封顶并发操作数，原生通道约束 id 与响应路径，BrowserWindow 面
+与一律拒绝的权限在源码中钉住，preload 桥仅限主 frame，CSP 是钉住的最小化
+策略、其 'unsafe-eval' 有固定版 loader 源码出处，生产代码不创建任何网络
+监听器（Agent Note `2026-08-27-desktop-stage10-security`）。范围、接缝、
+已应用的本地改动与未决的 D4 问题（D1、D2、D3 已在 stage 3-4 解决）见
+`SPEC.md` #6-#11、`ARCHITECTURE.md` 与[上游契约](./docs/upstream-contract.md)。
 
 ## 构建
 

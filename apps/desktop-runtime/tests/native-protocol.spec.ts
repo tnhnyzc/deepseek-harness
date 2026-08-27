@@ -8,6 +8,7 @@ import { describe, expect, it } from 'vitest'
 import {
   NATIVE_ERROR_CODES,
   NATIVE_MAX_DIAGNOSTIC_CHARS,
+  NATIVE_MAX_ID_CHARS,
   NATIVE_MAX_PATH_LENGTH,
   NATIVE_METHODS,
   NativeProtocolError,
@@ -73,6 +74,7 @@ describe('parseNativeRequest', () => {
     ['an empty path', { type: 'native.request', requestId: 'a', method: 'path.open', path: '' }],
     ['a NUL-bearing path', { type: 'native.request', requestId: 'a', method: 'path.open', path: '/tmp/a\0b' }],
     ['an oversized path', { type: 'native.request', requestId: 'a', method: 'path.open', path: 'x'.repeat(NATIVE_MAX_PATH_LENGTH + 1) }],
+    ['an over-bound request id', { type: 'native.request', requestId: 'x'.repeat(NATIVE_MAX_ID_CHARS + 1), method: 'path.open', path: '/tmp/x' }],
   ])('refuses %s', (_label, value) => {
     expect(() => parseNativeRequest(value)).toThrow(NativeProtocolError)
   })
@@ -80,6 +82,11 @@ describe('parseNativeRequest', () => {
   it('accepts a path at the exact bound', () => {
     const path = 'x'.repeat(NATIVE_MAX_PATH_LENGTH)
     expect(parseNativeRequest({ type: 'native.request', requestId: 'a', method: 'path.open', path }).path).toBe(path)
+  })
+
+  it('accepts a request id at the exact bound', () => {
+    const requestId = 'x'.repeat(NATIVE_MAX_ID_CHARS)
+    expect(parseNativeRequest({ type: 'native.request', requestId, method: 'path.open', path: '/tmp/x' }).requestId).toBe(requestId)
   })
 })
 
@@ -114,6 +121,9 @@ describe('parseNativeResponse', () => {
     ['a non-string failure message', { type: 'native.response', requestId: 'a', ok: false, code: 'open-failed', message: 3 }],
     ['an over-bound failure message', { type: 'native.response', requestId: 'a', ok: false, code: 'open-failed', message: 'm'.repeat(NATIVE_MAX_DIAGNOSTIC_CHARS + 1) }],
     ['a non-string chooser path', { type: 'native.response', requestId: 'a', ok: true, path: 3 }],
+    ['a NUL-bearing chooser path', { type: 'native.response', requestId: 'a', ok: true, path: '/tmp/a\0b' }],
+    ['an over-bound chooser path', { type: 'native.response', requestId: 'a', ok: true, path: 'x'.repeat(NATIVE_MAX_PATH_LENGTH + 1) }],
+    ['an over-bound request id', { type: 'native.response', requestId: 'x'.repeat(NATIVE_MAX_ID_CHARS + 1), ok: true }],
   ])('refuses %s', (_label, value) => {
     expect(() => parseNativeResponse(value)).toThrow(NativeProtocolError)
   })
@@ -121,6 +131,11 @@ describe('parseNativeResponse', () => {
   it('accepts a failure message at the exact bound', () => {
     const message = 'm'.repeat(NATIVE_MAX_DIAGNOSTIC_CHARS)
     expect(parseNativeResponse({ type: 'native.response', requestId: 'a', ok: false, code: 'open-failed', message }).message).toBe(message)
+  })
+
+  it('accepts a chooser path at the exact bound', () => {
+    const path = 'x'.repeat(NATIVE_MAX_PATH_LENGTH)
+    expect(parseNativeResponse({ type: 'native.response', requestId: 'a', ok: true, path }).path).toBe(path)
   })
 })
 
@@ -137,6 +152,7 @@ describe('parseNativeCancel', () => {
     ['an empty reason', { type: 'native.cancel', requestId: 'a', reason: '' }],
     ['a missing reason', { type: 'native.cancel', requestId: 'a' }],
     ['an over-bound reason', { type: 'native.cancel', requestId: 'a', reason: 'r'.repeat(NATIVE_MAX_DIAGNOSTIC_CHARS + 1) }],
+    ['an over-bound request id', { type: 'native.cancel', requestId: 'x'.repeat(NATIVE_MAX_ID_CHARS + 1), reason: 'r' }],
   ])('refuses %s', (_label, value) => {
     expect(() => parseNativeCancel(value)).toThrow(NativeProtocolError)
   })
@@ -161,6 +177,7 @@ describe('parseNativeAbort', () => {
     ['an empty reason', { type: 'native.abort', requestId: 'a', reason: '' }],
     ['a missing reason', { type: 'native.abort', requestId: 'a' }],
     ['an over-bound reason', { type: 'native.abort', requestId: 'a', reason: 'r'.repeat(NATIVE_MAX_DIAGNOSTIC_CHARS + 1) }],
+    ['an over-bound request id', { type: 'native.abort', requestId: 'x'.repeat(NATIVE_MAX_ID_CHARS + 1), reason: 'r' }],
   ])('refuses %s', (_label, value) => {
     expect(() => parseNativeAbort(value)).toThrow(NativeProtocolError)
   })

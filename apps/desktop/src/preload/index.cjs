@@ -16,6 +16,12 @@
 
 'use strict';
 
+// The privileged bridge is main-frame only: a preload installs into every
+// frame of a document, so a subframe of any embedded document would otherwise
+// see the same surface. Main refuses subframe IPC independently (the sender
+// frame check); this guard is the renderer-side half of the same rule.
+if (window.top !== window.self) return;
+
 const { contextBridge, ipcRenderer } = require('electron');
 
 const STATE_CHANNEL = 'dsh-desktop:runtime-state';

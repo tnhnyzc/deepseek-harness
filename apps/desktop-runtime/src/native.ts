@@ -35,6 +35,12 @@ export const NATIVE_MAX_PATH_LENGTH = 32_768
  */
 export const NATIVE_MAX_DIAGNOSTIC_CHARS = 512
 
+/**
+ * The bound on one wire request id. Ids are minted with `randomUUID()`
+ * (36 characters); the bound is a wire-trust limit, not a format.
+ */
+export const NATIVE_MAX_ID_CHARS = 512
+
 /** Closed failure vocabulary of the native channel (no DSH business codes). */
 export type NativeErrorCode =
   | 'unknown-method'
@@ -125,7 +131,10 @@ function fail(message: string): never {
 }
 
 function readId(value: unknown, label: string): string {
-  return typeof value === 'string' && value !== '' ? value : fail(`${label}: expected a non-empty string id`)
+  if (typeof value !== 'string' || value === '') fail(`${label}: expected a non-empty string id`)
+  return value.length <= NATIVE_MAX_ID_CHARS
+    ? value
+    : fail(`${label}: ${String(value.length)} characters exceed the ${String(NATIVE_MAX_ID_CHARS)} character bound`)
 }
 
 function readMethod(value: unknown): NativeMethod {
@@ -209,12 +218,14 @@ export function parseNativeResponse(value: unknown): NativeResponse {
   const requestId = readId(raw.requestId, 'native.response.requestId')
   if (raw.ok === true) {
     // The chooser outcome is optional at the wire; a directory.pick caller
-    // settles only when it is present, so both shapes parse.
-    if ('path' in raw && raw.path !== null && typeof raw.path !== 'string') {
-      fail('native.response.path: expected a string or null')
+    // settles only when it is present, so both shapes parse. A present path
+    // takes the same structural check as a request path, so an over-bound or
+    // NUL-bearing value parses to no settlement.
+    if ('path' in raw && raw.path !== null) {
+      return { type: 'native.response', requestId, ok: true, path: readPath(raw.path) }
     }
     return 'path' in raw
-      ? { type: 'native.response', requestId, ok: true, path: raw.path as string | null }
+      ? { type: 'native.response', requestId, ok: true, path: null }
       : { type: 'native.response', requestId, ok: true }
   }
   if (raw.ok === false) {

@@ -57,6 +57,50 @@ export const TRANSPORT_CREDIT_BYTES = 256 * 1024
  */
 export const TRANSPORT_MAX_REQUEST_BYTES = 300 * 1024 * 1024
 
+/**
+ * The bound on one wire id (request id, stream id). Ids are minted with
+ * `crypto.randomUUID()` (36 characters); the bound is a wire-trust limit,
+ * not a format: over-bound ids are a protocol refusal, never an allocation.
+ */
+export const TRANSPORT_MAX_ID_CHARS = 512
+
+/** The bound on one url field, sized to the HTTP request-line norm. */
+export const TRANSPORT_MAX_URL_CHARS = 8192
+
+/** The bound on one HTTP method field (any RFC method token fits with room). */
+export const TRANSPORT_MAX_METHOD_CHARS = 16
+
+/** The bound on the header-pair count of one message. */
+export const TRANSPORT_MAX_HEADER_COUNT = 256
+
+/** The bound on one header name. */
+export const TRANSPORT_MAX_HEADER_NAME_CHARS = 256
+
+/** The bound on one header value, sized to the HTTP header-buffer norm. */
+export const TRANSPORT_MAX_HEADER_VALUE_CHARS = 8192
+
+/** The bound on one status-text field. */
+export const TRANSPORT_MAX_STATUS_TEXT_CHARS = 256
+
+/** The bound on one error-code field (short slugs). */
+export const TRANSPORT_MAX_CODE_CHARS = 64
+
+/** The bound on one error-message field (short diagnostics). */
+export const TRANSPORT_MAX_MESSAGE_CHARS = 1024
+
+/** The bound on one optional reason field. */
+export const TRANSPORT_MAX_REASON_CHARS = 256
+
+/**
+ * The bound on in-flight transport operations per runtime adapter (fetches
+ * plus streams, pending or active). Each open stream is a live in-process
+ * carrier fetch for its whole lifetime, so an unbounded map is an
+ * unbounded set of carrier operations a peer can hold open. The bound is
+ * far above the client's ordinary concurrency (single-digit RPCs plus its
+ * two event streams); a peer over it is refused per open, not dropped.
+ */
+export const TRANSPORT_MAX_CONCURRENT_OPERATIONS = 128
+
 /** Transport-level error codes (business error codes ride inside the payload, not here). */
 export const TransportErrorCode = {
   aborted: 'aborted',
@@ -68,6 +112,7 @@ export const TransportErrorCode = {
   downlinkOnly: 'downlink-only',
   transportClosed: 'transport-closed',
   internal: 'internal',
+  tooManyRequests: 'too-many-requests',
 } as const
 
 export type TransportErrorCodeValue = (typeof TransportErrorCode)[keyof typeof TransportErrorCode]
@@ -318,7 +363,23 @@ function fail(message: string): never {
 }
 
 function readId(value: unknown, label: string): string {
-  return typeof value === 'string' && value !== '' ? value : fail(`${label}: expected a non-empty string id`)
+  return readBoundedText(value, `${label}: expected a non-empty string id`, TRANSPORT_MAX_ID_CHARS, label)
+}
+
+/**
+ * The bounded string check: the shared enforcement for every metadata field,
+ * so each field's bound is a refusal at the wire, not an allocation the peer
+ * can force.
+ * @param value - the received value
+ * @param expected - the refusal text when the value is not a string
+ * @param max - the character bound
+ * @param label - the field name for the over-bound refusal
+ * @param nonEmpty - whether the empty string is also a refusal (default true)
+ * @returns the value
+ */
+function readBoundedText(value: unknown, expected: string, max: number, label: string, nonEmpty: boolean = true): string {
+  if (typeof value !== 'string' || (nonEmpty && value === '')) fail(expected)
+  return value.length <= max ? value : fail(`${label}: ${String(value.length)} characters exceed the ${String(max)} character bound`)
 }
 
 function readSequence(value: unknown): number {
@@ -335,22 +396,46 @@ function readData(value: unknown): Uint8Array {
 
 function readHeaders(value: unknown): Array<[string, string]> {
   if (!Array.isArray(value)) fail('headers: expected an array of [name, value] pairs')
+  if (value.length > TRANSPORT_MAX_HEADER_COUNT) {
+    fail(`headers: ${String(value.length)} pairs exceed the ${String(TRANSPORT_MAX_HEADER_COUNT)} pair bound`)
+  }
   return value.map((pair, index) => {
     if (!Array.isArray(pair) || pair.length !== 2 || typeof pair[0] !== 'string' || typeof pair[1] !== 'string') {
       fail(`headers[${index}]: expected a [name, value] pair`)
     }
-    return [pair[0], pair[1]] as [string, string]
+    const name = pair[0]
+    const nameOver = name.length > TRANSPORT_MAX_HEADER_NAME_CHARS
+    const valueOver = pair[1].length > TRANSPORT_MAX_HEADER_VALUE_CHARS
+    if (nameOver || valueOver) {
+      fail(`headers[${index}]: a field exceeds the ${String(TRANSPORT_MAX_HEADER_NAME_CHARS)}/${String(TRANSPORT_MAX_HEADER_VALUE_CHARS)} character bound`)
+    }
+    return [name, pair[1]] as [string, string]
   })
 }
 
-function readOptionalReason(value: unknown): string | undefined {
-  return typeof value === 'string' && value !== '' ? value : undefined
+/**
+ * The optional reason check: absent or empty is dropped (never materialized
+ * as undefined), a string is bound-checked, and a wrong type is dropped as
+ * before the bound existed.
+ * @param value - the received value
+ * @param label - the field name for the over-bound refusal
+ * @returns the value, or undefined to drop the field
+ */
+function readOptionalReason(value: unknown, label: string): string | undefined {
+  if (typeof value !== 'string' || value === '') return undefined
+  return value.length <= TRANSPORT_MAX_REASON_CHARS
+    ? value
+    : fail(`${label}: ${String(value.length)} characters exceed the ${String(TRANSPORT_MAX_REASON_CHARS)} character bound`)
 }
 
 /**
  * Validate one value received over a transport channel into a typed message.
  * This is the wire boundary: both edges parse every inbound message through
  * it, and a malformed message is a transport failure, never a business error.
+ * Beyond the discriminant and field-type checks it enforces the protocol's
+ * character bounds on every metadata field (ids, urls, methods, headers,
+ * status, codes, messages, reasons), so an over-bound field is refused at
+ * the wire instead of becoming an allocation the sender forced.
  * @param value - the structured-cloned message value.
  * @returns the validated message.
  */
@@ -364,8 +449,8 @@ export function parseTransportMessage(value: unknown): DesktopTransportMessage {
       return {
         type,
         requestId: readId(raw.requestId, 'fetch.open.requestId'),
-        url: typeof raw.url === 'string' && raw.url !== '' ? raw.url : fail('fetch.open.url: expected a non-empty string'),
-        method: typeof raw.method === 'string' && raw.method !== '' ? raw.method : fail('fetch.open.method: expected a non-empty string'),
+        url: readBoundedText(raw.url, 'fetch.open.url: expected a non-empty string', TRANSPORT_MAX_URL_CHARS, 'fetch.open.url'),
+        method: readBoundedText(raw.method, 'fetch.open.method: expected a non-empty string', TRANSPORT_MAX_METHOD_CHARS, 'fetch.open.method'),
         headers,
       }
     }
@@ -381,15 +466,17 @@ export function parseTransportMessage(value: unknown): DesktopTransportMessage {
     case 'fetch.request.credit':
       return { type, requestId: readId(raw.requestId, 'fetch.request.credit.requestId'), credit: readCredit(raw.credit) }
     case 'fetch.abort': {
-      const reason = readOptionalReason(raw.reason)
+      const reason = readOptionalReason(raw.reason, 'fetch.abort.reason')
       return { type, requestId: readId(raw.requestId, 'fetch.abort.requestId'), ...(reason !== undefined ? { reason } : {}) }
     }
     case 'fetch.response.head':
       return {
         type,
         requestId: readId(raw.requestId, 'fetch.response.head.requestId'),
-        status: typeof raw.status === 'number' && Number.isInteger(raw.status) ? raw.status : fail('fetch.response.head.status: expected an integer'),
-        statusText: typeof raw.statusText === 'string' ? raw.statusText : fail('fetch.response.head.statusText: expected a string'),
+        status: typeof raw.status === 'number' && Number.isInteger(raw.status) && raw.status >= 0 && raw.status <= 999
+          ? raw.status
+          : fail('fetch.response.head.status: expected an integer status in 0..999'),
+        statusText: readBoundedText(raw.statusText, 'fetch.response.head.statusText: expected a string', TRANSPORT_MAX_STATUS_TEXT_CHARS, 'fetch.response.head.statusText', false),
         headers: readHeaders(raw.headers),
       }
     case 'fetch.response.chunk':
@@ -407,17 +494,17 @@ export function parseTransportMessage(value: unknown): DesktopTransportMessage {
       return {
         type,
         requestId: readId(raw.requestId, 'fetch.error.requestId'),
-        code: typeof raw.code === 'string' && raw.code !== '' ? raw.code : fail('fetch.error.code: expected a non-empty string'),
-        message: typeof raw.message === 'string' ? raw.message : fail('fetch.error.message: expected a string'),
+        code: readBoundedText(raw.code, 'fetch.error.code: expected a non-empty string', TRANSPORT_MAX_CODE_CHARS, 'fetch.error.code'),
+        message: readBoundedText(raw.message, 'fetch.error.message: expected a string', TRANSPORT_MAX_MESSAGE_CHARS, 'fetch.error.message', false),
       }
     case 'stream.open':
       return {
         type,
         streamId: readId(raw.streamId, 'stream.open.streamId'),
-        url: typeof raw.url === 'string' && raw.url !== '' ? raw.url : fail('stream.open.url: expected a non-empty string'),
+        url: readBoundedText(raw.url, 'stream.open.url: expected a non-empty string', TRANSPORT_MAX_URL_CHARS, 'stream.open.url'),
       }
     case 'stream.open.ack': {
-      const reason = readOptionalReason(raw.reason)
+      const reason = readOptionalReason(raw.reason, 'stream.open.ack.reason')
       return {
         type,
         streamId: readId(raw.streamId, 'stream.open.ack.streamId'),
@@ -435,15 +522,15 @@ export function parseTransportMessage(value: unknown): DesktopTransportMessage {
     case 'stream.credit':
       return { type, streamId: readId(raw.streamId, 'stream.credit.streamId'), credit: readCredit(raw.credit) }
     case 'stream.close': {
-      const reason = readOptionalReason(raw.reason)
+      const reason = readOptionalReason(raw.reason, 'stream.close.reason')
       return { type, streamId: readId(raw.streamId, 'stream.close.streamId'), ...(reason !== undefined ? { reason } : {}) }
     }
     case 'stream.error':
       return {
         type,
         streamId: readId(raw.streamId, 'stream.error.streamId'),
-        code: typeof raw.code === 'string' && raw.code !== '' ? raw.code : fail('stream.error.code: expected a non-empty string'),
-        message: typeof raw.message === 'string' ? raw.message : fail('stream.error.message: expected a string'),
+        code: readBoundedText(raw.code, 'stream.error.code: expected a non-empty string', TRANSPORT_MAX_CODE_CHARS, 'stream.error.code'),
+        message: readBoundedText(raw.message, 'stream.error.message: expected a string', TRANSPORT_MAX_MESSAGE_CHARS, 'stream.error.message', false),
       }
     default:
       fail(`message.type: unknown discriminant ${String(type)}`)

@@ -51,6 +51,12 @@ describe('decodePathname', () => {
   it('rejects an embedded null byte', () => {
     expect(decodePathname('/a\u0000b')).toBeUndefined()
   })
+
+  it('rejects a null byte that only appears after decoding', () => {
+    expect(decodePathname('/%00')).toBeUndefined()
+    expect(decodePathname('/a%00b')).toBeUndefined()
+    expect(decodePathname('/%2500')).toBe('/%00')
+  })
 })
 
 describe('isAppUrl', () => {

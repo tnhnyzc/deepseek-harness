@@ -9,12 +9,15 @@
  * every downlink the carrier serves — the pinned event streams, plain
  * downloads, and any stream a future revision adds — is carried with zero
  * desktop changes. The adapter names no endpoint, frame schema, or envelope;
- * it only chunks, sequences, and credits bytes.
+ * it only chunks, sequences, and credits bytes. In-flight operations are
+ * capped at the protocol's concurrent-operation bound: a peer over it has
+ * its new opens refused, while its live operations run to their terminals.
  * @module @deepseek-ai/dsh-desktop-runtime/transport-runtime
  */
 
 import { toFetchHandler, type ApiProxy } from '@deepseek-ai/dsh-host-apiproxy'
 import {
+  TRANSPORT_MAX_CONCURRENT_OPERATIONS,
   TRANSPORT_MAX_FRAME_BYTES,
   TRANSPORT_MAX_REQUEST_BYTES,
   TransportErrorCode,
@@ -285,6 +288,17 @@ export function attachTransportRuntime(port: TransportPort, api: ApiProxy, optio
           failFetch(message.requestId, TransportErrorCode.duplicateId, `duplicate fetch id ${message.requestId}`)
           return
         }
+        // The cap counts in-flight operations across both primitives: an
+        // over-bound open is refused per operation, never a channel drop.
+        if (fetches.size + streams.size >= TRANSPORT_MAX_CONCURRENT_OPERATIONS) {
+          post({
+            type: 'fetch.error',
+            requestId: message.requestId,
+            code: TransportErrorCode.tooManyRequests,
+            message: `in-flight transport operations exceed the ${String(TRANSPORT_MAX_CONCURRENT_OPERATIONS)} bound`,
+          })
+          return
+        }
         fetches.set(message.requestId, {
           controller: new AbortController(),
           url: message.url,
@@ -348,6 +362,12 @@ export function attachTransportRuntime(port: TransportPort, api: ApiProxy, optio
       case 'stream.open': {
         if (streams.has(message.streamId)) {
           failStream(message.streamId, TransportErrorCode.duplicateId, `duplicate stream id ${message.streamId}`)
+          return
+        }
+        if (fetches.size + streams.size >= TRANSPORT_MAX_CONCURRENT_OPERATIONS) {
+          // The cap counts in-flight operations across both primitives; the
+          // refusal settles the pending open without any state of its own.
+          refuseStream(message.streamId, TransportErrorCode.tooManyRequests)
           return
         }
         const state: StreamState = {

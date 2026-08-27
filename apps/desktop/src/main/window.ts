@@ -34,6 +34,12 @@ export function createAppWindow(): BrowserWindow {
       contextIsolation: true,
       sandbox: true,
       webSecurity: true,
+      // Explicit, not default-reliant: a future Electron default change must
+      // not silently re-enable <webview> embedding.
+      webviewTag: false,
+      // DevTools is a development affordance: packaged builds deny the API
+      // itself, so no menu item, accelerator, or page script can open it.
+      devTools: !app.isPackaged,
       // The checked-in CJS bridge (a sandboxed preload cannot use ESM); it
       // resolves in both the development layout and the packaged asar.
       preload: join(app.getAppPath(), 'src', 'preload', 'index.cjs'),

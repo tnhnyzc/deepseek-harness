@@ -38,13 +38,21 @@ a failure screen carrying the death reason and retained diagnostics, a
 user-requested restart boots a new generation, and the client
 reconstructs the sessions from the persisted log, with an interrupted
 turn durably closed `interrupted` — never `completed` — by the pinned
-persistence repair (the eight-property suite in
-`tests/dsh-crash-recovery.spec.ts`), again with no carrier changes. See
-`SPEC.md`
-#6-#11, `ARCHITECTURE.md`, and the
-[upstream contract](./docs/upstream-contract.md) for scope, seams, the
-applied local modifications, and the open D4 question (D1, D2, and D3
-resolved in stages 3-4).
+persistence repair (the nine-property suite in
+`tests/dsh-crash-recovery.spec.ts`), again with no carrier changes.
+Stage 10 is the security-hardening pass: every trust boundary between the
+renderer, preload, main, and runtime is now bounded and pinned — the
+transport wire bounds all metadata and caps concurrent operations, the
+native channel bounds ids and response paths, the BrowserWindow surface
+and the deny-all permissions are pinned in source, the preload bridge is
+main-frame-only, the CSP is a pinned minimized policy whose 'unsafe-eval'
+is justified at the pinned loader's source, and production code creates
+no network listeners (Agent Note
+`2026-08-27-desktop-stage10-security`). See `SPEC.md` #6-#11,
+`ARCHITECTURE.md`, and the [upstream
+contract](./docs/upstream-contract.md) for scope, seams, the applied
+local modifications, and the open D4 question (D1, D2, and D3 resolved in
+stages 3-4).
 
 ## Build
 

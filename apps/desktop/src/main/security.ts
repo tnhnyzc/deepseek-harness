@@ -2,7 +2,7 @@
  * Navigation and privilege lockdown for application web contents.
  * @module @deepseek-ai/dsh-desktop/src/main/security
  */
-import { shell, type Session, type WebContents } from 'electron'
+import { shell, type WebContents } from 'electron'
 import { isAppUrl } from './protocol.ts'
 
 /**
@@ -41,15 +41,37 @@ export function hardenWebContents(webContents: WebContents): void {
 }
 
 /**
- * Deny every permission request on the session: the shell has no current
- * consumer for them, and future capabilities opt in explicitly.
+ * The session surface the permission lockdown installs: a structural
+ * subset of Electron's `Session` so tests fake it without importing
+ * Electron values into the Node test context (the sender check's
+ * `IpcSender` follows the same pattern).
+ */
+export interface PermissionSession {
+  /** The permission prompt handler: `(webContents, permission, callback)`. */
+  setPermissionRequestHandler(
+    handler: (webContents: unknown, permission: string, callback: (granted: boolean) => void) => void,
+  ): void
+  /** The permission check handler: `(webContents, permission, requestingOrigin)`. */
+  setPermissionCheckHandler(
+    handler: (webContents: unknown, permission: string, requestingOrigin: unknown) => boolean,
+  ): void
+}
+
+/**
+ * Deny every permission on the session: the shell has no current consumer
+ * for them, and future capabilities opt in explicitly. Both handlers are
+ * default-deny — the request handler answers the permission prompt, and the
+ * check handler covers the paths Electron consults without prompting — so
+ * no permission is grantable until a capability installs its own explicit
+ * policy.
  * @param session - session to deny
  * @returns nothing
  */
-export function denySessionPermissions(session: Session): void {
+export function denySessionPermissions(session: PermissionSession): void {
   session.setPermissionRequestHandler((_webContents, _permission, callback) => {
     callback(false)
   })
+  session.setPermissionCheckHandler(() => false)
 }
 
 /**

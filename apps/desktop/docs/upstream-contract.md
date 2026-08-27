@@ -1874,6 +1874,114 @@ its marker file written by the orphaned completion).
 Carrier changes: none. No new shared modification: M1–M3 and U1–U3 are
 unchanged.
 
+### Stage 10 security hardening
+
+Stage 10 (SPEC §24) is the dedicated hardening pass across the
+renderer/preload/main/runtime boundaries (Agent Note
+`2026-08-27-desktop-stage10-security`). Every change is on the desktop
+carrier side; the pinned-source delta is unchanged — M1–M3 remain the
+complete Desktop-enablement set and U1–U3 the complete shared set.
+
+**The CSP verdict: `unsafe-eval` is pinned-source-required and stays.**
+The renderer seeds `@deepseek-ai/cordis` as a platform module
+(`packages/client/web/src/platform.ts:11`), and the pinned loader's config
+expression evaluator — a **module-scope** `new Function('ctx', 'expr', …)`
+in `vendor/loader/src/config/utils.ts:4` (vendor pin `b150a551`) — is
+bundled into the built renderer page and executes at module evaluation.
+Without `unsafe-eval` that module evaluation throws and the pinned tree
+cannot boot; the runtime smoke's tree-mount wait
+(`apps/desktop/tests/shell.spec.ts`) is the standing boot proof. `blob:` in
+`script-src` is the carrier's classic-script boot path:
+`evaluateClassicScript` (`apps/desktop/src/renderer/dsh-carrier.ts`)
+executes the pinned `bootInjections` facade and the preload bundles as blob
+object URLs of the document origin. `style-src 'unsafe-inline'` is required
+by the pinned tree's inline style attributes (the AppFrame
+`grid-template-columns` the command bridge's frame probe targets). No other
+relaxation exists in the pinned policy, and the smoke asserts the exact
+string served.
+
+**The transport wire is metadata-bounded and operation-capped.**
+`parseTransportMessage` (`apps/desktop-runtime/src/transport.ts`, shared by
+all three edges) now enforces character bounds on every metadata field —
+ids ≤512, urls ≤8192, methods ≤16, header count ≤256 with name ≤256 /
+value ≤8192, status 0..999, status-text ≤256, error codes ≤64, messages
+≤1024, reasons ≤256: Web/HTTP-norm values far above the pinned client's
+real traffic (UUID ids, short API urls), so a compromised renderer cannot
+force unbounded allocations across the IPC with a single cheap frame. The
+runtime adapter additionally caps in-flight operations (fetches plus
+streams) at `TRANSPORT_MAX_CONCURRENT_OPERATIONS = 128` — an open stream is
+a live in-process carrier fetch for its whole lifetime, so the uncapped
+map was an unbounded set of carrier operations a peer could hold open. An
+over-bound open is refused per operation with the new `too-many-requests`
+transport code; the peer's live operations run to their terminals.
+
+**The native channel takes the same bounds.** Request ids are bounded
+(≤512) in all four parsers, and a success response's chooser path takes
+the same structural check as a request path (non-empty, NUL-free,
+≤32768); the operator-cancel form (`path: null`) still parses to a
+settle-into-null.
+
+**The Electron surface is pinned, not default-reliant.** The
+BrowserWindow explicitly carries `webviewTag: false` (a future Electron
+default change cannot silently re-enable embedding) and
+`devTools: !app.isPackaged` (packaged builds deny the DevTools API itself;
+the menu's development-only DevTools item stays). The session installs
+**both** the permission-request and the permission-check handler as
+deny-all. The preload installs the closed six-method bridge in the main
+frame only (a top-level `window.top !== window.self` guard); the main-side
+`isTrustedIpcSender` check still refuses subframe IPC independently, so
+neither half is the single line of defense.
+
+**The private protocol closes the decode gap.** `decodePathname`
+(`apps/desktop/src/main/protocol.ts`) now rejects a NUL byte in the
+decoded form, not only the encoded one (`%00`). The boot-graph publication
+is bound-checked at the wire before the supervisor caches it
+(`parseBootGraphMessage`, now exported for the test): script ≤1 MiB,
+lists ≤256 items, ids/urls ≤8192, revisions ≤128 — an over-bound
+publication is dropped whole and the generation reports no boot artifacts.
+
+**Zero TCP listeners, pinned.** The desktop composition disables the
+`webserver`/`web-runtime` rows (the only HTTP listeners in the web
+profile) and serves everything through the in-process carrier
+(`apps/desktop-runtime/src/composition.ts`); the boundary scan
+(`apps/desktop/tests/boundary.spec.ts`) now refuses any socket creation
+in desktop production source (`createServer(`, `new net|http|https.Server`,
+`.listen(`). Outbound provider/API traffic is the runtime child dialing
+the user-configured endpoint, not a listening socket.
+
+**The renderer↔main surface is audited and unchanged in shape.** Four
+renderer→main channels (`runtime-get`, `boot-graph`, `runtime-restart`,
+`transport-open`), each `isTrustedIpcSender`-gated (live main frame,
+app-protocol url, known window); main→renderer carries state, the
+per-request transport port (to the requesting, trusted sender only), and
+the closed command vocabulary. `shell.openExternal` sees only
+`isWebUrl`-validated http(s); `path.open` receives structurally validated
+path strings that Electron's `shell.openPath` opens as files (it never
+interprets them as URLs).
+
+Facts the stage settled:
+
+- The module-scope `new Function` executes when the `@deepseek-ai/cordis`
+  module is *imported* in the page, not when a `!!js` expression is
+  evaluated — the CSP requirement is load-time, and no desktop code can
+  avoid it without modifying the pinned source.
+- `sandbox: true` plus `contextIsolation: true` leaves the preload the
+  only privileged surface; the bridge's six methods are the complete
+  renderer→main API (no arbitrary channel, no `ipcRenderer` passthrough).
+- A `fetch.open`/`stream.open` that never completes its body stays in the
+  adapter's operation map: the cap counts such half-open operations, which
+  is what makes it a memory bound rather than a throughput bound.
+
+Carrier changes: `apps/desktop-runtime` `src/transport.ts`,
+`src/transport-runtime.ts`, `src/native.ts`; `apps/desktop`
+`src/main/window.ts`, `src/main/security.ts`, `src/main/protocol.ts`,
+`src/main/runtime.ts`, `src/preload/index.cjs`; tests
+`apps/desktop/tests/desktop-security-hardening.spec.ts` (new), plus the
+extended `transport.spec.ts`, `native-protocol.spec.ts`,
+`protocol.spec.ts`, `security.spec.ts`, `boundary.spec.ts`,
+`shell.spec.ts`. No pinned-source modification; no new `M*`/`U*` entry.
+The Windows job object (D4) remains stage 11.
+
 ---
 
 ## Stage 0 exit-criteria answers

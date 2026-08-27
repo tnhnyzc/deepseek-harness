@@ -1,6 +1,7 @@
 /**
  * Shell smoke: the packaged renderer boots over dsh-app:// in a sandboxed,
- * Node-free renderer with a valid CSP, no request leaving the app
+ * Node-free renderer with the pinned CSP, the closed preload bridge
+ * surface, <webview> embedding pinned off, no request leaving the app
  * protocol, no served file outside the renderer distribution, and no
  * Electron security warning caused by the application configuration.
  * Self-skips without a built app or a GUI session.
@@ -43,11 +44,13 @@ describe.skipIf(!guiAvailable() || !built)('desktop shell smoke', () => {
         win.on('console', (message) => {
           const text = message.text()
           if (!text.includes('Electron Security Warning')) return
-          // The pinned Cordis loader evaluates its `!!js` config expressions
-          // through new Function at module scope, so the stage 4 CSP must
-          // carry 'unsafe-eval' for the pinned tree to boot; that one warning
-          // is the documented consequence. Every other security warning still
-          // fails the smoke.
+          // The pinned Cordis loader module (seeded as the @deepseek-ai/cordis
+          // platform module) runs new Function at module scope —
+          // vendor/loader/src/config/utils.ts, vendor pin b150a551 — so the
+          // CSP must carry 'unsafe-eval' for the pinned tree to boot; the
+          // runtime smoke below is the boot proof. That one warning is the
+          // documented consequence. Every other security warning still fails
+          // the smoke.
           if (text.includes('Insecure Content-Security-Policy')) return
           warnings.push(text)
         })
@@ -63,17 +66,34 @@ describe.skipIf(!guiAvailable() || !built)('desktop shell smoke', () => {
         const state = await win.evaluate(() => document.getElementById('root')?.dataset.state)
         expect(['booting-desktop', 'stopped', 'starting', 'ready', 'stopping', 'failed']).toContain(state)
 
+        // The served policy is the pinned minimized CSP (the stage 10
+        // finding): no 'unsafe-inline' in script-src; blob: is the carrier's
+        // classic-script path; 'unsafe-eval' is the pinned loader's.
         const csp = await win.evaluate(() =>
           document.querySelector('meta[http-equiv="Content-Security-Policy"]')?.getAttribute('content') ?? '',
         )
-        expect(csp).toContain("script-src 'self'")
+        expect(csp).toBe(
+          "default-src 'self'; script-src 'self' blob: 'unsafe-eval'; style-src 'self' 'unsafe-inline'; "
+          + "img-src 'self' data:; font-src 'self' data:; connect-src 'self'; object-src 'none'; base-uri 'none'; form-action 'none'",
+        )
 
-        const globals = await win.evaluate(() => ({
-          require: typeof (globalThis as Record<string, unknown>).require,
-          process: typeof (globalThis as Record<string, unknown>).process,
-        }))
+        const globals = await win.evaluate(() => {
+          const api = (globalThis as { dshDesktop?: Record<string, unknown> }).dshDesktop
+          return {
+            require: typeof (globalThis as Record<string, unknown>).require,
+            process: typeof (globalThis as Record<string, unknown>).process,
+            webviewTag: typeof (globalThis as { HTMLWebViewElement?: unknown }).HTMLWebViewElement,
+            bridge: api === undefined ? [] : Object.keys(api).sort(),
+          }
+        })
         expect(globals.require).toBe('undefined')
         expect(globals.process).toBe('undefined')
+        // webviewTag is pinned off: the <webview> element type never exists.
+        expect(globals.webviewTag).toBe('undefined')
+        // The preload bridge is the closed six-method surface, nothing more.
+        expect(globals.bridge).toEqual([
+          'getBootPayload', 'getRuntimeState', 'onDesktopCommand', 'onRuntimeState', 'openTransport', 'requestRestart',
+        ])
 
         // The url is inlined: the callback is serialized into the page
         // context, where this file's imports do not exist.
@@ -112,6 +132,9 @@ describe.skipIf(!guiAvailable() || !runtimeBuilt)('desktop runtime smoke', () =>
       // Stage 4: ready hands the root to the DSH client tree. The carrier
       // seam and the boot protocol are installed before the tree takes over,
       // and the shell state screen is gone — one root, the pinned app in it.
+      // Stage 10: this mount is also the CSP boot proof — the pinned loader
+      // module's module-scope new Function must execute under the policy,
+      // or the graph global and the tree never appear and this times out.
       await win.waitForFunction(() => {
         const globals = globalThis as { __DSH_TRANSPORT__?: unknown; __DSH_BOOT__?: unknown }
         return globals.__DSH_TRANSPORT__ !== undefined

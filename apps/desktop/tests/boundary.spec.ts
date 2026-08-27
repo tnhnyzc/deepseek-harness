@@ -119,7 +119,7 @@ const NATIVE_FILES = [
 /** The native protocol message tags: renderer-side knowledge of them is a bridge by definition. */
 const NATIVE_PROTOCOL_TAGS = ['native.request', 'native.response', 'native.cancel', 'native.abort', 'directory.pick', 'path.open']
 
-const HTTP_LISTENER = /createServer\s*\(|new\s+(?:net|http|https)\.Server/
+const HTTP_LISTENER = /createServer\s*\(|new\s+(?:net|http|https)\.Server|\.listen\(/
 
 describe('SPEC §31 architectural boundaries', () => {
   it('keeps Electron main free of DSH product packages', () => {
@@ -194,7 +194,7 @@ describe('SPEC §31 architectural boundaries', () => {
     expect(composition).toContain('DESKTOP_PICKER_MODULE_NAME')
   })
 
-  it('creates no HTTP listener in desktop production code', () => {
+  it('creates no network listener in desktop production code', () => {
     const files = [
       ...listSources(join(DESKTOP_ROOT, 'src'), new Set(['ts', 'cjs'])),
       ...listSources(join(RUNTIME_ROOT, 'src'), new Set(['ts'])),
@@ -202,7 +202,7 @@ describe('SPEC §31 architectural boundaries', () => {
     expect(files.length).toBeGreaterThan(0)
     for (const file of files) {
       const source = readFileSync(file, 'utf8')
-      expect(source.match(HTTP_LISTENER), `${file} creates an HTTP listener`).toBeNull()
+      expect(source.match(HTTP_LISTENER), `${file} creates a network listener`).toBeNull()
     }
   })
 })
