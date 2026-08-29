@@ -34,8 +34,17 @@ preload、主进程与运行时之间的每条信任边界现在都有界并钉�
 在源码中钉住，权限策略默认拒绝、仅留唯一有源码出处的剪贴板写入例外，
 preload 桥仅限主 frame，CSP 是钉住的最小化策略、其 'unsafe-eval' 与图片
 blob URL 有固定版客户端源码出处，生产代码不创建任何网络监听器（Agent Note
-`2026-08-27-desktop-stage10-security`）。范围、接缝、
-已应用的本地改动与未决的 D4 问题（D1、D2、D3 已在 stage 3-4 解决）见
+`2026-08-27-desktop-stage10-security`）。stage 11 是打包阶段：一个可复现、
+自包含、按平台的发布单元。`pnpm run package` 构建应用与运行时，暂存锁定
+固定的依赖闭包加带校验和的捆绑 Node，用 `@electron/packager` 打包
+（asar + 完整性），翻转全部九个 Electron fuse，签名（本地 ad-hoc；存在
+凭据时用 Developer ID + 公证，或 Windows 证书），校验构件布局（33 项
+检查），并证明打包的运行时在构件自身的 Node 下启动（干净副本、全新
+`DSH_HOME`、最小 `PATH`）。DSH 运行在捆绑的独立 Node 之下，绝不在
+Electron 之下；D4（带 `KILL_ON_JOB_CLOSE` 的 Windows Job Object）是进程
+遏制保证，在 CI 的真实 Windows 内核上执行（Agent Note
+`2026-08-29-desktop-stage11-packaging`）。范围、接缝、已应用的本地改动与
+D4 遏制（D1、D2、D3 已在 stage 3-4 解决；D4 在 stage 11 解决）见
 `SPEC.md` #6-#11、`ARCHITECTURE.md` 与[上游契约](./docs/upstream-contract.md)。
 
 ## 构建
@@ -97,10 +106,30 @@ pnpm test apps/desktop  # supervisor, smoke, and protocol tests
 
 ## 打包
 
-`forge.config.ts` 是打包规格（asar + `extraResource: dist/renderer` 与
-`node` -> `Resources/`）。Forge 7 CLI 无法在本 monorepo 的 isolated pnpm
-布局下运行系统检查；stage 1 用 `@electron/packager` 验证 bundle 组装（见
-stage 1 Agent Note）。工具链在 stage 11 定案。
+`pnpm run package`（编排器：`scripts/packaging/package.ts`）为**当前**平台
+构建发布单元——由于闭包的原生 prebuild 是主机特定的，跨主机打包被拒绝：
+
+```sh
+pnpm run package                 # build -> stage -> package -> fuses -> sign -> verify -> boot smoke
+pnpm run package -- --skip-build # reuse an existing build (re-stage, re-package, re-verify)
+pnpm run package -- --skip-smoke # skip the clean-copy boot smoke
+```
+
+流水线顺序：清空 `out/`；构建（运行时、main、renderer，以及未加
+`--skip-build` 时的 `bundle:node`）；暂存锁定固定的依赖闭包加带校验和的
+捆绑 Node 与 `build-manifest.json`（`scripts/packaging/{closure,staging,build-manifest}.ts`）；
+用 `@electron/packager` 打包（asar + 完整性，资源解包到 `Resources/`）；
+翻转全部九个 Electron fuse（`scripts/packaging/fuses.ts`）；签名（本地
+ad-hoc；存在 `CSC_*`/`APPLE_*` 凭据时在 macOS 上用 Developer ID + 公证、
+在 Windows 上用证书——见 `package-report.json` 的已配置对已执行）；校验
+构件布局（33 项检查，`scripts/packaging/verify-layout.ts`）；运行干净
+副本启动冒烟（`scripts/packaging/smoke-runtime.ts`），它用构件自身的 Node
+派生打包的运行时，配全新 `DSH_HOME` 与最小 `PATH`，断言以清单的 DSH
+版本到达 `runtime.ready`。
+
+产物为 `out/DeepSeek Harness Desktop-<platform>-<arch>/`（保留产品名中的
+空格）。D4 的 Windows 执行测试是 `desktop-windows` CI 作业
+（`scripts/d4-acceptance.ts`），不是本地步骤。
 
 ## 布局
 
@@ -122,5 +151,12 @@ stage 1 Agent Note）。工具链在 stage 11 定案。
   loader 在浏览器中惰性的 `node:module` require 提供桩。
 - `scripts/bundle-node.ts`、`node-versions.json` — 构建时按目标下载并做
   sha256 校验的固定 Node。
-- `tests/` — 监督者、smoke、协议、renderer 客户端、broker、原生能力与
-  端到端测试。
+- `scripts/packaging/` — stage 11 发布流水线：`package.ts`（编排器）、
+  `staging.ts`（暂存树 + `extraResources`）、`closure.ts`（锁定固定的 store
+  复制）、`build-manifest.ts`（发布身份 + 闭包指纹）、`fuses.ts`（九 fuse
+  固定）、`verify-layout.ts`（33 项构件扫描）、`smoke-runtime.ts`（干净副本
+  启动证明）。
+- `scripts/d4-acceptance.ts`、`scripts/d4-acceptance-child.ts` — D4 Windows
+  Job Object 验收（在 CI 的真实 Windows 内核上运行）。
+- `tests/` — 监督者、smoke、协议、renderer 客户端、broker、原生能力、打包
+  与端到端测试。

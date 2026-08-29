@@ -23,19 +23,68 @@ import {
 } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
+import { pathToFileURL } from 'node:url'
 
 /** Every target the desktop release ships; others require explicit support. */
 const ALL_TARGETS = ['darwin-arm64', 'darwin-x64', 'win32-x64', 'linux-x64'] as const
 const DIST_BASE = 'https://nodejs.org/dist'
 
-interface NodeTargetSpec {
+export interface NodeTargetSpec {
   file: string
   sha256: string
 }
 
-interface NodeManifest {
+/** The node-versions.json pin table. */
+export interface NodeManifest {
   version: string
   targets: Record<string, NodeTargetSpec>
+}
+
+/**
+ * Download, checksum-verify, and extract the pinned Node for one target.
+ * Installs `node(.exe)` plus the distribution `LICENSE` into
+ * `<destBaseDir>/<target>/`. The self-report probe runs only when the
+ * installed binary can execute on this host.
+ * @param manifest - the node-versions.json contents.
+ * @param target - the node target name (`darwin-arm64`, ...).
+ * @param destBaseDir - the directory that receives the `<target>/` subtree.
+ */
+export async function installNodeTarget(manifest: NodeManifest, target: string, destBaseDir: string): Promise<void> {
+  const spec = manifest.targets[target]
+  if (spec === undefined) {
+    throw new Error(`bundle-node: target ${target} has no pinned digest in node-versions.json`)
+  }
+  const url = `${DIST_BASE}/${manifest.version}/${spec.file}`
+  const workDir = join(tmpdir(), `dsh-bundle-node-${randomUUID()}`)
+  try {
+    const archive = join(workDir, spec.file)
+    await download(url, archive)
+    const digest = createHash('sha256').update(readFileSync(archive)).digest('hex')
+    if (digest !== spec.sha256) {
+      throw new Error(`bundle-node: checksum mismatch for ${spec.file}: expected ${spec.sha256}, got ${digest}`)
+    }
+    const isWindows = target === 'win32-x64'
+    const binary = extractNodeBinary(archive, `node-${manifest.version}-${target.replace('win32', 'win')}`, isWindows)
+    const destDir = join(destBaseDir, target)
+    mkdirSync(destDir, { recursive: true })
+    const dest = join(destDir, isWindows ? 'node.exe' : 'node')
+    cpSync(binary, dest)
+    if (!isWindows) chmodSync(dest, 0o755)
+    const license = join(workDir, 'extract', `node-${manifest.version}-${target.replace('win32', 'win')}`, 'LICENSE')
+    if (existsSync(license)) cpSync(license, join(destDir, 'LICENSE'))
+    // A foreign-architecture binary cannot be probed on this host; for
+    // cross targets the checksum plus the target runner's boot are the
+    // verification.
+    if (target === `${process.platform}-${process.arch}`) {
+      const probe = spawnSync(dest, ['--version'], { encoding: 'utf8' })
+      if (probe.status !== 0 || probe.stdout.trim() !== manifest.version) {
+        throw new Error(`bundle-node: installed binary self-report failed (wanted ${manifest.version}, got ${JSON.stringify(probe.stdout?.trim())})`)
+      }
+    }
+    console.log(`bundle-node: ${target} -> ${dest} (${manifest.version}, sha256 verified)`)
+  } finally {
+    rmSync(workDir, { recursive: true, force: true })
+  }
 }
 
 /** Parse `--target <t>` (repeatable) and `--all`; default is this platform. */
@@ -50,7 +99,7 @@ function parseTargets(argv: string[]): string[] {
     } else if (arg === '--target') {
       i += 1
       const target = argv[i]
-      if (target === undefined || !ALL_TARGETS.includes(target)) {
+      if (target === undefined || !(ALL_TARGETS as readonly string[]).includes(target)) {
         throw new Error(`bundle-node: unsupported --target ${String(target)}; supported: ${ALL_TARGETS.join(', ')}`)
       }
       targets.push(target)
@@ -82,45 +131,17 @@ function extractNodeBinary(archive: string, archiveBase: string, isWindows: bool
   return binary
 }
 
-/** Install one verified Node binary into the app's node/<target> resource. */
-async function installTarget(manifest: NodeManifest, target: string, appDir: string): Promise<void> {
-  const spec = manifest.targets[target]
-  if (spec === undefined) {
-    throw new Error(`bundle-node: target ${target} has no pinned digest in node-versions.json`)
-  }
-  const url = `${DIST_BASE}/${manifest.version}/${spec.file}`
-  const workDir = join(tmpdir(), `dsh-bundle-node-${randomUUID()}`)
-  try {
-    const archive = join(workDir, spec.file)
-    await download(url, archive)
-    const digest = createHash('sha256').update(readFileSync(archive)).digest('hex')
-    if (digest !== spec.sha256) {
-      throw new Error(`bundle-node: checksum mismatch for ${spec.file}: expected ${spec.sha256}, got ${digest}`)
-    }
-    const isWindows = target === 'win32-x64'
-    const binary = extractNodeBinary(archive, `node-${manifest.version}-${target.replace('win32', 'win')}`, isWindows)
-    const destDir = join(appDir, 'node', target)
-    mkdirSync(destDir, { recursive: true })
-    const dest = join(destDir, isWindows ? 'node.exe' : 'node')
-    cpSync(binary, dest)
-    if (!isWindows) chmodSync(dest, 0o755)
-    const probe = spawnSync(dest, ['--version'], { encoding: 'utf8' })
-    if (probe.status !== 0 || probe.stdout.trim() !== manifest.version) {
-      throw new Error(`bundle-node: installed binary self-report failed (wanted ${manifest.version}, got ${JSON.stringify(probe.stdout?.trim())})`)
-    }
-    console.log(`bundle-node: ${target} -> ${dest} (${manifest.version}, sha256 verified)`)
-  } finally {
-    rmSync(workDir, { recursive: true, force: true })
-  }
-}
-
 async function main(): Promise<void> {
   const appDir = join(import.meta.dirname, '..')
   const manifest = JSON.parse(readFileSync(join(appDir, 'node-versions.json'), 'utf8')) as NodeManifest
   const targets = parseTargets(process.argv.slice(2))
   for (const target of targets) {
-    await installTarget(manifest, target, appDir)
+    await installNodeTarget(manifest, target, join(appDir, 'node'))
   }
 }
 
-void main()
+// Run only as the entry script; `installNodeTarget` is also imported by the
+// packaging pipeline, where this CLI must stay inert.
+if (process.argv[1] !== undefined && import.meta.url === pathToFileURL(process.argv[1]).href) {
+  void main()
+}

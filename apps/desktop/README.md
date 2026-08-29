@@ -49,11 +49,22 @@ single source-proven clipboard-write exception, the preload bridge is
 main-frame-only, the CSP is a pinned minimized policy whose 'unsafe-eval'
 and image blob URLs are justified at the pinned client's source, and
 production code creates no network listeners (Agent Note
-`2026-08-27-desktop-stage10-security`). See `SPEC.md` #6-#11,
+`2026-08-27-desktop-stage10-security`). Stage 11 is the packaging pass: a
+reproducible, self-contained, per-platform release unit. `pnpm run package`
+builds the app and runtime, stages a lockfile-pinned dependency closure plus
+the checksum-verified bundled Node, packages with `@electron/packager`
+(asar + integrity), flips all nine Electron fuses, signs (ad-hoc locally;
+Developer ID + notarization, or the Windows certificate, when credentials
+exist), verifies the artifact layout (33 checks), and proves the packaged
+runtime boots under the artifact's own Node (clean copy, fresh `DSH_HOME`,
+minimal `PATH`). DSH runs under the bundled standalone Node, never under
+Electron; D4 (the Windows Job Object with `KILL_ON_JOB_CLOSE`) is the
+process-containment guarantee, executed on a real Windows kernel in CI
+(Agent Note `2026-08-29-desktop-stage11-packaging`). See `SPEC.md` #6-#11,
 `ARCHITECTURE.md`, and the [upstream
 contract](./docs/upstream-contract.md) for scope, seams, the applied
-local modifications, and the open D4 question (D1, D2, and D3 resolved in
-stages 3-4).
+local modifications, and the D4 containment (D1, D2, and D3 resolved in
+stages 3-4; D4 resolved in stage 11).
 
 ## Build
 
@@ -127,11 +138,33 @@ pnpm test apps/desktop  # supervisor, smoke, and protocol tests
 
 ## Package
 
-`forge.config.ts` is the packaging specification (asar +
-`extraResource: dist/renderer` and `node` -> `Resources/`). The Forge 7 CLI
-cannot run its system check in this monorepo's isolated pnpm layout; stage 1
-verifies bundle assembly with `@electron/packager` (see the stage 1 Agent
-Note). Tooling settles in stage 11.
+`pnpm run package` (orchestrator: `scripts/packaging/package.ts`) builds the
+release unit for the **current** platform — cross-host packaging is rejected
+because the closure's native prebuilds are host-specific:
+
+```sh
+pnpm run package                 # build -> stage -> package -> fuses -> sign -> verify -> boot smoke
+pnpm run package -- --skip-build # reuse an existing build (re-stage, re-package, re-verify)
+pnpm run package -- --skip-smoke # skip the clean-copy boot smoke
+```
+
+The pipeline, in order: clean `out/`; build (runtime, main, renderer, and
+`bundle:node` unless `--skip-build`); stage the lockfile-pinned dependency
+closure plus the checksum-verified bundled Node and `build-manifest.json`
+(`scripts/packaging/{closure,staging,build-manifest}.ts`); package with
+`@electron/packager` (asar + integrity, resources unpacked under
+`Resources/`); flip all nine Electron fuses (`scripts/packaging/fuses.ts`);
+sign (ad-hoc locally; Developer ID + notarization on macOS and the Windows
+certificate when the `CSC_*`/`APPLE_*` credentials are present — see
+`package-report.json` for configured-vs-executed); verify the artifact
+layout (33 checks, `scripts/packaging/verify-layout.ts`); and run the
+clean-copy boot smoke (`scripts/packaging/smoke-runtime.ts`), which forks the
+packaged runtime under the artifact's own Node with a fresh `DSH_HOME` and a
+minimal `PATH` and asserts `runtime.ready` with the manifest's DSH version.
+
+The output is `out/DeepSeek Harness Desktop-<platform>-<arch>/` (the product
+name's spaces are preserved). D4's Windows execution test is the
+`desktop-windows` CI job (`scripts/d4-acceptance.ts`), not a local step.
 
 ## Layout
 
@@ -156,5 +189,13 @@ Note). Tooling settles in stage 11.
   the loader's browser-inert `node:module` require.
 - `scripts/bundle-node.ts`, `node-versions.json` — build-time download and
   sha256 verification of the pinned Node per target.
+- `scripts/packaging/` — the stage 11 release pipeline: `package.ts`
+  (orchestrator), `staging.ts` (staged tree + `extraResources`),
+  `closure.ts` (lockfile-pinned store copy), `build-manifest.ts` (release
+  identity + closure fingerprint), `fuses.ts` (the nine-fuse pin),
+  `verify-layout.ts` (33-check artifact scan), `smoke-runtime.ts` (clean-copy
+  boot proof).
+- `scripts/d4-acceptance.ts`, `scripts/d4-acceptance-child.ts` — the D4
+  Windows Job Object acceptance (runs on a real Windows kernel in CI).
 - `tests/` — supervisor, smoke, protocol, renderer client, broker, native
-  capability, and end-to-end tests.
+  capability, packaging, and end-to-end tests.

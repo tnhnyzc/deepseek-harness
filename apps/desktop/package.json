@@ -12,6 +12,7 @@
     "build:main": "tsdown",
     "build:renderer": "vite build",
     "bundle:node": "tsx scripts/bundle-node.ts",
+    "package": "tsx scripts/packaging/package.ts",
     "start": "electron ."
   },
   "devDependencies": {
@@ -21,6 +22,12 @@
     "@deepseek-ai/dsh-desktop-runtime": "workspace:^",
     "@deepseek-ai/dsh-host-apiproxy": "workspace:^",
     "@electron-forge/shared-types": "7.11.2",
+    "@electron/asar": "^4.3.0",
+    "@electron/fuses": "^2.1.3",
+    "@electron/notarize": "^3.1.1",
+    "@electron/osx-sign": "^2.7.0",
+    "@electron/packager": "^20.3.0",
+    "@electron/windows-sign": "^2.0.6",
     "@types/node": "^22.20.0",
     "@types/react": "~18.3.1",
     "@types/react-dom": "~18.3.0",

@@ -49,6 +49,7 @@
     "@deepseek-ai/dsh-tool-bash-persistent": "workspace:^",
     "@deepseek-ai/dsh-tool-cordis": "workspace:^",
     "@deepseek-ai/dsh-tool-pwsh-persistent": "workspace:^",
-    "@deepseek-ai/dsh-web-app": "workspace:^"
+    "@deepseek-ai/dsh-web-app": "workspace:^",
+    "koffi": "^3.1.0"
   }
 }

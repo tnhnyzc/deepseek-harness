@@ -11,6 +11,8 @@
     "src/shared",
     "src/renderer/transport.ts",
     "tests",
+    "scripts/packaging",
+    "scripts/bundle-node.ts",
     "forge.config.ts",
     "tsdown.config.ts"
   ],

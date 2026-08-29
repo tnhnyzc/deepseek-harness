@@ -123,6 +123,12 @@ External packages **directly declared** only by repository tooling, test infrast
 | --- | --- |
 | [`@braintree/sanitize-url`](https://github.com/braintree/sanitize-url) | MIT |
 | [`@electron-forge/shared-types`](https://github.com/electron/forge) | MIT |
+| [`@electron/asar`](https://github.com/electron/asar) | MIT |
+| [`@electron/fuses`](https://github.com/electron/fuses) | MIT |
+| [`@electron/notarize`](https://github.com/electron/notarize) | MIT |
+| [`@electron/osx-sign`](https://github.com/electron/osx-sign) | BSD-2-Clause |
+| [`@electron/packager`](https://github.com/electron/packager) | BSD-2-Clause |
+| [`@electron/windows-sign`](https://github.com/electron/windows-sign) | BSD-2-Clause |
 | [`@modelcontextprotocol/server-everything`](https://github.com/modelcontextprotocol/servers) | MIT / Apache-2.0 |
 | [`@modelcontextprotocol/server-filesystem`](https://github.com/modelcontextprotocol/servers) | MIT / Apache-2.0 |
 | [`@stylistic/eslint-plugin`](https://github.com/eslint-stylistic/eslint-stylistic) | MIT |

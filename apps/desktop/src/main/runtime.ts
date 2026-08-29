@@ -5,8 +5,10 @@
  * (`runtime.ready` up, `runtime.shutdown` down); logs ride the piped stdio,
  * never the channel, and readiness is never inferred from a port. An
  * unexpected root death also ends the dead generation's surviving
- * descendants (its own process group on POSIX; its parentage tree
- * best-effort on Windows) before any replacement generation may spawn.
+ * descendants (its own process group on POSIX; on Windows the runtime's
+ * own D4 job object — KILL_ON_JOB_CLOSE — is the primary mechanism, with
+ * a parentage-tree walk as the fallback) before any replacement
+ * generation may spawn.
  * @module @deepseek-ai/dsh-desktop/src/main/runtime
  */
 

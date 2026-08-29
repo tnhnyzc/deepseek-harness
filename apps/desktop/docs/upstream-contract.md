@@ -1530,7 +1530,7 @@ Classification of every anticipated desktop need:
 | D1 | `__DSH_BOOT__` provisioning mode: fetch rendered index over transport vs in-process graph export (decides B3) | resolved in stage 4: the graph is the in-process export (B3), published over the child IPC before `runtime.ready`; the bundle bytes stay on the transport fetch channel (Agent Note `2026-08-25-desktop-dsh-client-boot`) |
 | D2 | Backpressure/credit behavior of the process-IPC frame protocol under sustained token-rate streams (transport-internal; no upstream dependency) | resolved in stage 3: credit signaling with per-direction 256 KiB windows (Agent Note `2026-08-23-desktop-ipc-transport`) |
 | D3 | `isLoopback`-gated affordances under a `dsh-app://` URL with a loopback hostname (`packages/client/connection/src/loopback-hostname.ts:14-20`) | resolved in stages 1/4: the protocol host is `127.0.0.1`, loopback to the unmodified pinned classification (Agent Note `2026-08-25-desktop-dsh-client-boot`) |
-| D4 | Native-module ABI compatibility of the DSH dependency graph against the bundled standalone Node (mandatory packaging test, root `AGENTS.md` + SPEC stage 11) | stage 9/11 |
+| D4 | Native-module ABI compatibility of the DSH dependency graph against the bundled standalone Node (mandatory packaging test, root `AGENTS.md` + SPEC §26) | resolved in stage 11: DSH runs under the bundled standalone Node (never Electron's), the closure stages the host-specific native prebuilds, and the per-platform CI boot smoke starts DSH in packaged form under the artifact's own Node; the Windows D4 acceptance loads `koffi`'s Job Object (Agent Note `2026-08-29-desktop-stage11-packaging`) |
 
 ### Applied local modifications (stage 4)
 
@@ -2033,7 +2033,8 @@ Carrier changes: `apps/desktop-runtime` `src/transport.ts`,
 correction), plus the extended `transport.spec.ts`,
 `native-protocol.spec.ts`, `protocol.spec.ts`, `security.spec.ts`,
 `boundary.spec.ts`, `shell.spec.ts`. No pinned-source modification; no
-new `M*`/`U*` entry. The Windows job object (D4) remains stage 11.
+new `M*`/`U*` entry. The Windows job object (D4) was implemented in stage 11
+(resolved; Agent Note `2026-08-29-desktop-stage11-packaging`).
 
 ---
 

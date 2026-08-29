@@ -5,14 +5,18 @@
   ],
   "ignoreBinaries": [
     "bwrap",
+    "codesign",
     "icacls",
     "musl-gcc",
     "pbcopy",
     "pbpaste",
+    "powershell",
+    "ps",
     "python3",
     "sandbox-exec",
     "tar",
     "taskkill",
+    "tasklist",
     "where.exe"
   ],
   "ignoreWorkspaces": [
@@ -646,11 +650,14 @@
       "entry": [
         "tests/**/*.spec.ts",
         "forge.config.ts",
-        "src/renderer/node-module-stub.ts"
+        "src/renderer/node-module-stub.ts",
+        "scripts/packaging/smoke-runtime.ts",
+        "scripts/d4-acceptance-child.ts"
       ],
       "project": [
         "src/**/*.ts",
-        "tests/**/*.ts"
+        "tests/**/*.ts",
+        "scripts/**/*.ts"
       ],
       "ignoreDependencies": [
         "@types/react",

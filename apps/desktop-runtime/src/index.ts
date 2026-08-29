@@ -27,6 +27,7 @@ import { bootGraphMessage, createClientBundleFetch } from './boot-graph.ts'
 import { composeDesktopPatches, prepareDesktopProfile, PROFILE_ROOT_FILENAME } from './composition.ts'
 import { createNativeBridge } from './native-bridge.ts'
 import { createProcessShutdown } from './shutdown.ts'
+import { installWindowsProcessContainment, type WindowsProcessContainment } from './windows-job.ts'
 import { attachTransportRuntime, type FetchDispatch } from './transport-runtime.ts'
 import { createProcessTransportPort } from './transport-process.ts'
 
@@ -94,7 +95,15 @@ async function main(): Promise<void> {
   process.on('disconnect', () => { void shutdown.shutdown(0) })
   const environment = loadLayeredEnv(BIN_NAME)
   const uninstall = installFailLoud(BIN_NAME, process, () => dispose())
+  let containment: WindowsProcessContainment | undefined
   try {
+    // D4 containment installs before the composition boots, so before any
+    // descendant process can exist: on Windows the whole descendant tree
+    // dies with this process (job object, KILL_ON_JOB_CLOSE); elsewhere the
+    // controller is a no-op (the supervisor owns process-group cleanup).
+    // A failure here fails the boot loud: a contained runtime is a desktop
+    // invariant, not a best effort.
+    containment = await installWindowsProcessContainment()
     const home = resolveDshHome()
     const profile = prepareDesktopProfile(INSTALL_ANCHOR, home)
     const homePatches = loadOptionalPatches(BIN_NAME, join(home, PROFILE_PATCH_FILENAME)) ?? []
@@ -137,6 +146,9 @@ async function main(): Promise<void> {
     }
     transportDispose = attachTransportRuntime(transportPort, apiProxy, { fetchDispatch })
     dispose = () => {
+      // Containment releases with the tree: any member that outlived the
+      // dispose dies when the job handle closes.
+      containment?.release()
       nativeBridge.dispose()
       transportDispose?.()
       return ctx.fiber.dispose()
@@ -149,6 +161,7 @@ async function main(): Promise<void> {
     process.send(readyMessage(ctx))
   } catch (error) {
     uninstall()
+    containment?.release()
     const detail = error instanceof Error ? (error.stack ?? error.message) : String(error)
     process.stderr.write(`${BIN_NAME}: boot failed: ${detail}\n`)
     process.exit(1)

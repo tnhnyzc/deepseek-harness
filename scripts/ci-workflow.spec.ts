@@ -120,6 +120,40 @@ describe('CI workflow', () => {
     expect(aggregate['runs-on']).toContain('vm-backup')
   })
 
+  it('keeps one required per-platform desktop packaging job, with D4 only on native Windows', () => {
+    const workflow = loadWorkflow('.github/workflows/ci.yml')
+    const aggregate = workflowJob(workflow, 'all-checks-passed')
+    if (!Array.isArray(aggregate.needs)) throw new TypeError('all-checks-passed must define needs')
+
+    const commands = (jobName: string): string[] => {
+      const job = workflowJob(workflow, jobName)
+      if (!Array.isArray(job.steps)) throw new TypeError(`${jobName} must define steps`)
+      return job.steps.filter(isRecord)
+        .filter((step): step is Record<string, unknown> & { run: string } => typeof step.run === 'string')
+        .map(step => step.run)
+    }
+    // Each runner packages its own platform (the closure's native prebuilds are
+    // host-specific), installs immutably, and runs the full package pipeline.
+    const expectJob = (jobName: string, runner: string) => {
+      const job = workflowJob(workflow, jobName)
+      expect(job.if).toBe("github.event_name == 'pull_request'")
+      expect(job['runs-on']).toBe(runner)
+      expect(aggregate.needs, `${jobName} must be required`).toContain(jobName)
+      const runs = commands(jobName)
+      expect(runs).toContain('pnpm install --frozen-lockfile')
+      expect(runs).toContain('pnpm --filter @deepseek-ai/dsh-desktop run package')
+    }
+
+    expectJob('desktop-macos', 'macos-latest')
+    expectJob('desktop-linux', 'ubuntu-latest')
+    expectJob('desktop-windows', 'windows-latest')
+
+    // D4's Windows execution test runs only on a real Windows kernel.
+    expect(commands('desktop-windows')).toContain('node --import tsx/esm apps/desktop/scripts/d4-acceptance.ts')
+    expect(JSON.stringify(commands('desktop-macos'))).not.toContain('d4-acceptance')
+    expect(JSON.stringify(commands('desktop-linux'))).not.toContain('d4-acceptance')
+  })
+
   it('exempts push from cancellation in ci-master, so one master merge does not cancel the running drill', () => {
     const workflow = loadWorkflow('.github/workflows/ci-master.yml')
     const prWorkflow = loadWorkflow('.github/workflows/ci.yml')
