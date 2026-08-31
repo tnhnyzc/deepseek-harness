@@ -7,6 +7,7 @@
  * @module @deepseek-ai/dsh-desktop-runtime
  */
 
+import { spawn } from 'node:child_process'
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -25,7 +26,7 @@ import { DSH_LAUNCH_ENVIRONMENT_KEY } from '@deepseek-ai/dsh-launch-environment'
 import { toFetchHandler } from '@deepseek-ai/dsh-host-apiproxy'
 import { bootGraphMessage, createClientBundleFetch } from './boot-graph.ts'
 import { composeDesktopPatches, prepareDesktopProfile, PROFILE_ROOT_FILENAME } from './composition.ts'
-import { createNativeBridge } from './native-bridge.ts'
+import { createNativeBridge, NativeError } from './native-bridge.ts'
 import { createProcessShutdown } from './shutdown.ts'
 import { installWindowsProcessContainment, type WindowsProcessContainment } from './windows-job.ts'
 import { attachTransportRuntime, type FetchDispatch } from './transport-runtime.ts'
@@ -49,6 +50,34 @@ export interface RuntimeReadyMessage {
   dshVersion: string
   capabilities: { apiProxy: boolean; httpServer: boolean }
 }
+
+/**
+ * D4 acceptance report (Windows only, `DSH_D4_ACCEPTANCE=1`): published
+ * after the job containment installed and before the composition boots,
+ * naming the two long-lived descendants the contained root spawned — by
+ * birth they are members of the root's job. The acceptance harness waits
+ * for readiness, force-kills the root with a single-process kill, and the
+ * OS must end both descendants when the last job handle closes.
+ */
+export interface RuntimeD4ReportMessage {
+  type: 'd4.acceptance-report'
+  descendants: number[]
+}
+
+/**
+ * Packaged-app smoke facts (test-only, `DSH_DESKTOP_SMOKE=1`): the result
+ * of one real native round trip over the production channel — `openPath`
+ * on a path guaranteed not to exist. It must settle as the channel's
+ * `open-failed` failure; a success means the probe path materialized and
+ * the smoke must fail.
+ */
+export interface RuntimeSmokeReportMessage {
+  type: 'runtime.smoke-report'
+  nativeOpenPath: { ok: boolean; code?: string; message?: string }
+}
+
+/** The D4 descendants stay alive this long; the harness kills the root first. */
+const D4_SLEEP_MS = 120_000
 
 /** Read a checked-in manifest's version, failing loud when absent. */
 function readVersion(manifestPath: string): string {
@@ -104,6 +133,19 @@ async function main(): Promise<void> {
     // A failure here fails the boot loud: a contained runtime is a desktop
     // invariant, not a best effort.
     containment = await installWindowsProcessContainment()
+    // D4 acceptance (Windows only): with the job already installed, the
+    // contained root proves the kernel contract — two long-lived
+    // descendants join the job by birth, their pids are reported, and the
+    // harness force-kills this root with a single-process kill; the OS must
+    // end both descendants when the last job handle closes.
+    if (process.platform === 'win32' && process.env.DSH_D4_ACCEPTANCE === '1') {
+      const descendants = [0, 1].map(() => {
+        const sleeper = spawn(process.execPath, ['-e', `setTimeout(() => {}, ${String(D4_SLEEP_MS)})`], { stdio: 'ignore' })
+        if (sleeper.pid === undefined) throw new Error(`${BIN_NAME}: D4 descendant spawn returned no pid`)
+        return sleeper.pid
+      })
+      process.send({ type: 'd4.acceptance-report', descendants } satisfies RuntimeD4ReportMessage)
+    }
     const home = resolveDshHome()
     const profile = prepareDesktopProfile(INSTALL_ANCHOR, home)
     const homePatches = loadOptionalPatches(BIN_NAME, join(home, PROFILE_PATCH_FILENAME)) ?? []
@@ -159,6 +201,23 @@ async function main(): Promise<void> {
     // them before it may report the runtime ready.
     process.send(bootGraphMessage(clientModules))
     process.send(readyMessage(ctx))
+    // Packaged-app smoke (test-only): one real native round trip over the
+    // production channel, reported to the supervisor beside readiness.
+    if (process.env.DSH_DESKTOP_SMOKE === '1') {
+      const probePath = join(home, `dsh-smoke-absent-${String(process.pid)}-${String(Date.now())}`)
+      let nativeOpenPath: { ok: boolean; code?: string; message?: string }
+      try {
+        await nativeBridge.openPath(probePath, new AbortController().signal)
+        nativeOpenPath = { ok: true }
+      } catch (error) {
+        nativeOpenPath = {
+          ok: false,
+          code: error instanceof NativeError ? String(error.code) : 'unknown',
+          message: (error instanceof Error ? error.message : String(error)).slice(0, 512),
+        }
+      }
+      process.send({ type: 'runtime.smoke-report', nativeOpenPath } satisfies RuntimeSmokeReportMessage)
+    }
   } catch (error) {
     uninstall()
     containment?.release()

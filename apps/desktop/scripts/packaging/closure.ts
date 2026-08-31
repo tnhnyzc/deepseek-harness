@@ -1,45 +1,81 @@
 /**
- * Stage the runtime's production dependency closure into the artifact.
+ * Stage the runtime's production dependency closure into the artifact —
+ * resolution-faithful, without symlinks or a package manager inside the
+ * artifact.
  *
- * The staged closure is byte-for-byte the lockfile's resolution: every
- * package is copied from the installed workspace store (the frozen-lockfile
- * install), never re-resolved. `pnpm deploy` was ruled out: its legacy
- * implementation re-resolves every range and has shipped drifted versions
- * (a major-version jump in the closure is a runtime behavior change, not a
- * packaging detail), and its modern implementation requires a
- * workspace-wide `inject-workspace-packages` switch this stage will not
- * make.
+ * `pnpm deploy` was ruled out: its legacy implementation re-resolves every
+ * range and has shipped drifted versions (a major-version jump in the
+ * closure is a runtime behavior change, not a packaging detail), and its
+ * modern implementation requires a workspace-wide
+ * `inject-workspace-packages` switch this stage will not make.
  *
- * The walk is over the on-disk graph, not the manifests: from the runtime
- * package's production dependencies, each package directory's own
- * `node_modules` links are followed (realpath deduplicated), which yields
- * exactly the hoisted production closure for the host platform.
+ * The layout exploits how Node actually resolves: from a file inside a
+ * package, `require`/`import` walk `node_modules` upward (nearest wins).
+ * So a package that sits at the closure root is reachable from every
+ * package below it, and only a name that resolves to MORE THAN ONE version
+ * in the reachable graph (a collision, as the audit reports) must be
+ * shadowed per consumer:
+ *
+ * - every non-colliding instance is copied ONCE, to the closure root's
+ *   `node_modules/<name>`; every consumer's upward walk reaches it, and
+ *   there is nothing to get wrong (one version, one copy);
+ * - every colliding instance is copied under each of its consumers' staged
+ *   locations (`<consumer>/node_modules/<name>`), so each consumer's
+ *   nearest-wins lookup finds exactly the version its pnpm install
+ *   resolved; a consumer that is itself a colliding package contributes
+ *   each of its own copies as a location, which bounds the recursion to
+ *   the (small) collision subgraph.
+ *
+ * This split is what keeps the layout finite: the production closure
+ * contains dependency cycles (monorepo packages that load and are loaded
+ * by each other), and a scheme that nests every dependency under every
+ * consumer location never terminates on a cycle — it keeps nesting deeper
+ * copies of the cycle on every pass. Non-colliding packages never nest, so
+ * cycles among them (all three production cycles are) flatten to root
+ * copies that Node's ordinary require-cycle handling loads; only colliding
+ * placements recurse, and the collision subgraph is acyclic and small
+ * (bounded pass limit; fails loud instead of looping).
+ *
  * Cross-platform staging from a single host is out of scope by design:
  * each CI runner packages its own platform, whose workspace install holds
  * that platform's prebuilds.
  * @module @deepseek-ai/dsh-desktop/scripts/packaging/closure
  */
 
-import { cpSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync } from 'node:fs'
+import { cpSync, existsSync, mkdirSync, readdirSync, rmSync, statSync } from 'node:fs'
 import { join, sep } from 'node:path'
-import { realpathSync } from 'node:fs'
+import { auditRuntimeClosure, type ClosureAudit, type ClosureCollision } from './closure-audit.ts'
 
-/** The staging result: what was copied and where. */
+/** The staging result: what was copied, where, and what the graph contained. */
 export interface ClosureStageResult {
-  /** The number of distinct package directories copied. */
+  /** The number of distinct package instances in the closure. */
   packageCount: number
+  /** The number of staged package copies (colliding packages copy once per consumer location). */
+  destCount: number
+  /** The number of consumer→dependency edges the layout reproduces. */
+  edgeCount: number
+  /** The same-name/different-version collisions the per-consumer shadowing resolves. */
+  collisions: ClosureCollision[]
+  /** Bytes under the staged `node_modules` (the duplication included). */
+  bytesCopied: number
   /** The destination package root. */
   destDir: string
+  /** The audit the layout was built from. */
+  audit: ClosureAudit
 }
 
 /**
- * Copy one package directory into the staging closure, dropping the
- * package's own `node_modules` (the walk handles it) and `.bin` shims.
+ * Copy one package directory into a staging destination, dropping the
+ * package's own `node_modules` (its dependencies resolve upward to the
+ * closure root's copies, or through the per-consumer collision shadows)
+ * and refusing a pre-existing destination (a plan bug, never an overwrite).
  * @param source - the real (dereferenced) package directory.
- * @param destination - where the package lands in the staging closure.
+ * @param destination - where this copy lands in the staged closure.
  */
 function copyPackage(source: string, destination: string): void {
-  if (existsSync(destination)) return
+  if (existsSync(destination)) {
+    throw new Error(`closure: destination ${destination} already exists; the staging plan is malformed`)
+  }
   const selfModules = join(source, 'node_modules')
   cpSync(source, destination, {
     recursive: true,
@@ -48,104 +84,107 @@ function copyPackage(source: string, destination: string): void {
   })
 }
 
+/** The total file bytes under a directory (the staged duplication included). */
+function directoryBytes(dir: string): number {
+  let total = 0
+  for (const entry of readdirSync(dir, { withFileTypes: true })) {
+    const path = join(dir, entry.name)
+    if (entry.isDirectory()) {
+      total += directoryBytes(path)
+    } else if (entry.isFile()) {
+      total += statSync(path).size
+    }
+  }
+  return total
+}
+
 /**
- * Stage the production closure of one workspace package.
+ * Stage the production closure of one workspace package with the
+ * flat-root + per-consumer-collision-shadow layout.
  * @param sourceAppDir - the runtime package directory (apps/desktop-runtime).
  * @param destDir - the staging destination root (becomes `resources/runtime`).
  * @returns the staging result.
  */
 export function stageRuntimeClosure(sourceAppDir: string, destDir: string): ClosureStageResult {
+  const audit = auditRuntimeClosure(sourceAppDir)
   rmSync(destDir, { recursive: true, force: true })
   // The runtime package's own files (entry, config, manifests) first, into a
   // fresh destination so the copy guard below never sees a pre-existing tree.
   copyPackage(sourceAppDir, destDir)
-  const destNodeModules = join(destDir, 'node_modules')
-  mkdirSync(destNodeModules, { recursive: true })
+  const rootNodeModules = join(destDir, 'node_modules')
+  mkdirSync(rootNodeModules, { recursive: true })
 
-  const manifest = JSON.parse(readFileSync(join(sourceAppDir, 'package.json'), 'utf8')) as {
-    dependencies?: Record<string, string>
-  }
-  const productionDeps = Object.keys(manifest.dependencies ?? {}).sort()
-  if (productionDeps.length === 0) {
-    throw new Error(`closure: ${sourceAppDir} declares no production dependencies; nothing to stage`)
-  }
+  const colliding = new Set(audit.collisions.map(collision => collision.name))
 
-  // Realpath-deduplicated package copy set: the frozen install resolves
-  // every range to one store directory, so identity is the real path.
-  const copied = new Set<string>()
-  const queue: { real: string; name: string }[] = []
-
-  const enqueue = (name: string, linkDir: string): void => {
-    const link = join(linkDir, name)
-    if (!existsSync(link)) {
-      throw new Error(`closure: dependency ${name} is not installed in ${linkDir}; run pnpm install --frozen-lockfile first`)
-    }
-    const real = realpathSync(link)
-    if (copied.has(real)) return
-    copied.add(real)
-    queue.push({ real, name })
+  // 1) Non-colliding instances: exactly one root copy each. Every consumer's
+  // upward walk reaches the root, and one name with one version has nothing
+  // to shadow. Dependency cycles among these (a monorepo pattern) load under
+  // Node's ordinary require-cycle semantics, exactly as in the workspace.
+  for (const pkg of audit.packages) {
+    if (colliding.has(pkg.name)) continue
+    copyPackage(pkg.real, join(rootNodeModules, ...pkg.name.split('/')))
   }
 
-  for (const name of productionDeps) {
-    enqueue(name, join(sourceAppDir, 'node_modules'))
+  // 2) Colliding instances: a copy under each consumer's staged location.
+  // Locations grow monotonically (a colliding package's locations are the
+  // destinations the collision edges pointing at it claim), so the
+  // fixed-point loop converges over the small, acyclic collision subgraph;
+  // the pass bound is a canary — an unbounded growth means the collision
+  // subgraph has a cycle, which the audit graph cannot have.
+  const locations = new Map<string, string[]>()
+  locations.set(audit.rootReal, [destDir])
+  for (const pkg of audit.packages) {
+    if (!colliding.has(pkg.name)) locations.set(pkg.real, [join(rootNodeModules, ...pkg.name.split('/'))])
   }
-
-  // Where a package's dependencies live. A pnpm store package sits at
-  // `.pnpm/<id>/node_modules/<pkg>` and its dependencies are its siblings in
-  // that container — never in its own `node_modules`, which pnpm leaves with
-  // only `.bin`. A workspace/source package keeps its dependency links in its
-  // own `node_modules` (Node's nearest-wins resolution). The store case is
-  // checked first so a store package's empty own `node_modules` is not taken
-  // for its dependency set.
-  const depContainer = (real: string): string | undefined => {
-    const segments = real.split(sep)
-    const pnpmIndex = segments.lastIndexOf('.pnpm')
-    if (pnpmIndex !== -1 && segments[pnpmIndex + 2] === 'node_modules') {
-      // A store package sits at .pnpm/<id>/node_modules/<pkg> (or
-      // <scope>/<pkg>); its dependencies are the siblings in that
-      // container, never in its own (mostly empty) node_modules. Locating
-      // the container through the .pnpm segment handles both scoped and
-      // unscoped names.
-      return segments.slice(0, pnpmIndex + 3).join(sep)
-    }
-    const own = join(real, 'node_modules')
-    if (existsSync(own)) return own
-    return undefined
-  }
-
-  // Package entry names under a container directory. pnpm keeps dependency
-  // links as symlinks, so directory entries and symlinks are both packages;
-  // `.bin` shims are not.
-  const packageNames = (dir: string): string[] => {
-    const names: string[] = []
-    for (const entry of readdirSync(dir, { withFileTypes: true })) {
-      if (entry.name === '.bin') continue
-      if (entry.name.startsWith('@')) {
-        for (const sub of readdirSync(join(dir, entry.name), { withFileTypes: true })) {
-          if (sub.isDirectory() || sub.isSymbolicLink()) names.push(`${entry.name}/${sub.name}`)
+  const claimed = new Map<string, string>() // destination path -> source real
+  for (let pass = 0; ; pass += 1) {
+    let changed = false
+    for (const edge of audit.edges) {
+      if (!colliding.has(edge.depName)) continue
+      const consumerLocations = locations.get(edge.consumerReal)
+      if (consumerLocations === undefined) {
+        throw new Error(`closure: no staged location for ${edge.consumerName}@${edge.consumerVersion}; the resolution graph is malformed`)
+      }
+      for (const location of consumerLocations) {
+        const destination = join(location, 'node_modules', ...edge.depName.split('/'))
+        const existing = claimed.get(destination)
+        if (existing !== undefined) {
+          if (existing !== edge.depReal) {
+            throw new Error(
+              `closure: destination ${destination} is claimed by two different package instances for ${edge.depName}; `
+              + 'the resolution graph is malformed',
+            )
+          }
+          continue
         }
-      } else if (entry.isDirectory() || entry.isSymbolicLink()) {
-        names.push(entry.name)
+        claimed.set(destination, edge.depReal)
+        changed = true
+        const depLocations = locations.get(edge.depReal) ?? []
+        if (!depLocations.includes(destination)) {
+          depLocations.push(destination)
+          locations.set(edge.depReal, depLocations)
+        }
       }
     }
-    return names
-  }
-
-  let packageCount = 0
-  while (queue.length > 0) {
-    const { real, name } = queue.shift() as { real: string; name: string }
-    const destination = join(destNodeModules, name)
-    copyPackage(real, destination)
-    packageCount += 1
-    const container = depContainer(real)
-    if (container === undefined) continue
-    for (const depName of packageNames(container)) {
-      enqueue(depName, container)
+    if (!changed) break
+    if (pass > 32) {
+      throw new Error('closure: the collision placement did not converge; the collision subgraph is malformed')
     }
+  }
+  for (const [destination, source] of claimed) {
+    copyPackage(source, destination)
   }
 
   if (!existsSync(join(destDir, 'package.json')) || !existsSync(join(destDir, 'dist', 'index.js'))) {
     throw new Error('closure: the staged runtime is missing package.json or dist/index.js; run the runtime build first')
   }
-  return { packageCount, destDir }
+  return {
+    packageCount: audit.packages.length,
+    destCount: audit.packages.filter(pkg => !colliding.has(pkg.name)).length + claimed.size,
+    edgeCount: audit.edges.length,
+    collisions: audit.collisions,
+    bytesCopied: directoryBytes(rootNodeModules),
+    destDir,
+    audit,
+  }
 }

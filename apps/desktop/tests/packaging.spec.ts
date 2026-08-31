@@ -1,20 +1,22 @@
 /**
  * Stage 11 packaging pins: the release fuses are declared exhaustively (no
- * Electron default can drift), the build-manifest fingerprint is
- * deterministic and content-sensitive, the manifest reader bound-checks the
+ * Electron default can drift), the build-manifest reader bound-checks the
  * shipped artifact, and — when a packaged artifact is present — its layout
- * verifies against the release contract. The layout block self-skips without
- * a built artifact so a clean checkout stays green; the `package` pipeline
- * runs it (and the boot smoke) as its own gates.
+ * verifies against the release contract. The closure fingerprint is
+ * graph-identity based (edge-sensitive, deterministic) and is covered by
+ * closure-audit.spec.ts. The layout block self-skips without a built
+ * artifact so a clean checkout stays green; the `package` pipeline runs it
+ * (and the execution smokes) as its own gates.
  */
 
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
-import { closureFingerprint, readBuildManifest, type BuildManifest } from '../scripts/packaging/build-manifest.ts'
+import { readBuildManifest, type BuildManifest } from '../scripts/packaging/build-manifest.ts'
 import { DESKTOP_FUSES, DESKTOP_FUSE_CONFIG, DESKTOP_FUSE_INDICES, electronBinaryPath } from '../scripts/packaging/fuses.ts'
 import { layoutVerdict, verifyArtifactLayout } from '../scripts/packaging/verify-layout.ts'
+import { releaseArchiveFormat } from '../scripts/packaging/release-format.ts'
 
 const APP_ROOT = join(import.meta.dirname, '..')
 const OUT_DIR = join(APP_ROOT, 'out')
@@ -33,7 +35,7 @@ function locateArtifact(): { artifact: string; platform: NodeJS.Platform; arch: 
 /** A well-formed build manifest for reader tests. */
 function manifestFixture(): BuildManifest {
   return {
-    schemaVersion: 1,
+    schemaVersion: 2,
     desktopVersion: '0.0.0',
     deepseekHarnessCommit: 'a'.repeat(40),
     deepseekHarnessVersion: '0.0.0',
@@ -81,38 +83,19 @@ describe('release fuses', () => {
 
 // ---- build manifest: deterministic fingerprint, bound-checked reader ----
 
+describe('release archive format', () => {
+  it('pins the per-platform distributable format', () => {
+    expect(releaseArchiveFormat('darwin')).toBe('zip')
+    expect(releaseArchiveFormat('win32')).toBe('zip')
+    expect(releaseArchiveFormat('linux')).toBe('tar.gz')
+  })
+})
+
 describe('build manifest', () => {
   let scratch: string
 
   afterEach(() => {
     rmSync(scratch, { recursive: true, force: true })
-  })
-
-  /** Write a fake staged closure with one package per directory. */
-  function writeClosure(packages: Record<string, string>): string {
-    const runtimeDir = join(scratch, 'runtime')
-    const nodeModules = join(runtimeDir, 'node_modules')
-    for (const [name, version] of Object.entries(packages)) {
-      const dir = join(nodeModules, ...name.split('/'))
-      mkdirSync(dir, { recursive: true })
-      writeFileSync(join(dir, 'package.json'), `${JSON.stringify({ name, version })}\n`)
-    }
-    return runtimeDir
-  }
-
-  it('fingerprint is stable for identical closure contents', () => {
-    scratch = mkdtempSync(join(tmpdir(), 'dsh-mfp-'))
-    const a = closureFingerprint(writeClosure({ 'alpha': '1.0.0', '@s/beta': '2.0.0' }))
-    const b = closureFingerprint(writeClosure({ '@s/beta': '2.0.0', 'alpha': '1.0.0' }))
-    expect(a).toMatch(/^[0-9a-f]{64}$/)
-    expect(a).toBe(b)
-  })
-
-  it('fingerprint changes when a package version changes', () => {
-    scratch = mkdtempSync(join(tmpdir(), 'dsh-mfp-'))
-    const base = closureFingerprint(writeClosure({ alpha: '1.0.0', beta: '1.0.0' }))
-    const bumped = closureFingerprint(writeClosure({ alpha: '1.0.0', beta: '1.0.1' }))
-    expect(bumped).not.toBe(base)
   })
 
   it('reader accepts a well-formed manifest', () => {
@@ -137,7 +120,7 @@ describe('build manifest', () => {
   it('reader rejects a manifest missing a field', () => {
     scratch = mkdtempSync(join(tmpdir(), 'dsh-manifest-'))
     const path = join(scratch, 'build-manifest.json')
-    writeFileSync(path, `${JSON.stringify({ schemaVersion: 1 })}\n`)
+    writeFileSync(path, `${JSON.stringify({ schemaVersion: 2 })}\n`)
     expect(() => readBuildManifest(path)).toThrow(/missing/)
   })
 })

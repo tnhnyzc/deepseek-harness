@@ -98,6 +98,19 @@ export interface RuntimeSupervisor {
   transport: RuntimeTransport
   /** The native capability channel relay surface. */
   native: RuntimeNative
+  /**
+   * The live child's pid, or `undefined` between generations. Read-only:
+   * the packaged-app smoke uses it to verify process-level facts (network
+   * listeners) and to stage the crash/restart drill's abnormal root death.
+   */
+  childPid(): number | undefined
+  /**
+   * The runtime-published smoke facts (`DSH_DESKTOP_SMOKE=1` generations
+   * only): the native round-trip result the runtime measured over the
+   * production channel after readiness; `undefined` when none is cached for
+   * the live child.
+   */
+  smokeFacts(): { nativeOpenPath?: { ok: boolean; code?: string; message?: string } } | undefined
 }
 
 /** The legal state transitions; anything else throws (fail loud). */
@@ -191,6 +204,7 @@ export function createRuntimeSupervisor(options: RuntimeSupervisorOptions): Runt
   let child: ChildProcess | undefined
   let ready: RuntimeReadyPayload | undefined
   let bootPayload: DshBootPayload | undefined
+  let smokeReport: { nativeOpenPath?: { ok: boolean; code?: string; message?: string } } | undefined
   let reason: string | undefined
   let autoRetried = false
   let spawnError = false
@@ -339,6 +353,7 @@ export function createRuntimeSupervisor(options: RuntimeSupervisorOptions): Runt
     nativeMessageHandler = undefined
     nativeCloseHandler = undefined
     bootPayload = undefined
+    smokeReport = undefined
     close?.()
     nativeClose?.()
     if (state === 'stopping') {
@@ -401,6 +416,12 @@ export function createRuntimeSupervisor(options: RuntimeSupervisorOptions): Runt
         if (state === 'starting') bootPayload = parseBootGraphMessage(message)
         return
       }
+      // Smoke facts follow readiness on the same channel; cache them for the
+      // smoke handler's pull, bound-checked like any other child message.
+      if (message.type === 'runtime.smoke-report') {
+        if (state === 'starting' || state === 'ready') smokeReport = parseSmokeReportMessage(message)
+        return
+      }
       if (message.type !== 'runtime.ready' || state !== 'starting') return
       ready = {
         runtimeVersion: String(message.runtimeVersion),
@@ -428,6 +449,7 @@ export function createRuntimeSupervisor(options: RuntimeSupervisorOptions): Runt
     transition('starting')
     ready = undefined
     bootPayload = undefined
+    smokeReport = undefined
     reason = undefined
     spawnChild()
   }
@@ -481,6 +503,8 @@ export function createRuntimeSupervisor(options: RuntimeSupervisorOptions): Runt
     stop,
     requestRestart,
     bootPayload: () => bootPayload,
+    childPid: () => child?.pid,
+    smokeFacts: () => smokeReport,
     transport,
     native,
   }
@@ -526,4 +550,36 @@ export function parseBootGraphMessage(message: unknown): DshBootPayload | undefi
     moduleLoaderScript: candidate.moduleLoaderScript,
     preloadBundles: candidate.preloadBundles as string[],
   }
+}
+
+/** The bound for the smoke report's diagnostic message field. */
+const SMOKE_REPORT_MAX_MESSAGE_CHARS = 512
+
+/**
+ * Wire validation for the child's smoke-fact publication: the channel
+ * crosses a process boundary, so the fields are bound-checked; anything
+ * that is not the smoke-report shape is dropped (the smoke then reports no
+ * facts instead of caching an unbounded payload).
+ * @param message - the raw `runtime.smoke-report` child message.
+ * @returns the validated facts, or `undefined` when the shape is off.
+ */
+export function parseSmokeReportMessage(
+  message: unknown,
+): { nativeOpenPath?: { ok: boolean; code?: string; message?: string } } | undefined {
+  if (typeof message !== 'object' || message === null) return undefined
+  const candidate = message as Record<string, unknown>
+  const probe = candidate.nativeOpenPath
+  if (typeof probe !== 'object' || probe === null) return undefined
+  const probeValue = probe as Record<string, unknown>
+  if (typeof probeValue.ok !== 'boolean') return undefined
+  const result: { ok: boolean; code?: string; message?: string } = { ok: probeValue.ok }
+  if (probeValue.code !== undefined) {
+    if (!boundedString(probeValue.code, 64)) return undefined
+    result.code = probeValue.code
+  }
+  if (probeValue.message !== undefined) {
+    if (!boundedString(probeValue.message, SMOKE_REPORT_MAX_MESSAGE_CHARS)) return undefined
+    result.message = probeValue.message
+  }
+  return { nativeOpenPath: result }
 }

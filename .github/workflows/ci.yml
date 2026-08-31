@@ -466,7 +466,7 @@ jobs:
   desktop-macos:
     if: github.event_name == 'pull_request'
     runs-on: macos-latest
-    name: desktop / macos package
+    name: desktop / macos package (arm64)
     timeout-minutes: 40
     steps:
       - uses: actions/checkout@v6
@@ -484,8 +484,57 @@ jobs:
       - name: Install (immutable)
         run: pnpm install --frozen-lockfile
 
-      - name: Package (build, stage, package, fuses, boot smoke)
+      - name: Package (build, stage, package, fuses, smokes)
         run: pnpm --filter @deepseek-ai/dsh-desktop run package
+
+      - name: Upload release archive
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: desktop-darwin-arm64
+          path: |
+            apps/desktop/out/*.zip
+            apps/desktop/out/*.zip.sha256
+            apps/desktop/out/package-report.json
+          retention-days: 14
+
+  # The darwin-x64 target: macos-latest is Apple Silicon, so the Intel lane
+  # runs on the last hosted Intel macOS image. It packages the x64 closure
+  # (x64 koffi/sharp prebuilds) and runs the same smoke pipeline.
+  desktop-macos-x64:
+    if: github.event_name == 'pull_request'
+    runs-on: macos-14
+    name: desktop / macos package (x64)
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+
+      - uses: pnpm/action-setup@v4
+        with:
+          dest: ${{ runner.temp }}/setup-pnpm
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: ${{ env.PRIMARY_NODE_VERSION }}
+
+      - name: Install (immutable)
+        run: pnpm install --frozen-lockfile
+
+      - name: Package (build, stage, package, fuses, smokes)
+        run: pnpm --filter @deepseek-ai/dsh-desktop run package
+
+      - name: Upload release archive
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: desktop-darwin-x64
+          path: |
+            apps/desktop/out/*.zip
+            apps/desktop/out/*.zip.sha256
+            apps/desktop/out/package-report.json
+          retention-days: 14
 
   # The only lane that runs the D4 Windows execution test (required before v1):
   # the Job Object (KILL_ON_JOB_CLOSE) must be proven on a real Windows kernel,
@@ -512,13 +561,35 @@ jobs:
         shell: pwsh
         run: pnpm install --frozen-lockfile
 
-      - name: Package (build, stage, package, fuses, boot smoke)
+      # The Win32 Job Object struct layout is proven against the real kernel
+      # toolchain (cl.exe sizes vs the koffi declarations vs the SDK header):
+      # a struct drift fails the build before any runtime containment claim.
+      - name: Win32 Job Object ABI probe
+        shell: pwsh
+        run: node --import tsx/esm apps/desktop-runtime/scripts/check-windows-job-abi.ts
+
+      - name: Package (build, stage, package, fuses, smokes)
         shell: pwsh
         run: pnpm --filter @deepseek-ai/dsh-desktop run package
 
       - name: D4 Windows Job Object acceptance
         shell: pwsh
         run: node --import tsx/esm apps/desktop/scripts/d4-acceptance.ts
+
+      - name: D4 Windows Job Object acceptance (packaged artifact)
+        shell: pwsh
+        run: node --import tsx/esm apps/desktop/scripts/d4-acceptance.ts --packaged "apps/desktop/out/DeepSeek Harness Desktop-win32-x64"
+
+      - name: Upload release archive
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: desktop-windows-x64
+          path: |
+            apps/desktop/out/*.zip
+            apps/desktop/out/*.zip.sha256
+            apps/desktop/out/package-report.json
+          retention-days: 14
 
   desktop-linux:
     if: github.event_name == 'pull_request'
@@ -541,8 +612,34 @@ jobs:
       - name: Install (immutable)
         run: pnpm install --frozen-lockfile
 
-      - name: Package (build, stage, package, fuses, boot smoke)
+      # The packaged-app smoke opens a real Electron window: the hosted
+      # runner needs the Electron runtime libraries plus a virtual display.
+      # Playwright's dependency installer owns the library set (the repo's
+      # dev Electron and Chromium share the same system surface).
+      - name: Install Electron system dependencies and Xvfb
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y xvfb
+          pnpm --filter @deepseek-ai/dsh-desktop exec playwright install-deps chromium
+
+      - name: Start Xvfb (packaged-app smoke display)
+        run: |
+          Xvfb :99 -screen 0 1280x1024x24 &
+          echo "DISPLAY=:99" >> "$GITHUB_ENV"
+
+      - name: Package (build, stage, package, fuses, smokes)
         run: pnpm --filter @deepseek-ai/dsh-desktop run package
+
+      - name: Upload release archive
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: desktop-linux-x64
+          path: |
+            apps/desktop/out/*.tar.gz
+            apps/desktop/out/*.tar.gz.sha256
+            apps/desktop/out/package-report.json
+          retention-days: 14
 
   # Single stable required check for branch protection: require "all checks
   # passed" instead of enumerating matrix legs whose names change as lanes and
@@ -571,7 +668,7 @@ jobs:
           && github.event.pull_request.user.login != 'dependabot[bot]'
           && fromJSON('["self-hosted", "linux", "x64", "vm-backup"]')
           || 'ubuntu-latest' }}
-    needs: [node-24, node-24-coverage, node-24-consumers, node-compat, python-sdk, python-runtime, windows, desktop-macos, desktop-windows, desktop-linux]
+    needs: [node-24, node-24-coverage, node-24-consumers, node-compat, python-sdk, python-runtime, windows, desktop-macos, desktop-macos-x64, desktop-windows, desktop-linux]
     if: always() && github.event_name == 'pull_request'
     steps:
       - name: Fail if any needed job did not succeed

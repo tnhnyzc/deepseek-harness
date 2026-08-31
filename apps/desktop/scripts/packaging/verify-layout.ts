@@ -8,8 +8,8 @@
  */
 
 import { spawnSync } from 'node:child_process'
-import { existsSync, readFileSync } from 'node:fs'
-import { join } from 'node:path'
+import { existsSync, readdirSync, readFileSync } from 'node:fs'
+import { basename, dirname, join } from 'node:path'
 import * as asar from '@electron/asar'
 import { FuseV1Options } from '@electron/fuses'
 import { readBuildManifest } from './build-manifest.ts'
@@ -35,6 +35,65 @@ function check(checks: LayoutCheck[], name: string, ok: boolean, detail?: string
 /** List the packaged asar's file paths. */
 function asarEntryNames(asarPath: string): string[] {
   return asar.listPackage(asarPath, { isPack: false })
+}
+
+/**
+ * Locate every staged copy of one package by name, layout-agnostic: the
+ * nested staging places a diamond under each consumer, so the prebuild
+ * anchors search instead of assuming a flat root.
+ * @param root - the staged runtime root.
+ * @param name - the package name (`@scope/name` for scoped packages).
+ * @returns the directories matching `node_modules/<name>`.
+ */
+function findPackageDirs(root: string, name: string): string[] {
+  const results: string[] = []
+  const [scope, bare] = name.startsWith('@') ? name.split('/') : [undefined, name]
+  const walk = (dir: string): void => {
+    let entries
+    try {
+      entries = readdirSync(dir, { withFileTypes: true })
+    } catch {
+      return
+    }
+    for (const entry of entries) {
+      if (!entry.isDirectory() && !entry.isSymbolicLink()) continue
+      const path = join(dir, entry.name)
+      const parent = dirname(path)
+      const matches = scope === undefined
+        ? entry.name === bare && basename(parent) === 'node_modules'
+        : entry.name === bare && basename(parent) === scope && basename(dirname(parent)) === 'node_modules'
+      if (matches) results.push(path)
+      if (!entry.name.startsWith('.')) walk(path)
+    }
+  }
+  walk(root)
+  return results
+}
+
+/**
+ * Whether one staged package copy is resolvable from one consumer through
+ * Node's upward `node_modules` walk: the copy's containing `node_modules`
+ * directory is the consumer's own, or an ancestor's up to the closure root.
+ * @param pkgDir - the staged package directory.
+ * @param consumer - the consumer package name (`@scope/name` aware).
+ * @param closureRoot - the staged runtime root.
+ */
+function resolvableFromConsumer(pkgDir: string, consumer: string, closureRoot: string): boolean {
+  let containingNM: string
+  if (basename(dirname(pkgDir)) === 'node_modules') {
+    containingNM = dirname(pkgDir)
+  } else {
+    // A scoped package: <…>/node_modules/@scope/<name>.
+    containingNM = dirname(dirname(pkgDir))
+  }
+  const consumerDir = join(closureRoot, 'node_modules', ...consumer.split('/'))
+  let current = consumerDir
+  for (;;) {
+    if (join(current, 'node_modules') === containingNM) return true
+    const parent = dirname(current)
+    if (parent === closureRoot) return join(closureRoot, 'node_modules') === containingNM
+    current = parent
+  }
 }
 
 /**
@@ -66,7 +125,7 @@ export async function verifyArtifactLayout(
     } catch (error) {
       check(checks, 'asar header parse', false, String(error))
     }
-    for (const entry of ['/main/index.js', '/preload/index.cjs', '/package.json']) {
+    for (const entry of ['/dist/main/index.js', '/src/preload/index.cjs', '/package.json']) {
       check(checks, `asar contains ${entry}`, entries.includes(entry))
     }
   }
@@ -86,19 +145,30 @@ export async function verifyArtifactLayout(
     check(checks, join(artifact, path).replace(artifact, ''), existsSync(path), path)
   }
 
-  // The closure anchors: the runtime entry's own manifest plus the native
-  // prebuild packages the runtime loads on the packaged target. The staging
-  // closure only carries this host's platform prebuilds, named
-  // `<lib>-<platform>-<arch>`.
-  const closureAnchors = [
-    join(resources, 'runtime', 'node_modules', '@deepseek-ai', 'dsh-base', 'package.json'),
-    join(resources, 'runtime', 'node_modules', 'koffi', 'package.json'),
-    join(resources, 'runtime', 'node_modules', '@koromix', `koffi-${target}`, 'package.json'),
-    join(resources, 'runtime', 'node_modules', '@img', `sharp-${target}`, 'package.json'),
-    join(resources, 'runtime', 'node_modules', '@img', `sharp-libvips-${target}`, 'package.json'),
+  // The closure anchors: the runtime's direct dependencies sit at the
+  // closure root; the native prebuilds (non-colliding names) are staged
+  // once, at the root, and must be resolvable from their consumer through
+  // Node's upward `node_modules` walk — either there or as a per-consumer
+  // collision shadow. The staging closure only carries this host's platform
+  // prebuilds, named `<lib>-<platform>-<arch>`.
+  const closureRoot = join(resources, 'runtime')
+  const directAnchors = [
+    join(closureRoot, 'node_modules', '@deepseek-ai', 'dsh-base', 'package.json'),
+    join(closureRoot, 'node_modules', 'koffi', 'package.json'),
   ]
-  for (const path of closureAnchors) {
-    check(checks, join(artifact, path).replace(artifact, ''), existsSync(path), path)
+  for (const path of directAnchors) {
+    check(checks, path.replace(artifact, ''), existsSync(path), path)
+  }
+  const prebuildAnchors: [string, string][] = [
+    [`@koromix/koffi-${target}`, 'koffi'],
+    [`@img/sharp-${target}`, 'sharp'],
+    [`@img/sharp-libvips-${target}`, 'sharp'],
+  ]
+  for (const [prebuild, consumer] of prebuildAnchors) {
+    const found = findPackageDirs(closureRoot, prebuild)
+    const first = found[0]
+    const ok = found.length === 1 && first !== undefined && resolvableFromConsumer(first, consumer, closureRoot)
+    check(checks, `prebuild ${prebuild} staged once, resolvable from ${consumer}`, ok, found.length === 0 ? 'not found' : found.join(' | '))
   }
 
   // The shipped manifest is the artifact's identity: read it from the

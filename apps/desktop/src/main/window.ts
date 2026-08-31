@@ -3,9 +3,23 @@
  * @module @deepseek-ai/dsh-desktop/src/main/window
  */
 import { join } from 'node:path'
-import { BrowserWindow, app } from 'electron'
+import { BrowserWindow, app, type WebPreferences } from 'electron'
 import { APP_HOME_URL } from './protocol.ts'
 import { hardenWebContents } from './security.ts'
+
+/** The single window's creation-time security options, for the smoke report. */
+let appWindowWebPreferences: WebPreferences | undefined
+
+/**
+ * The webPreferences the application window was created with (the same
+ * object Electron received). The packaged-app smoke asserts these against
+ * the security baseline; Electron exposes no live getter, so the creation
+ * options are the authoritative record.
+ * @returns the options, or `undefined` before the window exists.
+ */
+export function getAppWindowWebPreferences(): WebPreferences | undefined {
+  return appWindowWebPreferences
+}
 
 /**
  * Create the single application window with the desktop security baseline
@@ -22,6 +36,22 @@ import { hardenWebContents } from './security.ts'
  * @returns the application window
  */
 export function createAppWindow(): BrowserWindow {
+  const webPreferences: WebPreferences = {
+    nodeIntegration: false,
+    contextIsolation: true,
+    sandbox: true,
+    webSecurity: true,
+    // Explicit, not default-reliant: a future Electron default change must
+    // not silently re-enable <webview> embedding.
+    webviewTag: false,
+    // DevTools is a development affordance: packaged builds deny the API
+    // itself, so no menu item, accelerator, or page script can open it.
+    devTools: !app.isPackaged,
+    // The checked-in CJS bridge (a sandboxed preload cannot use ESM); it
+    // resolves in both the development layout and the packaged asar.
+    preload: join(app.getAppPath(), 'src', 'preload', 'index.cjs'),
+  }
+  appWindowWebPreferences = webPreferences
   const win = new BrowserWindow({
     useContentSize: true,
     width: 1280,
@@ -29,21 +59,7 @@ export function createAppWindow(): BrowserWindow {
     minWidth: 1024,
     minHeight: 600,
     show: false,
-    webPreferences: {
-      nodeIntegration: false,
-      contextIsolation: true,
-      sandbox: true,
-      webSecurity: true,
-      // Explicit, not default-reliant: a future Electron default change must
-      // not silently re-enable <webview> embedding.
-      webviewTag: false,
-      // DevTools is a development affordance: packaged builds deny the API
-      // itself, so no menu item, accelerator, or page script can open it.
-      devTools: !app.isPackaged,
-      // The checked-in CJS bridge (a sandboxed preload cannot use ESM); it
-      // resolves in both the development layout and the packaged asar.
-      preload: join(app.getAppPath(), 'src', 'preload', 'index.cjs'),
-    },
+    webPreferences,
   })
   hardenWebContents(win.webContents)
   win.once('ready-to-show', () => {

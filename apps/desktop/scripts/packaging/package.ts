@@ -5,8 +5,9 @@
  * @electron/packager (asar + integrity entries + extraResources), flip the
  * release fuses, sign (Developer ID with credentials; ad-hoc on macOS
  * otherwise; unsigned elsewhere without credentials), notarize when
- * credentials are present, and verify the artifact against its layout
- * contract.
+ * credentials are present, verify the artifact against its layout contract,
+ * run the execution smokes, and produce the distributable archive (macOS
+ * zip, Windows zip, Linux tar.gz) with its sha256 sidecar.
  *
  * Cross-host packaging is out of scope by design: the runtime closure
  * stages this host's platform prebuilds, so each CI runner packages its own
@@ -21,13 +22,19 @@
 
 import { execFileSync, spawnSync } from 'node:child_process'
 import { existsSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { createHash } from 'node:crypto'
 import { join, resolve } from 'node:path'
 import { packager } from '@electron/packager'
 import type { SignOptionsForDirectory } from '@electron/windows-sign'
+import { guiAvailable } from '../smoke-packaged-app.ts'
 import { APP_PRODUCT_NAME, DESKTOP_FUSE_INDICES, electronBinaryPath, flipDesktopFuses } from './fuses.ts'
 import { layoutVerdict, verifyArtifactLayout } from './verify-layout.ts'
 import { stageRelease } from './staging.ts'
+import { createReleaseArchive } from './release-format.ts'
+import { runNativeModuleSmoke } from './smoke-native-modules.ts'
+import { runResolutionSmoke } from './smoke-resolution.ts'
 import { runRuntimeSmoke } from './smoke-runtime.ts'
+import { runPackagedAppSmoke } from '../smoke-packaged-app.ts'
 
 const appDir = resolve(import.meta.dirname, '..', '..')
 const repoRoot = resolve(import.meta.dirname, '..', '..', '..', '..')
@@ -140,9 +147,31 @@ async function signWindowsApp(artifact: string): Promise<string> {
   return 'signed (CSC_CERTIFICATE_FILE)'
 }
 
+/**
+ * The packaging pipeline must never mutate the repository: it reads source
+ * and writes under `out/` (plus OS temp). A sha256 snapshot of the root
+ * manifest and lockfile at the start is re-verified before the report is
+ * written, so a stray write anywhere in the pipeline fails it loudly.
+ */
+function snapshotRepoIntegrity(): string[] {
+  return [join(repoRoot, 'package.json'), join(repoRoot, 'pnpm-lock.yaml')].map(file =>
+    `${file}=${createHash('sha256').update(readFileSync(file)).digest('hex')}`)
+}
+
+function verifyRepoIntegrity(snapshot: string[]): void {
+  const now = snapshotRepoIntegrity()
+  if (now.join('\n') !== snapshot.join('\n')) {
+    throw new Error('package: the repository root manifest or lockfile changed during packaging:\n' + [
+      ...snapshot,
+      ...now,
+    ].map(line => `  ${line}`).join('\n'))
+  }
+}
+
 async function main(): Promise<void> {
   const options = parseArgs(process.argv.slice(2))
   const [platform, arch] = options.target.split('-') as [NodeJS.Platform, string]
+  const repoSnapshot = snapshotRepoIntegrity()
 
   console.log(`package: clean ${outDir}`)
   rmSync(outDir, { recursive: true, force: true })
@@ -164,9 +193,12 @@ async function main(): Promise<void> {
   console.log(`package: staged ${String(staged.runtime.packageCount)} closure packages; fingerprint ${staged.manifest.closureFingerprint.slice(0, 16)}…`)
 
   console.log('package: assembling with @electron/packager')
-  const electronVersion = JSON.parse(readFileSync(join(appDir, 'package.json'), 'utf8')) as {
+  const appManifest = JSON.parse(readFileSync(join(appDir, 'package.json'), 'utf8')) as {
+    version?: string
     devDependencies?: Record<string, string>
   }
+  const desktopVersion = appManifest.version ?? '0.0.0'
+  const electronVersion = appManifest.devDependencies?.electron ?? ''
   await packager({
     dir: staged.appDir,
     out: outDir,
@@ -176,7 +208,7 @@ async function main(): Promise<void> {
     platform: platform as 'darwin' | 'win32' | 'linux',
     name: APP_PRODUCT_NAME,
     executableName: APP_PRODUCT_NAME,
-    electronVersion: electronVersion.devDependencies?.electron ?? '',
+    electronVersion,
     asar: true,
     extraResource: staged.extraResources,
     overwrite: true,
@@ -210,28 +242,68 @@ async function main(): Promise<void> {
     throw new Error(layoutVerdict(report))
   }
 
-  // The clean-copy boot smoke: the strongest signal that the packaged
-  // runtime actually boots under the packaged Node. Skipped with
-  // --skip-smoke (e.g. a headless runner without the runtime's host deps).
+  // The distributable archive (after fuses and signing: it carries the
+  // finalized bytes a user would download).
+  console.log('package: creating the distributable archive')
+  const release = await createReleaseArchive(artifact, outDir, platform, desktopVersion, arch)
+  console.log(`package: ${release.archive} (${release.format}, ${String(release.bytes)} bytes)`)
+
+  // The execution smokes: the strongest signals that the packaged bytes do
+  // what the source claims. Skipped together with --skip-smoke (a headless
+  // runner without the runtime's host deps); the app smoke additionally
+  // self-skips without a GUI session.
   let smoke = 'skipped (--skip-smoke)'
+  let resolution = 'skipped (--skip-smoke)'
+  let nativeModules = 'skipped (--skip-smoke)'
+  let appSmoke = 'skipped (--skip-smoke)'
   if (!options.skipSmoke) {
     console.log('package: running the clean-copy boot smoke')
     const result = await runRuntimeSmoke(artifact, platform)
-    console.log(`package: smoke ${result.ok ? 'PASS' : 'FAIL'} — ${result.detail}`)
+    console.log(`package: boot smoke ${result.ok ? 'PASS' : 'FAIL'} — ${result.detail}`)
     if (!result.ok) throw new Error(`package: boot smoke failed: ${result.detail}`)
     smoke = `PASS (${result.detail})`
+
+    console.log('package: running the resolution smoke (staged graph vs lockfile graph, bundled Node)')
+    const resolutionResult = await runResolutionSmoke(artifact, platform)
+    console.log(`package: resolution smoke ${resolutionResult.ok ? 'PASS' : 'FAIL'} — ${resolutionResult.detail}`)
+    if (!resolutionResult.ok) throw new Error(`package: resolution smoke failed: ${resolutionResult.detail}`)
+    resolution = `PASS (${resolutionResult.detail})`
+
+    console.log('package: running the native-module execution smoke (sharp, koffi, bundled Node)')
+    const nativeResult = await runNativeModuleSmoke(artifact, platform)
+    console.log(`package: native-module smoke ${nativeResult.ok ? 'PASS' : 'FAIL'} — ${nativeResult.detail}`)
+    if (!nativeResult.ok) throw new Error(`package: native-module smoke failed: ${nativeResult.detail}`)
+    nativeModules = `PASS (${nativeResult.detail})`
+
+    if (guiAvailable()) {
+      console.log('package: running the packaged-app smoke (real Electron executable, real DSH UI)')
+      const appResult = await runPackagedAppSmoke(artifact, platform)
+      console.log(`package: packaged-app smoke ${appResult.ok ? 'PASS' : 'FAIL'} — ${appResult.detail}`)
+      if (!appResult.ok) throw new Error(`package: packaged-app smoke failed: ${appResult.detail}`)
+      appSmoke = `PASS (${appResult.detail})`
+    } else {
+      appSmoke = 'skipped (no GUI session on this host)'
+    }
   }
 
   const summary = {
     artifact,
+    archive: release,
     manifest: staged.manifest,
     closurePackages: staged.runtime.packageCount,
+    closureEdges: staged.runtime.edgeCount,
+    closureCollisions: staged.runtime.collisions,
+    closureBytes: staged.runtime.bytesCopied,
     signed,
     notarized,
     smoke,
+    resolution,
+    nativeModules,
+    appSmoke,
   }
+  verifyRepoIntegrity(repoSnapshot)
   writeFileSync(join(outDir, 'package-report.json'), `${JSON.stringify(summary, null, 2)}\n`)
-  console.log(`package: done -> ${artifact}`)
+  console.log(`package: done -> ${release.archive}`)
 }
 
 void main()

@@ -39,10 +39,16 @@ blob URL 有固定版客户端源码出处，生产代码不创建任何网络�
 固定的依赖闭包加带校验和的捆绑 Node，用 `@electron/packager` 打包
 （asar + 完整性），翻转全部九个 Electron fuse，签名（本地 ad-hoc；存在
 凭据时用 Developer ID + 公证，或 Windows 证书），校验构件布局（33 项
-检查），并证明打包的运行时在构件自身的 Node 下启动（干净副本、全新
-`DSH_HOME`、最小 `PATH`）。DSH 运行在捆绑的独立 Node 之下，绝不在
-Electron 之下；D4（带 `KILL_ON_JOB_CLOSE` 的 Windows Job Object）是进程
-遏制保证，在 CI 的真实 Windows 内核上执行（Agent Note
+检查），运行四个执行冒烟（打包的运行时在构件自身的 Node 下启动，配全新
+`DSH_HOME` 与最小 `PATH`；暂存闭包的解析边在捆绑 Node 下解析；
+`sharp`/`koffi` 在捆绑 Node 下执行；以及真实的打包 Electron 二进制驱动
+真实的 DSH UI，包含有界的载体往返与崩溃/重启演练，经浏览器 DevTools
+端点），并产出带 sha256 侧车的发行归档。DSH 运行在捆绑的独立 Node
+之下，绝不在 Electron 之下；D4（带 `KILL_ON_JOB_CLOSE` 的 Windows Job
+Object，固定到经 SDK 校验的结构布局）是进程遏制保证，在 CI 的真实
+Windows 内核上针对 dev 运行时与打包构件执行。CI 打包全部四个目标，
+每个 runner 打包自己的平台（darwin-arm64、darwin-x64、win32-x64、
+linux-x64），并上传各泳道的归档作为运行证据（Agent Note
 `2026-08-29-desktop-stage11-packaging`）。范围、接缝、已应用的本地改动与
 D4 遏制（D1、D2、D3 已在 stage 3-4 解决；D4 在 stage 11 解决）见
 `SPEC.md` #6-#11、`ARCHITECTURE.md` 与[上游契约](./docs/upstream-contract.md)。
@@ -110,26 +116,37 @@ pnpm test apps/desktop  # supervisor, smoke, and protocol tests
 构建发布单元——由于闭包的原生 prebuild 是主机特定的，跨主机打包被拒绝：
 
 ```sh
-pnpm run package                 # build -> stage -> package -> fuses -> sign -> verify -> boot smoke
+pnpm run package                 # build -> stage -> package -> fuses -> sign -> verify -> smokes -> archive
 pnpm run package -- --skip-build # reuse an existing build (re-stage, re-package, re-verify)
-pnpm run package -- --skip-smoke # skip the clean-copy boot smoke
+pnpm run package -- --skip-smoke # skip the execution smokes
 ```
 
 流水线顺序：清空 `out/`；构建（运行时、main、renderer，以及未加
 `--skip-build` 时的 `bundle:node`）；暂存锁定固定的依赖闭包加带校验和的
-捆绑 Node 与 `build-manifest.json`（`scripts/packaging/{closure,staging,build-manifest}.ts`）；
+捆绑 Node 与 `build-manifest.json`
+（`scripts/packaging/{closure-audit,closure,staging,build-manifest}.ts`）；
 用 `@electron/packager` 打包（asar + 完整性，资源解包到 `Resources/`）；
 翻转全部九个 Electron fuse（`scripts/packaging/fuses.ts`）；签名（本地
 ad-hoc；存在 `CSC_*`/`APPLE_*` 凭据时在 macOS 上用 Developer ID + 公证、
-在 Windows 上用证书——见 `package-report.json` 的已配置对已执行）；校验
-构件布局（33 项检查，`scripts/packaging/verify-layout.ts`）；运行干净
-副本启动冒烟（`scripts/packaging/smoke-runtime.ts`），它用构件自身的 Node
-派生打包的运行时，配全新 `DSH_HOME` 与最小 `PATH`，断言以清单的 DSH
-版本到达 `runtime.ready`。
+在 Windows 上用证书——`package-report.json` 记录已配置对已执行）；校验
+构件布局（33 项检查，`scripts/packaging/verify-layout.ts`）；运行执行冒烟
+——干净副本启动冒烟（`smoke-runtime.ts`，打包的运行时在构件自身的 Node
+下，全新 `DSH_HOME`、最小 `PATH`）、解析冒烟（`smoke-resolution.ts`，暂存
+闭包的解析边在捆绑 Node 下解析并执行）、原生模块执行冒烟
+（`smoke-native-modules.ts`，`sharp` 与 `koffi` 在捆绑 Node 下执行）、
+打包 app 冒烟（`scripts/smoke-packaged-app.ts`，真实的 Electron 可执行
+文件驱动真实的 DSH UI——启动、安全基线、针对脚本化 127.0.0.1 provider
+的有界载体往返、崩溃/重启演练——经浏览器 DevTools 端点，因为发布二进
+制里 Node inspector 已被 fuse 关闭；无 GUI 会话时自跳过）；以及创建带
+sha256 侧车的发行归档（macOS/Windows 用 zip，Linux 用 tar.gz；
+`scripts/packaging/release-format.ts`）。流水线在开始时对仓库根清单与
+锁文件做快照，并在写报告前复核，使打包绝不会悄悄改写仓库文件。
 
 产物为 `out/DeepSeek Harness Desktop-<platform>-<arch>/`（保留产品名中的
-空格）。D4 的 Windows 执行测试是 `desktop-windows` CI 作业
-（`scripts/d4-acceptance.ts`），不是本地步骤。
+空格）加归档。D4 的 Windows 执行测试是 `desktop-windows` CI 作业
+（`scripts/d4-acceptance.ts`，dev 与 `--packaged` 两种模式，外加 Win32 ABI
+探针 `apps/desktop-runtime/scripts/check-windows-job-abi.ts`），不是本地
+步骤。
 
 ## 布局
 
@@ -152,11 +169,17 @@ ad-hoc；存在 `CSC_*`/`APPLE_*` 凭据时在 macOS 上用 Developer ID + 公�
 - `scripts/bundle-node.ts`、`node-versions.json` — 构建时按目标下载并做
   sha256 校验的固定 Node。
 - `scripts/packaging/` — stage 11 发布流水线：`package.ts`（编排器）、
-  `staging.ts`（暂存树 + `extraResources`）、`closure.ts`（锁定固定的 store
-  复制）、`build-manifest.ts`（发布身份 + 闭包指纹）、`fuses.ts`（九 fuse
-  固定）、`verify-layout.ts`（33 项构件扫描）、`smoke-runtime.ts`（干净副本
-  启动证明）。
+  `closure-audit.ts`（仅生产依赖的解析遍历：边、冲突、图指纹）、
+  `closure.ts`（锁定固定的 store 复制：无冲突实例每份在根一份，冲突实例
+  按消费者影子复制）、`staging.ts`（暂存树 + `extraResources`）、
+  `build-manifest.ts`（发布身份 + 闭包指纹）、`fuses.ts`（九 fuse 固定）、
+  `verify-layout.ts`（33 项构件扫描）、`smoke-runtime.ts`（干净副本启动
+  证明）、`smoke-resolution.ts`（暂存图在捆绑 Node 下的解析）、
+  `smoke-native-modules.ts`（sharp/koffi 在捆绑 Node 下的执行）、
+  `release-format.ts`（按平台的归档 + sha256 侧车）；另有
+  `scripts/smoke-packaged-app.ts`（真实二进制的 UI 冒烟）。
 - `scripts/d4-acceptance.ts`、`scripts/d4-acceptance-child.ts` — D4 Windows
-  Job Object 验收（在 CI 的真实 Windows 内核上运行）。
-- `tests/` — 监督者、smoke、协议、renderer 客户端、broker、原生能力、打包
-  与端到端测试。
+  Job Object 验收（dev 与 `--packaged` 模式；在 CI 的真实 Windows 内核上
+  运行）。
+- `tests/` — 监督者、smoke、协议、renderer 客户端、broker、原生能力、闭包
+  审计、打包、打包 app 与端到端测试。

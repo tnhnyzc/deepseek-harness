@@ -11,13 +11,19 @@
  */
 
 import { execFileSync } from 'node:child_process'
-import { createHash } from 'node:crypto'
-import { existsSync, readdirSync, readFileSync } from 'node:fs'
+import { readFileSync } from 'node:fs'
 import { join, relative } from 'node:path'
+import { closureGraphFingerprint, type ClosureAudit } from './closure-audit.ts'
 import { DESKTOP_RUNTIME_PROTOCOL_VERSION } from '../../src/shared/runtime-protocol.ts'
 
-/** The manifest schema version; bump only for structural changes. */
-const BUILD_MANIFEST_SCHEMA_VERSION = 1
+/**
+ * The manifest schema version; bump only for structural changes. v2: the
+ * closure fingerprint identifies the resolution graph (the consumer→dep
+ * version edges), not just the staged name set — two closures that differ
+ * only in which version a consumer resolves now produce different
+ * identities.
+ */
+const BUILD_MANIFEST_SCHEMA_VERSION = 2
 
 /** The identity of one packaged desktop release. */
 export interface BuildManifest {
@@ -40,7 +46,7 @@ export interface BuildManifest {
   platform: string
   /** The packaged target architecture. */
   arch: string
-  /** sha256 over the staged runtime closure's sorted `name@version` lines. */
+  /** sha256 over the staged closure's sorted `consumer@version -> dep@version` resolution edges. */
   closureFingerprint: string
 }
 
@@ -52,9 +58,9 @@ export interface BuildManifestInput {
   appDir: string
   /** The runtime package directory (apps/desktop-runtime); `dsh-base` is its dependency. */
   runtimeSourceDir: string
-  /** The staged runtime closure root (for the fingerprint). */
-  runtimeDir: string
-  /** The packaged target, node naming (`darwin-arm64`, `win32-x64`, ...). */
+  /** The staged closure's resolution graph (for the fingerprint). */
+  audit: ClosureAudit
+  /** The packaged target, node naming (`darwin-arm64`, ...). */
   target: string
 }
 
@@ -68,58 +74,6 @@ function requireString(manifest: Record<string, unknown>, field: string, where: 
     throw new Error(`build-manifest: ${where} has no string ${field}`)
   }
   return value
-}
-
-/**
- * Compute the closure fingerprint: sha256 over the staged closure's sorted
- * `name@version` lines (one per package directory, hoisted or nested).
- * @param runtimeDir - the staged runtime root.
- * @returns the hex digest.
- */
-export function closureFingerprint(runtimeDir: string): string {
-  const lines: string[] = []
-  const record = (pkgDir: string): void => {
-    try {
-      const parsed = readJson(join(pkgDir, 'package.json'))
-      const name = parsed.name
-      const version = parsed.version
-      if (typeof name === 'string' && typeof version === 'string') {
-        lines.push(`${name}@${version}`)
-      }
-    } catch {
-      // A directory without a readable manifest is not a package.
-    }
-  }
-  const nested = (pkgDir: string): void => {
-    const nodeModules = join(pkgDir, 'node_modules')
-    if (!existsSync(nodeModules)) return
-    for (const entry of readdirSync(nodeModules, { withFileTypes: true })) {
-      if (!entry.isDirectory()) continue
-      if (entry.name.startsWith('@')) {
-        for (const sub of readdirSync(join(nodeModules, entry.name), { withFileTypes: true })) {
-          if (sub.isDirectory()) record(join(nodeModules, entry.name, sub.name))
-        }
-      } else {
-        record(join(nodeModules, entry.name))
-      }
-    }
-  }
-  const nodeModules = join(runtimeDir, 'node_modules')
-  for (const entry of readdirSync(nodeModules, { withFileTypes: true })) {
-    if (!entry.isDirectory() || entry.name === '.bin') continue
-    if (entry.name.startsWith('@')) {
-      for (const sub of readdirSync(join(nodeModules, entry.name), { withFileTypes: true })) {
-        if (!sub.isDirectory()) continue
-        record(join(nodeModules, entry.name, sub.name))
-        nested(join(nodeModules, entry.name, sub.name))
-      }
-    } else {
-      record(join(nodeModules, entry.name))
-      nested(join(nodeModules, entry.name))
-    }
-  }
-  lines.sort()
-  return createHash('sha256').update(lines.join('\n')).digest('hex')
 }
 
 /**
@@ -155,7 +109,7 @@ export function createBuildManifest(input: BuildManifestInput): BuildManifest {
     desktopProtocolVersion: DESKTOP_RUNTIME_PROTOCOL_VERSION,
     platform,
     arch,
-    closureFingerprint: closureFingerprint(input.runtimeDir),
+    closureFingerprint: closureGraphFingerprint(input.audit),
   }
 }
 

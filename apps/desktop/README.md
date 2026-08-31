@@ -55,12 +55,21 @@ builds the app and runtime, stages a lockfile-pinned dependency closure plus
 the checksum-verified bundled Node, packages with `@electron/packager`
 (asar + integrity), flips all nine Electron fuses, signs (ad-hoc locally;
 Developer ID + notarization, or the Windows certificate, when credentials
-exist), verifies the artifact layout (33 checks), and proves the packaged
-runtime boots under the artifact's own Node (clean copy, fresh `DSH_HOME`,
-minimal `PATH`). DSH runs under the bundled standalone Node, never under
-Electron; D4 (the Windows Job Object with `KILL_ON_JOB_CLOSE`) is the
-process-containment guarantee, executed on a real Windows kernel in CI
-(Agent Note `2026-08-29-desktop-stage11-packaging`). See `SPEC.md` #6-#11,
+exist), verifies the artifact layout (33 checks), runs the four execution
+smokes (the packaged runtime booting under the artifact's own Node with a
+fresh `DSH_HOME` and minimal `PATH`; the staged closure's resolution edges
+under the bundled Node; `sharp`/`koffi` executing under the bundled Node;
+and the real packaged Electron binary driving the real DSH UI, including a
+bounded carrier round trip and the crash/restart drill, over the browser
+DevTools endpoint), and produces the distributable archive with its sha256
+sidecar. DSH runs under the bundled standalone Node, never under Electron;
+D4 (the Windows Job Object with `KILL_ON_JOB_CLOSE`, pinned to the
+SDK-verified struct layout) is the process-containment guarantee, executed
+on a real Windows kernel in CI against the dev runtime and the packaged
+artifact. CI packages all four targets, each runner its own platform
+(darwin-arm64, darwin-x64, win32-x64, linux-x64) and uploads each lane's
+archive as the run evidence (Agent Note
+`2026-08-29-desktop-stage11-packaging`). See `SPEC.md` #6-#11,
 `ARCHITECTURE.md`, and the [upstream
 contract](./docs/upstream-contract.md) for scope, seams, the applied
 local modifications, and the D4 containment (D1, D2, and D3 resolved in
@@ -143,28 +152,43 @@ release unit for the **current** platform — cross-host packaging is rejected
 because the closure's native prebuilds are host-specific:
 
 ```sh
-pnpm run package                 # build -> stage -> package -> fuses -> sign -> verify -> boot smoke
+pnpm run package                 # build -> stage -> package -> fuses -> sign -> verify -> smokes -> archive
 pnpm run package -- --skip-build # reuse an existing build (re-stage, re-package, re-verify)
-pnpm run package -- --skip-smoke # skip the clean-copy boot smoke
+pnpm run package -- --skip-smoke # skip the execution smokes
 ```
 
 The pipeline, in order: clean `out/`; build (runtime, main, renderer, and
 `bundle:node` unless `--skip-build`); stage the lockfile-pinned dependency
 closure plus the checksum-verified bundled Node and `build-manifest.json`
-(`scripts/packaging/{closure,staging,build-manifest}.ts`); package with
-`@electron/packager` (asar + integrity, resources unpacked under
-`Resources/`); flip all nine Electron fuses (`scripts/packaging/fuses.ts`);
-sign (ad-hoc locally; Developer ID + notarization on macOS and the Windows
-certificate when the `CSC_*`/`APPLE_*` credentials are present — see
-`package-report.json` for configured-vs-executed); verify the artifact
-layout (33 checks, `scripts/packaging/verify-layout.ts`); and run the
-clean-copy boot smoke (`scripts/packaging/smoke-runtime.ts`), which forks the
-packaged runtime under the artifact's own Node with a fresh `DSH_HOME` and a
-minimal `PATH` and asserts `runtime.ready` with the manifest's DSH version.
+(`scripts/packaging/{closure-audit,closure,staging,build-manifest}.ts`);
+package with `@electron/packager` (asar + integrity, resources unpacked
+under `Resources/`); flip all nine Electron fuses
+(`scripts/packaging/fuses.ts`); sign (ad-hoc locally; Developer ID +
+notarization on macOS and the Windows certificate when the `CSC_*`/
+`APPLE_*` credentials are present — `package-report.json` records
+configured-versus-executed); verify the artifact layout (33 checks,
+`scripts/packaging/verify-layout.ts`); run the execution smokes — the
+clean-copy boot smoke (`smoke-runtime.ts`, the packaged runtime under the
+artifact's own Node, fresh `DSH_HOME`, minimal `PATH`), the resolution smoke
+(`smoke-resolution.ts`, the staged closure's resolution edges resolved and
+executed under the bundled Node), the native-module execution smoke
+(`smoke-native-modules.ts`, `sharp` and `koffi` executing under the bundled
+Node), and the packaged-app smoke (`scripts/smoke-packaged-app.ts`, the real
+Electron executable driving the real DSH UI — boot, the security baseline,
+a bounded carrier round trip against a scripted 127.0.0.1 provider, the
+crash/restart drill — over the browser DevTools endpoint, because the Node
+inspector is fused off in the release binary; self-skips without a GUI
+session); and create the distributable archive with its sha256 sidecar
+(macOS/Windows zip, Linux tar.gz; `scripts/packaging/release-format.ts`).
+The pipeline snapshots the repository root manifest and lockfile at the
+start and verifies them before writing the report, so packaging can never
+silently rewrite repository files.
 
 The output is `out/DeepSeek Harness Desktop-<platform>-<arch>/` (the product
-name's spaces are preserved). D4's Windows execution test is the
-`desktop-windows` CI job (`scripts/d4-acceptance.ts`), not a local step.
+name's spaces are preserved) plus the archive. D4's Windows execution test
+is the `desktop-windows` CI job (`scripts/d4-acceptance.ts`, dev and
+`--packaged` modes, plus the Win32 ABI probe
+`apps/desktop-runtime/scripts/check-windows-job-abi.ts`), not a local step.
 
 ## Layout
 
@@ -190,12 +214,19 @@ name's spaces are preserved). D4's Windows execution test is the
 - `scripts/bundle-node.ts`, `node-versions.json` — build-time download and
   sha256 verification of the pinned Node per target.
 - `scripts/packaging/` — the stage 11 release pipeline: `package.ts`
-  (orchestrator), `staging.ts` (staged tree + `extraResources`),
-  `closure.ts` (lockfile-pinned store copy), `build-manifest.ts` (release
-  identity + closure fingerprint), `fuses.ts` (the nine-fuse pin),
-  `verify-layout.ts` (33-check artifact scan), `smoke-runtime.ts` (clean-copy
-  boot proof).
+  (orchestrator), `closure-audit.ts` (production-only resolution walk:
+  edges, collisions, graph fingerprint), `closure.ts` (lockfile-pinned store
+  copy: one root copy per non-colliding instance, per-consumer shadows for
+  colliding ones), `staging.ts` (staged tree + `extraResources`),
+  `build-manifest.ts` (release identity + closure fingerprint),
+  `fuses.ts` (the nine-fuse pin), `verify-layout.ts` (33-check artifact
+  scan), `smoke-runtime.ts` (clean-copy boot proof), `smoke-resolution.ts`
+  (staged-graph resolution under the bundled Node),
+  `smoke-native-modules.ts` (sharp/koffi execution under the bundled Node),
+  `release-format.ts` (per-platform archive + sha256 sidecar); plus
+  `scripts/smoke-packaged-app.ts` (the real-binary UI smoke).
 - `scripts/d4-acceptance.ts`, `scripts/d4-acceptance-child.ts` — the D4
-  Windows Job Object acceptance (runs on a real Windows kernel in CI).
+  Windows Job Object acceptance (dev and `--packaged` modes; runs on a real
+  Windows kernel in CI).
 - `tests/` — supervisor, smoke, protocol, renderer client, broker, native
-  capability, packaging, and end-to-end tests.
+  capability, closure audit, packaging, packaged-app, and end-to-end tests.

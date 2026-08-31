@@ -60,9 +60,13 @@ function stageRenderer(source: string, destination: string): void {
 
 /**
  * Stage the slim asar app directory: the built main bundle, the checked-in
- * CJS preload, and a minimal manifest. The preload stays a source file by
- * design (a sandboxed preload cannot use ESM), and both paths resolve the
- * same inside the asar.
+ * CJS preload, and a minimal manifest. The asar mirrors the development
+ * checkout layout (`dist/main` + `src/preload`) so the shell's
+ * `getAppPath()`-relative paths — the preload above all — resolve
+ * identically in development and inside the asar. The preload stays a
+ * source file by design (a sandboxed preload cannot use ESM), and the
+ * manifest keeps `type: module` so the ESM main bundle parses on first
+ * pass.
  * @param appDir - the desktop app package directory.
  * @param destination - where the slim app directory lands in staging.
  */
@@ -75,10 +79,10 @@ function stageAppDir(appDir: string, destination: string): void {
   if (!existsSync(preload)) {
     throw new Error(`staging: preload missing at ${preload}`)
   }
-  mkdirSync(join(destination, 'main'), { recursive: true })
-  mkdirSync(join(destination, 'preload'), { recursive: true })
-  cpSync(mainEntry, join(destination, 'main', 'index.js'), { dereference: true })
-  cpSync(preload, join(destination, 'preload', 'index.cjs'), { dereference: true })
+  mkdirSync(join(destination, 'dist', 'main'), { recursive: true })
+  mkdirSync(join(destination, 'src', 'preload'), { recursive: true })
+  cpSync(mainEntry, join(destination, 'dist', 'main', 'index.js'), { dereference: true })
+  cpSync(preload, join(destination, 'src', 'preload', 'index.cjs'), { dereference: true })
   const sourceManifest = JSON.parse(readFileSync(join(appDir, 'package.json'), 'utf8')) as {
     name: string
     version: string
@@ -89,7 +93,8 @@ function stageAppDir(appDir: string, destination: string): void {
     name: sourceManifest.name,
     version: sourceManifest.version,
     description: sourceManifest.description,
-    main: 'main/index.js',
+    main: 'dist/main/index.js',
+    type: 'module',
     license: sourceManifest.license,
     private: true,
   }
@@ -136,16 +141,31 @@ export async function stageRelease(input: StagingInput): Promise<StagedRelease> 
     repoRoot: input.repoRoot,
     appDir: input.appDir,
     runtimeSourceDir: input.runtimeSourceDir,
-    runtimeDir: join(input.stagingDir, 'runtime'),
+    audit: runtime.audit,
     target: input.target,
   })
   writeFileSync(join(input.stagingDir, 'build-manifest.json'), `${JSON.stringify(manifest, null, 2)}\n`)
+  // The shipped resolution report: the staged graph's edges and collisions,
+  // sanitized of host paths. The packaged resolution smoke verifies the
+  // artifact's staged tree against these edges under the bundled Node.
+  const resolutionReport = {
+    schemaVersion: 1,
+    root: `${runtime.audit.rootName}@${runtime.audit.rootVersion}`,
+    packageCount: runtime.packageCount,
+    edgeCount: runtime.edgeCount,
+    collisions: runtime.collisions,
+    edges: runtime.audit.edges
+      .map(edge => ({ consumer: `${edge.consumerName}@${edge.consumerVersion}`, dep: `${edge.depName}@${edge.depVersion}` }))
+      .sort((a, b) => (a.consumer + a.dep).localeCompare(b.consumer + b.dep)),
+  }
+  writeFileSync(join(input.stagingDir, 'closure-audit.json'), `${JSON.stringify(resolutionReport, null, 2)}\n`)
   stageLicenses(input, join(input.stagingDir, 'licenses'))
   const extraResources = [
     join(input.stagingDir, 'renderer'),
     join(input.stagingDir, 'node'),
     join(input.stagingDir, 'runtime'),
     join(input.stagingDir, 'build-manifest.json'),
+    join(input.stagingDir, 'closure-audit.json'),
     join(input.stagingDir, 'licenses'),
   ]
   return {

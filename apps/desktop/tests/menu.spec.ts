@@ -237,6 +237,8 @@ describe('desktop IPC channel inventory', () => {
     'dsh-desktop:transport-port',
     'dsh-desktop:transport-denied',
     'dsh-desktop:command',
+    // Environment-gated (DSH_DESKTOP_SMOKE=1): the packaged-app smoke report.
+    'dsh-desktop:smoke-report',
   ])
 
   function listSources(root: string): string[] {

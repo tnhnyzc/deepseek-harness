@@ -22,7 +22,7 @@ function nodeTargetName(): string {
  */
 export function bundledNodeExecutable(packaged: boolean, resourcesPath: string, desktopDir: string): string {
   const name = process.platform === 'win32' ? 'node.exe' : 'node'
-  const base = packaged ? resourcesPath : join(desktopDir, 'node')
+  const base = packaged ? join(resourcesPath, 'node') : join(desktopDir, 'node')
   return join(base, nodeTargetName(), name)
 }
 

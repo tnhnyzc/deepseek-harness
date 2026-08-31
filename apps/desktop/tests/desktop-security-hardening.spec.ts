@@ -10,7 +10,7 @@ import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { Script } from 'node:vm'
 import { describe, expect, it } from 'vitest'
-import { parseBootGraphMessage } from '../src/main/runtime.ts'
+import { parseBootGraphMessage, parseSmokeReportMessage } from '../src/main/runtime.ts'
 
 const DESKTOP_ROOT = join(import.meta.dirname, '..')
 
@@ -26,7 +26,7 @@ interface PreloadRun {
  * function, injected `require` and `window`), so the main-frame guard and
  * the exposed surface are tested behaviorally without an Electron runtime.
  */
-function runPreload(options: { subframe: boolean }): PreloadRun {
+function runPreload(options: { subframe: boolean; smoke?: boolean }): PreloadRun {
   let exposed: PreloadRun['exposed']
   let requiredElectron = false
   const fakeRequire = (specifier: string): unknown => {
@@ -50,7 +50,13 @@ function runPreload(options: { subframe: boolean }): PreloadRun {
   // function body and compiled with node:vm instead of the Function
   // constructor (which the lint surface refuses).
   const source = readFileSync(join(DESKTOP_ROOT, 'src', 'preload', 'index.cjs'), 'utf8')
-  const factory = new Script(`(function (require, module, exports, window) {\n${source}\n})`).runInNewContext({}) as (
+  // The sandboxed preload reads the app environment through the Electron
+  // `process` polyfill; the shim carries only the smoke gate, exactly as a
+  // DSH_DESKTOP_SMOKE=1 launch (or its absence) would present it.
+  const sandbox: Record<string, unknown> = {
+    process: { env: options.smoke ? { DSH_DESKTOP_SMOKE: '1' } : {} },
+  }
+  const factory = new Script(`(function (require, module, exports, window) {\n${source}\n})`).runInNewContext(sandbox) as (
     require: typeof fakeRequire,
     module: object,
     exports: object,
@@ -70,6 +76,11 @@ describe('preload bridge installation', () => {
     expect(requiredElectron).toBe(true)
     expect(exposed?.name).toBe('dshDesktop')
     expect(Object.keys(exposed?.api ?? {}).sort()).toEqual([...EXPECTED_BRIDGE_SURFACE].sort())
+  })
+
+  it('adds only the smoke report under the DSH_DESKTOP_SMOKE gate', () => {
+    const { exposed } = runPreload({ subframe: false, smoke: true })
+    expect(Object.keys(exposed?.api ?? {}).sort()).toEqual([...EXPECTED_BRIDGE_SURFACE, 'smokeReport'].sort())
   })
 
   it('installs nothing in a subframe and never touches electron there', () => {
@@ -140,6 +151,28 @@ describe('parseBootGraphMessage', () => {
     const overBundle = validBootGraph()
     ;(overBundle.preloadBundles as string[]).push('u'.repeat(8193))
     expect(parseBootGraphMessage(overBundle)).toBeUndefined()
+  })
+})
+
+// ---- the smoke-fact publication: bound-checked at the wire ----
+
+describe('parseSmokeReportMessage', () => {
+  it('passes a well-formed probe report through', () => {
+    const message = { type: 'runtime.smoke-report', nativeOpenPath: { ok: false, code: 'open-failed', message: 'Failed to open path' } }
+    expect(parseSmokeReportMessage(message)).toEqual({
+      nativeOpenPath: { ok: false, code: 'open-failed', message: 'Failed to open path' },
+    })
+  })
+
+  it('drops reports that are not the smoke-report shape', () => {
+    expect(parseSmokeReportMessage(null)).toBeUndefined()
+    expect(parseSmokeReportMessage({ type: 'runtime.smoke-report' })).toBeUndefined()
+    expect(parseSmokeReportMessage({ nativeOpenPath: { ok: 'no' } })).toBeUndefined()
+  })
+
+  it('drops an over-bound report at the wire', () => {
+    expect(parseSmokeReportMessage({ nativeOpenPath: { ok: false, code: 'x'.repeat(65) } })).toBeUndefined()
+    expect(parseSmokeReportMessage({ nativeOpenPath: { ok: false, message: 'x'.repeat(513) } })).toBeUndefined()
   })
 })
 

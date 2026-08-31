@@ -33,6 +33,10 @@ const TRANSPORT_PORT_CHANNEL = 'dsh-desktop:transport-port';
 const TRANSPORT_DENIED_CHANNEL = 'dsh-desktop:transport-denied';
 const TRANSPORT_OPEN_TIMEOUT_MS = 10000;
 const COMMAND_CHANNEL = 'dsh-desktop:command';
+// Test-only, environment-gated: the packaged-app smoke's fact report. The
+// method is absent from the bridge unless DSH_DESKTOP_SMOKE=1 was set on
+// the app process (main refuses to register the handler the same way).
+const SMOKE_CHANNEL = 'dsh-desktop:smoke-report';
 // The closed desktop UX command vocabulary (stage 7), mirrored here because
 // a sandboxed preload cannot load the ESM shared module. The preload is the
 // enforcement point: a payload that is not a vocabulary member never
@@ -128,5 +132,9 @@ const api = {
     };
   },
 };
+
+if (process.env.DSH_DESKTOP_SMOKE === '1') {
+  api.smokeReport = () => ipcRenderer.invoke(SMOKE_CHANNEL);
+}
 
 contextBridge.exposeInMainWorld('dshDesktop', api);

@@ -13,6 +13,7 @@
     "tests",
     "scripts/packaging",
     "scripts/bundle-node.ts",
+    "scripts/smoke-packaged-app.ts",
     "forge.config.ts",
     "tsdown.config.ts"
   ],

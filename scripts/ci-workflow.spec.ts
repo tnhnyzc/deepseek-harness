@@ -120,21 +120,23 @@ describe('CI workflow', () => {
     expect(aggregate['runs-on']).toContain('vm-backup')
   })
 
-  it('keeps one required per-platform desktop packaging job, with D4 only on native Windows', () => {
+  it('keeps one required per-platform desktop packaging job per target, with D4 only on native Windows', () => {
     const workflow = loadWorkflow('.github/workflows/ci.yml')
     const aggregate = workflowJob(workflow, 'all-checks-passed')
     if (!Array.isArray(aggregate.needs)) throw new TypeError('all-checks-passed must define needs')
 
-    const commands = (jobName: string): string[] => {
+    const steps = (jobName: string): Record<string, unknown>[] => {
       const job = workflowJob(workflow, jobName)
       if (!Array.isArray(job.steps)) throw new TypeError(`${jobName} must define steps`)
       return job.steps.filter(isRecord)
+    }
+    const commands = (jobName: string): string[] =>
+      steps(jobName)
         .filter((step): step is Record<string, unknown> & { run: string } => typeof step.run === 'string')
         .map(step => step.run)
-    }
     // Each runner packages its own platform (the closure's native prebuilds are
     // host-specific), installs immutably, and runs the full package pipeline.
-    const expectJob = (jobName: string, runner: string) => {
+    const expectJob = (jobName: string, runner: string, artifactName: string) => {
       const job = workflowJob(workflow, jobName)
       expect(job.if).toBe("github.event_name == 'pull_request'")
       expect(job['runs-on']).toBe(runner)
@@ -142,16 +144,37 @@ describe('CI workflow', () => {
       const runs = commands(jobName)
       expect(runs).toContain('pnpm install --frozen-lockfile')
       expect(runs).toContain('pnpm --filter @deepseek-ai/dsh-desktop run package')
+      // The lane's distributable archive is the CI evidence for its target.
+      const upload = steps(jobName).find(step => (
+        typeof step.uses === 'string' && step.uses.startsWith('actions/upload-artifact@')
+      ))
+      expect(upload, `${jobName} must upload its release archive`).toBeDefined()
+      expect((upload as Record<string, unknown>).with).toMatchObject({ name: artifactName })
     }
 
-    expectJob('desktop-macos', 'macos-latest')
-    expectJob('desktop-linux', 'ubuntu-latest')
-    expectJob('desktop-windows', 'windows-latest')
+    expectJob('desktop-macos', 'macos-latest', 'desktop-darwin-arm64')
+    expectJob('desktop-macos-x64', 'macos-14', 'desktop-darwin-x64')
+    expectJob('desktop-linux', 'ubuntu-latest', 'desktop-linux-x64')
+    expectJob('desktop-windows', 'windows-latest', 'desktop-windows-x64')
 
-    // D4's Windows execution test runs only on a real Windows kernel.
-    expect(commands('desktop-windows')).toContain('node --import tsx/esm apps/desktop/scripts/d4-acceptance.ts')
-    expect(JSON.stringify(commands('desktop-macos'))).not.toContain('d4-acceptance')
-    expect(JSON.stringify(commands('desktop-linux'))).not.toContain('d4-acceptance')
+    // The Win32 Job Object ABI probe and D4's Windows execution tests run
+    // only on a real Windows kernel — against the dev runtime and the
+    // packaged artifact alike.
+    const windowsRuns = commands('desktop-windows')
+    expect(windowsRuns).toContain('node --import tsx/esm apps/desktop-runtime/scripts/check-windows-job-abi.ts')
+    expect(windowsRuns).toContain('node --import tsx/esm apps/desktop/scripts/d4-acceptance.ts')
+    expect(windowsRuns).toContain('node --import tsx/esm apps/desktop/scripts/d4-acceptance.ts --packaged "apps/desktop/out/DeepSeek Harness Desktop-win32-x64"')
+    for (const jobName of ['desktop-macos', 'desktop-macos-x64', 'desktop-linux']) {
+      expect(JSON.stringify(commands(jobName))).not.toContain('d4-acceptance')
+      expect(JSON.stringify(commands(jobName))).not.toContain('check-windows-job-abi')
+    }
+
+    // The Linux lane gives the packaged-app smoke a real (virtual) display:
+    // without DISPLAY the app smoke self-skips and the lane proves nothing
+    // about the shipped UI.
+    const linuxStepJson = JSON.stringify(steps('desktop-linux'))
+    expect(linuxStepJson).toContain('Xvfb')
+    expect(linuxStepJson).toContain('DISPLAY=:99')
   })
 
   it('exempts push from cancellation in ci-master, so one master merge does not cancel the running drill', () => {
