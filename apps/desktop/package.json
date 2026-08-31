@@ -8,7 +8,7 @@
   "type": "module",
   "main": "dist/main/index.js",
   "scripts": {
-    "build": "pnpm --filter @deepseek-ai/dsh-desktop-runtime run build && npm run build:main && npm run build:renderer",
+    "build": "pnpm -w run build:lib && pnpm --filter @deepseek-ai/dsh-desktop-runtime run build && npm run build:main && npm run build:renderer",
     "build:main": "tsdown",
     "build:renderer": "vite build",
     "bundle:node": "tsx scripts/bundle-node.ts",

@@ -39,23 +39,31 @@ function fail(message: string): never {
 }
 
 /**
- * Locate vcvarsall.bat. Prefer the VS Installer's own discovery
- * (`vswhere` with the C++ toolset component requirement), then fall back to
- * the explicit 2019/2022 edition paths on both Program Files roots.
+ * Candidate Visual Studio environment batch files, in preference order.
+ * The runner image's VS generation is not pinned (2019 through 2026 layouts
+ * all ship vcvarsall.bat, and newer images moved to a year-less `18` folder),
+ * so discovery prefers the VS Installer's own `vswhere` output and falls back
+ * to the explicit edition paths on both Program Files roots. Each installation
+ * offers two entry points: `vcvarsall.bat x64` and `VsDevCmd.bat -arch=x64`.
  */
-function findVcvars(): string {
+function findVcvarsCommands(): string[] {
+  const commands: string[] = []
+  const forInstall = (installPath: string): void => {
+    const vcvarsall = join(installPath, 'VC', 'Auxiliary', 'Build', 'vcvarsall.bat')
+    if (existsSync(vcvarsall)) commands.push(`call "${vcvarsall}" x64`)
+    const vsdevcmd = join(installPath, 'Common7', 'Tools', 'VsDevCmd.bat')
+    if (existsSync(vsdevcmd)) commands.push(`call "${vsdevcmd}" -arch=x64 -host_arch=x64`)
+  }
   const vswhere = 'C:\\Program Files (x86)\\Microsoft Visual Studio\\Installer\\vswhere.exe'
   if (existsSync(vswhere)) {
     const out = spawnSync(
       vswhere,
-      ['-latest', '-products', '*', '-requires', 'Microsoft.VisualStudio.Component.VC.Tools.x86.x64', '-property', 'installationPath'],
+      ['-products', '*', '-requires', 'Microsoft.VisualStudio.Component.VC.Tools.x86.x64', '-property', 'installationPath'],
       { encoding: 'utf8' },
     )
     if (out.status === 0) {
-      const installPath = String(out.stdout ?? '').trim().split(/\r?\n/).pop()?.trim()
-      if (installPath) {
-        const candidate = join(installPath, 'VC', 'Auxiliary', 'Build', 'vcvarsall.bat')
-        if (existsSync(candidate)) return candidate
+      for (const installPath of String(out.stdout ?? '').trim().split(/\r?\n/).map(line => line.trim())) {
+        if (installPath !== '') forInstall(installPath)
       }
     }
   }
@@ -64,15 +72,14 @@ function findVcvars(): string {
     'C:\\Program Files\\Microsoft Visual Studio',
   ]
   const editions = ['Enterprise', 'Professional', 'Community', 'BuildTools']
-  for (const year of ['2022', '2019']) {
+  for (const year of ['18', '2026', '2025', '2024', '2022', '2019']) {
     for (const root of roots) {
       for (const edition of editions) {
-        const candidate = join(root, year, edition, 'VC', 'Auxiliary', 'Build', 'vcvarsall.bat')
-        if (existsSync(candidate)) return candidate
+        forInstall(join(root, year, edition))
       }
     }
   }
-  fail('no Visual Studio vcvarsall.bat found; the Windows runner image must carry the VS Build Tools')
+  return [...new Set(commands)]
 }
 
 const workDir = join(tmpdir(), `dsh-job-abi-${String(process.pid)}`)
@@ -80,14 +87,26 @@ mkdirSync(workDir, { recursive: true })
 try {
   const probeSource = join(import.meta.dirname, 'windows-job-abi-probe.c')
   const probeExe = join(workDir, 'probe.exe')
-  const vcvars = findVcvars()
-  const compile = spawnSync(
-    'cmd',
-    ['/d', '/s', '/c', `call "${vcvars}" x64 && cl /nologo /W3 /O2 "${probeSource}" /Fe"${probeExe}"`],
-    { cwd: workDir, encoding: 'utf8' },
-  )
-  if (compile.status !== 0 || !existsSync(probeExe)) {
-    fail(`cl.exe probe compile failed (exit ${String(compile.status)}):\n${String(compile.stdout)}\n${String(compile.stderr)}`)
+  const vcvarsCommands = findVcvarsCommands()
+  if (vcvarsCommands.length === 0) {
+    fail('no Visual Studio C++ toolchain batch file found (vswhere and the explicit 2019-2026 paths); the Windows runner image must carry the VS Build Tools')
+  }
+  const attempts: string[] = []
+  let compiled = false
+  for (const envCommand of vcvarsCommands) {
+    const compile = spawnSync(
+      'cmd',
+      ['/d', '/s', '/c', `${envCommand} && cl /nologo /W3 /O2 "${probeSource}" /Fe"${probeExe}"`],
+      { cwd: workDir, encoding: 'utf8' },
+    )
+    if (compile.status === 0 && existsSync(probeExe)) {
+      compiled = true
+      break
+    }
+    attempts.push(`-- ${envCommand} (exit ${String(compile.status)}):\n${String(compile.stdout)}\n${String(compile.stderr)}`)
+  }
+  if (!compiled) {
+    fail(`cl.exe probe compile failed under every discovered toolchain (${String(vcvarsCommands.length)} candidate(s)):\n${attempts.join('\n')}`)
   }
   const output = execFileSync(probeExe, [], { encoding: 'utf8' })
   const reported: Record<string, number> = {}
