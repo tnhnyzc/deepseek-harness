@@ -25,7 +25,7 @@
     }
   },
   "scripts": {
-    "build": "tsdown"
+    "build": "tsc -b && tsdown"
   },
   "dependencies": {
     "@deepseek-ai/cordis": "workspace:^",

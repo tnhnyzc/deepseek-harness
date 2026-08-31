@@ -24,7 +24,6 @@
     { "path": "../desktop-runtime" },
     { "path": "../../packages/host/apiproxy" },
     { "path": "../../packages/client/connection/tsconfig.host.json" },
-    { "path": "../../packages/client/modules" },
-    { "path": "../../packages/client/web" }
+    { "path": "../../packages/client/modules" }
   ]
 }

@@ -38,8 +38,27 @@ function fail(message: string): never {
   process.exit(1)
 }
 
-/** Locate vcvarsall.bat across the Visual Studio 2019/2022 editions and Build Tools. */
+/**
+ * Locate vcvarsall.bat. Prefer the VS Installer's own discovery
+ * (`vswhere` with the C++ toolset component requirement), then fall back to
+ * the explicit 2019/2022 edition paths on both Program Files roots.
+ */
 function findVcvars(): string {
+  const vswhere = 'C:\\Program Files (x86)\\Microsoft Visual Studio\\Installer\\vswhere.exe'
+  if (existsSync(vswhere)) {
+    const out = spawnSync(
+      vswhere,
+      ['-latest', '-products', '*', '-requires', 'Microsoft.VisualStudio.Component.VC.Tools.x86.x64', '-property', 'installationPath'],
+      { encoding: 'utf8' },
+    )
+    if (out.status === 0) {
+      const installPath = String(out.stdout ?? '').trim().split(/\r?\n/).pop()?.trim()
+      if (installPath) {
+        const candidate = join(installPath, 'VC', 'Auxiliary', 'Build', 'vcvarsall.bat')
+        if (existsSync(candidate)) return candidate
+      }
+    }
+  }
   const roots = [
     'C:\\Program Files (x86)\\Microsoft Visual Studio',
     'C:\\Program Files\\Microsoft Visual Studio',
