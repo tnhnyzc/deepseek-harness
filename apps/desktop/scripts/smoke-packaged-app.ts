@@ -275,7 +275,14 @@ async function launchPackagedApp(
   platform: NodeJS.Platform,
   env: Record<string, string>,
 ): Promise<PackagedApp> {
-  const child = spawn(binary, [`--user-data-dir=${userData}`, '--remote-debugging-port=0'], {
+  // `--no-sandbox` is a harness concern, not a product config: the packaged
+  // chrome-sandbox is deliberately not setuid (signing owns that), and
+  // headless CI hosts (GitHub ubuntu-24.04: AppArmor blocks unprivileged
+  // user namespaces) cannot start Chromium's fallback sandbox. It disables
+  // Chromium's own OS-sandbox layer only; the app-level isolation the smoke
+  // asserts (contextIsolation, sandboxed renderer, no nodeIntegration) is
+  // Electron-side and unaffected.
+  const child = spawn(binary, [`--user-data-dir=${userData}`, '--remote-debugging-port=0', '--no-sandbox'], {
     env,
     stdio: ['ignore', 'pipe', 'pipe'],
     detached: false,
@@ -283,16 +290,36 @@ async function launchPackagedApp(
   const onSpawnError = new Promise<never>((_, reject) => {
     child.once('error', error => reject(new Error(`smoke-packaged-app: the packaged binary failed to start: ${error.message}`)))
   })
+  // Capture the app's stderr so a launch failure reports what the binary
+  // actually said (missing library, sandbox or display error on a headless
+  // lane, early crash) instead of only the missing DevTools line.
+  const stderrTail: string[] = []
+  let stderrBytes = 0
+  const onStderrTail = (chunk: Buffer): void => {
+    for (const line of String(chunk).split('\n')) {
+      if (line === '') continue
+      stderrTail.push(line)
+      stderrBytes += line.length
+    }
+    while (stderrBytes > 6000 && stderrTail.length > 1) stderrBytes -= String(stderrTail.shift()).length
+  }
+  const onEarlyExit = new Promise<never>((_, reject) => {
+    child.once('exit', (code, signal) => reject(new Error(`smoke-packaged-app: the app exited before its window attached (code ${String(code)}, signal ${String(signal)})`)))
+  })
+  child.stderr?.on('data', onStderrTail)
   let portLine: string
   try {
     portLine = await Promise.race([
       waitForStderrLine(child, line => line.startsWith('DevTools listening on ') ? line : undefined, 60_000, 'the DevTools endpoint line'),
       onSpawnError,
+      onEarlyExit,
     ])
   } catch (error) {
     child.kill('SIGKILL')
-    throw error
+    const tail = stderrTail.length > 0 ? `\napp stderr tail:\n${stderrTail.join('\n')}` : ''
+    throw new Error(`${error instanceof Error ? error.message : String(error)}${tail}`)
   }
+  child.stderr?.off('data', onStderrTail)
   const port = Number(new URL(portLine.slice('DevTools listening on '.length)).port)
   if (!Number.isInteger(port) || port <= 0) {
     child.kill('SIGKILL')

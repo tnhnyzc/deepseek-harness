@@ -13,7 +13,7 @@
  */
 
 import { execFileSync, spawnSync } from 'node:child_process'
-import { existsSync, mkdirSync, rmSync } from 'node:fs'
+import { existsSync, mkdirSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import type { JobKoffi } from '../src/windows-job.ts'
@@ -91,20 +91,29 @@ try {
   if (vcvarsCommands.length === 0) {
     fail('no Visual Studio C++ toolchain batch file found (vswhere and the explicit 2019-2026 paths); the Windows runner image must carry the VS Build Tools')
   }
+  // The command is written to a batch file rather than passed as a cmd
+  // argument: Node re-quotes argument text when it builds the CreateProcess
+  // command line, which backslash-escapes the quotes around the toolchain path
+  // and makes cmd look for a program literally named `\"C:\...\"`. A wrapper
+  // file is parsed by cmd verbatim; the relative argument below carries no
+  // quoting at all.
   const attempts: string[] = []
   let compiled = false
-  for (const envCommand of vcvarsCommands) {
-    const compile = spawnSync(
-      'cmd',
-      ['/d', '/s', '/c', `${envCommand} && cl /nologo /W3 /O2 "${probeSource}" /Fe"${probeExe}"`],
-      { cwd: workDir, encoding: 'utf8' },
+  vcvarsCommands.forEach((envCommand, index) => {
+    if (compiled) return
+    const wrapper = `compile-${String(index)}.cmd`
+    writeFileSync(
+      join(workDir, wrapper),
+      `@echo off\r\n${envCommand}\r\nif errorlevel 1 exit /b 1\r\ncl /nologo /W3 /O2 "${probeSource}" /Fe"${probeExe}"\r\n`,
+      'utf8',
     )
+    const compile = spawnSync('cmd', ['/c', wrapper], { cwd: workDir, encoding: 'utf8' })
     if (compile.status === 0 && existsSync(probeExe)) {
       compiled = true
-      break
+      return
     }
     attempts.push(`-- ${envCommand} (exit ${String(compile.status)}):\n${String(compile.stdout)}\n${String(compile.stderr)}`)
-  }
+  })
   if (!compiled) {
     fail(`cl.exe probe compile failed under every discovered toolchain (${String(vcvarsCommands.length)} candidate(s)):\n${attempts.join('\n')}`)
   }
