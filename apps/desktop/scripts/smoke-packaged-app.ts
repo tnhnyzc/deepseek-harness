@@ -361,17 +361,49 @@ function stopApp(app: PackagedApp, platform: NodeJS.Platform): void {
   }
 }
 
+/** One CDP round trip must not outlive the harness: a hung renderer main
+ *  thread never runs the expression, and an unbounded await would make every
+ *  waitForPage deadline on top of it unreachable (the smoke hangs forever). */
+const CDP_EVALUATE_TIMEOUT_MS = 10_000
+
+/** `page.evaluate` with a hard bound; the timeout surfaces as a rejection. */
+async function boundedEvaluate(page: CdpPage, expression: string, awaitPromise = false): Promise<unknown> {
+  let timer: ReturnType<typeof setTimeout> | undefined
+  try {
+    return await Promise.race([
+      page.evaluate(expression, awaitPromise),
+      new Promise<never>((_, rejectBound) => {
+        timer = setTimeout(() => rejectBound(new Error('smoke-packaged-app: CDP evaluate unresponsive (renderer hung)')), CDP_EVALUATE_TIMEOUT_MS)
+      }),
+    ])
+  } finally {
+    if (timer !== undefined) clearTimeout(timer)
+  }
+}
+
 /**
  * Poll one page predicate, bounded. The expression must evaluate to a plain
  * boolean synchronously: this poll does not await returned promises, and a
- * promise serializes to an empty object that never matches.
+ * promise serializes to an empty object that never matches. An unresponsive
+ * CDP counts as "not yet" so the wall-clock deadline always fires.
  */
 async function waitForPage(page: CdpPage, expression: string, timeoutMs: number, what: string): Promise<void> {
   const deadline = Date.now() + timeoutMs
+  let unresponsive = 0
   for (;;) {
-    const value = await page.evaluate(expression)
+    let value: unknown
+    try {
+      value = await boundedEvaluate(page, expression)
+      unresponsive = 0
+    } catch {
+      unresponsive += 1
+      value = false
+    }
     if (value === true) return
-    if (Date.now() > deadline) throw new Error(`smoke-packaged-app: timed out waiting for ${what}`)
+    if (Date.now() > deadline) {
+      const suffix = unresponsive > 0 ? ` (CDP unresponsive for the final ${String(unresponsive)} poll(s))` : ''
+      throw new Error(`smoke-packaged-app: timed out waiting for ${what}${suffix}`)
+    }
     await new Promise(resolveWait => setTimeout(resolveWait, 500))
   }
 }
@@ -426,7 +458,7 @@ export async function runPackagedAppSmoke(artifact: string, platform: NodeJS.Pla
       },
     )
     const page = app.page
-    const readUiState = (): Promise<{ state: string; boot: boolean }> => page.evaluate(`(() => {
+    const readUiState = (): Promise<{ state: string; boot: boolean }> => boundedEvaluate(page, `(() => {
       const root = document.getElementById('root')
       return { state: root ? root.dataset.state : null, boot: globalThis.__DSH_BOOT__ !== undefined }
     })()`) as Promise<{ state: string; boot: boolean }>
@@ -444,22 +476,56 @@ export async function runPackagedAppSmoke(artifact: string, platform: NodeJS.Pla
     )
     const uiState = (await readUiState()).state
     if (uiState !== 'ready') {
-      const report = await page.evaluate('globalThis.dshDesktop ? globalThis.dshDesktop.getRuntimeState() : null', true)
+      const report = await boundedEvaluate(page, 'globalThis.dshDesktop ? globalThis.dshDesktop.getRuntimeState() : null', true)
       throw new Error(`the packaged UI is not ready (state ${String(uiState)}; runtime ${JSON.stringify(report ?? null)})`)
     }
-    const deadline = Date.now() + 90_000
+    // The composer editability lands after the session/workspace projection
+    // settles, i.e. it is part of the boot sequence this smoke already bounds
+    // at 180 s above; a cold first-run Windows machine gets the same window.
+    const composerDeadline = Date.now() + 180_000
+    let composerUnresponsive = 0
     for (;;) {
-      const editable = await page.evaluate(`(() => {
-        const el = document.querySelector('[data-composer-card] textarea')
-        return el !== null && !el.readOnly
-      })()`)
+      let editable: unknown
+      try {
+        editable = await boundedEvaluate(page, `(() => {
+          const el = document.querySelector('[data-composer-card] textarea')
+          return el !== null && !el.readOnly
+        })()`)
+        composerUnresponsive = 0
+      } catch {
+        composerUnresponsive += 1
+        editable = false
+      }
       if (editable === true) break
-      if (Date.now() > deadline) throw new Error('the composer never became editable after boot')
+      if (Date.now() > composerDeadline) {
+        // The bare timeout proved blind on the CI runner (UI 'ready', composer
+        // stuck): dump which gate holds the composer, and the CDP state of the
+        // page itself, so the next failure names its cause.
+        const diagnostic = await boundedEvaluate(page, `(() => {
+          const card = document.querySelector('[data-composer-card]')
+          const ta = card !== null ? card.querySelector('textarea') : null
+          const root = document.getElementById('root')
+          return {
+            rootState: root !== null ? root.dataset.state : null,
+            bootGraph: globalThis.__DSH_BOOT__ !== undefined,
+            cardPresent: card !== null,
+            textarea: ta === null ? null : {
+              readOnly: ta.readOnly,
+              disabled: ta.disabled,
+              placeholder: ta.placeholder,
+              phase: ta.dataset.phase ?? null,
+            },
+            runtime: globalThis.dshDesktop !== undefined ? globalThis.dshDesktop.getRuntimeState() : null,
+          }
+        })()`, true).catch(() => 'CDP unresponsive at the deadline (no diagnostics)')
+        const suffix = composerUnresponsive > 0 ? ' (CDP unresponsive for the final polls)' : ''
+        throw new Error(`the composer never became editable after boot${suffix}; diagnostics ${JSON.stringify(diagnostic)}`)
+      }
       await new Promise(resolveWait => setTimeout(resolveWait, 250))
     }
     // The first-run notice backdrop would intercept later interaction;
     // acknowledge it exactly as a first-run user would.
-    const hasContinue = await page.evaluate(`(() => {
+    const hasContinue = await boundedEvaluate(page, `(() => {
       const button = [...document.querySelectorAll('button')].find(b => (b.textContent ?? '').trim() === 'Continue')
       if (button === undefined) return false
       button.click()
@@ -471,7 +537,7 @@ export async function runPackagedAppSmoke(artifact: string, platform: NodeJS.Pla
     note('packaged UI live: client tree booted, composer editable, app.isPackaged asserted next')
 
     // ── the env-gated fact report from the shell ──────────────────────────
-    const readSmokeReport = async (): Promise<unknown> => page.evaluate(
+    const readSmokeReport = async (): Promise<unknown> => boundedEvaluate(page,
       'globalThis.dshDesktop && globalThis.dshDesktop.smokeReport ? globalThis.dshDesktop.smokeReport() : \'smokeReport missing (DSH_DESKTOP_SMOKE not visible to the preload)\'',
       true,
     )
@@ -558,7 +624,7 @@ export async function runPackagedAppSmoke(artifact: string, platform: NodeJS.Pla
     // ── a bounded real carrier round trip ─────────────────────────────────
     // Synthetic DOM input under CDP: the React-controlled textarea takes the
     // native value setter + input event, and Enter arrives as a keydown.
-    await page.evaluate(`(() => {
+    await boundedEvaluate(page, `(() => {
       const el = document.querySelector('[data-composer-card] textarea')
       if (el === null) throw new Error('the composer textarea is gone')
       const setter = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value').set
@@ -576,7 +642,7 @@ export async function runPackagedAppSmoke(artifact: string, platform: NodeJS.Pla
     note('carrier round trip: composer turn reached the scripted provider through the packaged runtime')
 
     // ── the Stage 9 crash/restart drill ───────────────────────────────────
-    const before = await page.evaluate('globalThis.dshDesktop.getRuntimeState()', true) as { state: string }
+    const before = await boundedEvaluate(page, 'globalThis.dshDesktop.getRuntimeState()', true) as { state: string }
     if (typeof report.childPid !== 'number' || report.childPid <= 0 || before.state !== 'ready') {
       throw new Error('the crash drill needs a ready runtime with a positive pid')
     }
@@ -595,22 +661,22 @@ export async function runPackagedAppSmoke(artifact: string, platform: NodeJS.Pla
       60_000,
       'the failure state after the crash',
     )
-    const failedState = (await page.evaluate('globalThis.dshDesktop.getRuntimeState()', true)) as { state: string }
+    const failedState = (await boundedEvaluate(page, 'globalThis.dshDesktop.getRuntimeState()', true)) as { state: string }
     if (failedState.state !== 'failed') {
       throw new Error(`after the abnormal root death the runtime state is ${failedState.state}, expected failed`)
     }
     note(`crash drill: runtime pid ${String(deadPid)} killed abnormally; the window survived; state failed`)
     await waitForPage(page, 'document.querySelector(\'button.shell-restart\') !== null', 30_000, 'the restart affordance')
-    await page.evaluate('(() => { const button = document.querySelector(\'button.shell-restart\'); if (button === null) throw new Error(\'the restart button is gone\'); button.click(); return true })()')
+    await boundedEvaluate(page, '(() => { const button = document.querySelector(\'button.shell-restart\'); if (button === null) throw new Error(\'the restart button is gone\'); button.click(); return true })()')
     await waitForPage(
       page,
       '(() => { const root = document.getElementById(\'root\'); return root !== null && root.dataset.state === \'ready\' })()',
       180_000,
       'the restarted generation to reach readiness',
     )
-    const after = (await page.evaluate('globalThis.dshDesktop.getRuntimeState()', true)) as { state: string }
+    const after = (await boundedEvaluate(page, 'globalThis.dshDesktop.getRuntimeState()', true)) as { state: string }
     if (after.state !== 'ready') throw new Error(`after Restart the runtime state is ${after.state}`)
-    const afterReport = (await page.evaluate('globalThis.dshDesktop.smokeReport ? globalThis.dshDesktop.smokeReport() : null', true)) as DesktopSmokeReport | null
+    const afterReport = (await boundedEvaluate(page, 'globalThis.dshDesktop.smokeReport ? globalThis.dshDesktop.smokeReport() : null', true)) as DesktopSmokeReport | null
     if (afterReport?.childPid === undefined || afterReport.childPid === null || afterReport.childPid === deadPid) {
       throw new Error(`the restarted generation reused or lost the runtime pid (${String(afterReport?.childPid)}, dead pid ${String(deadPid)})`)
     }
