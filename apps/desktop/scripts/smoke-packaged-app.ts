@@ -499,12 +499,29 @@ export async function runPackagedAppSmoke(artifact: string, platform: NodeJS.Pla
       if (editable === true) break
       if (Date.now() > composerDeadline) {
         // The bare timeout proved blind on the CI runner (UI 'ready', composer
-        // stuck): dump which gate holds the composer, and the CDP state of the
-        // page itself, so the next failure names its cause.
-        const diagnostic = await boundedEvaluate(page, `(() => {
+        // stuck): dump which gate holds the composer, the runtime child's
+        // diagnostic tail (workspace load / session.create surface there), and
+        // the hero text (is the seeded workspace visible to the picker?).
+        const diagnostic = await boundedEvaluate(page, `(async () => {
           const card = document.querySelector('[data-composer-card]')
           const ta = card !== null ? card.querySelector('textarea') : null
           const root = document.getElementById('root')
+          let runtime = null
+          try {
+            const view = globalThis.dshDesktop !== undefined ? await globalThis.dshDesktop.getRuntimeState() : null
+            if (view !== null && typeof view === 'object') {
+              const raw = typeof view.diagnostics === 'string' ? view.diagnostics : ''
+              runtime = {
+                state: view.state ?? null,
+                reason: view.reason ?? null,
+                diagnosticsTail: raw.split('\\n').slice(-30).join('\\n'),
+              }
+            } else {
+              runtime = view
+            }
+          } catch (error) {
+            runtime = \`getRuntimeState threw: \${String(error)}\`
+          }
           return {
             rootState: root !== null ? root.dataset.state : null,
             bootGraph: globalThis.__DSH_BOOT__ !== undefined,
@@ -515,7 +532,8 @@ export async function runPackagedAppSmoke(artifact: string, platform: NodeJS.Pla
               placeholder: ta.placeholder,
               phase: ta.dataset.phase ?? null,
             },
-            runtime: globalThis.dshDesktop !== undefined ? globalThis.dshDesktop.getRuntimeState() : null,
+            runtime,
+            heroText: (document.body.innerText ?? '').replace(/\\s+/g, ' ').slice(0, 300),
           }
         })()`, true).catch(() => 'CDP unresponsive at the deadline (no diagnostics)')
         const suffix = composerUnresponsive > 0 ? ' (CDP unresponsive for the final polls)' : ''
