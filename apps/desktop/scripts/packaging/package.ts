@@ -82,11 +82,16 @@ function parseArgs(argv: string[]): PackageOptions {
 /** Run the desktop build (runtime + main + renderer) unless skipped. */
 async function buildDesktop(): Promise<void> {
   console.log('package: building the desktop runtime, main, and renderer')
+  // On Windows `pnpm` is a .cmd shim, which CreateProcess cannot exec
+  // without a shell; the native launcher on darwin/linux needs none.
   const result = spawnSync('pnpm', ['--filter', '@deepseek-ai/dsh-desktop', 'run', 'build'], {
     stdio: 'inherit',
     cwd: repoRoot,
+    shell: process.platform === 'win32',
   })
-  if (result.status !== 0) throw new Error(`package: the desktop build failed (exit ${String(result.status)})`)
+  if (result.status !== 0 || result.error !== undefined) {
+    throw new Error(`package: the desktop build failed (exit ${String(result.status)}${result.error !== undefined ? `, ${result.error.message}` : ''})`)
+  }
 }
 
 /**
