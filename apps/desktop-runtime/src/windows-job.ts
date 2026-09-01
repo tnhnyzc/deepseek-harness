@@ -180,6 +180,10 @@ export async function installWindowsProcessContainment(): Promise<WindowsProcess
  */
 export function createWindowsJobContainment(koffi: JobKoffi): WindowsProcessContainment {
   const kernel32 = koffi.load('kernel32.dll')
+  // Register the struct types before any func signature references them by
+  // name: koffi resolves the type names at the func() call, so a signature
+  // declared before the struct exists is an unknown type.
+  const { basic, io, extended } = buildWindowsJobStructs(koffi)
   const createJobObject = kernel32.func('__stdcall', 'CreateJobObjectW', 'void *', ['void *', 'str16'])
   const setInformation = kernel32.func('__stdcall', 'SetInformationJobObject', 'int32', [
     'void *', 'uint32', 'JOBOBJECT_EXTENDED_LIMIT_INFORMATION',
@@ -194,8 +198,6 @@ export function createWindowsJobContainment(koffi: JobKoffi): WindowsProcessCont
   // ever reaches the diagnostic message.
   const failed = (fn: string, code: unknown): Error =>
     new Error(`windows-job: ${fn} failed (win32 error ${String(code)})`)
-
-  const { basic, io, extended } = buildWindowsJobStructs(koffi)
   const sizes: [number, number][] = [
     [koffi.sizeof(basic), WINDOWS_JOB_ABI.basicLimitSize],
     [koffi.sizeof(io), WINDOWS_JOB_ABI.ioCountersSize],
