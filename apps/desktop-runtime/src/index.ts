@@ -205,9 +205,14 @@ async function main(): Promise<void> {
     // production channel, reported to the supervisor beside readiness.
     if (process.env.DSH_DESKTOP_SMOKE === '1') {
       const probePath = join(home, `dsh-smoke-absent-${String(process.pid)}-${String(Date.now())}`)
+      // Bound the probe: on a host where openPath cannot settle (headless
+      // session, no file handler) the report must still arrive, so an
+      // unabortable signal is a report that never ships.
+      const probe = new AbortController()
+      const abortProbe = setTimeout(() => probe.abort(), 15_000)
       let nativeOpenPath: { ok: boolean; code?: string; message?: string }
       try {
-        await nativeBridge.openPath(probePath, new AbortController().signal)
+        await nativeBridge.openPath(probePath, probe.signal)
         nativeOpenPath = { ok: true }
       } catch (error) {
         nativeOpenPath = {
@@ -215,6 +220,8 @@ async function main(): Promise<void> {
           code: error instanceof NativeError ? String(error.code) : 'unknown',
           message: (error instanceof Error ? error.message : String(error)).slice(0, 512),
         }
+      } finally {
+        clearTimeout(abortProbe)
       }
       process.send({ type: 'runtime.smoke-report', nativeOpenPath } satisfies RuntimeSmokeReportMessage)
     }

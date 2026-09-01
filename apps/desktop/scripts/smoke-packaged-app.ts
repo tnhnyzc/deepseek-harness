@@ -115,7 +115,7 @@ function seedWorkspaceRegistry(home: string, dir: string): void {
 }
 
 /** One pid's listening TCP sockets: the product may open none. */
-function listeningTcpPids(pid: number): string[] {
+function listeningTcpPids(pid: number, coOwners: readonly number[] = []): string[] {
   if (process.platform === 'darwin') {
     const out = spawnSync('lsof', ['-nP', '-iTCP', '-sTCP:LISTEN', '-a', '-p', String(pid)], { encoding: 'utf8' })
     return String(out.stdout ?? '').split('\n').filter(line => line.trim() !== '')
@@ -128,7 +128,13 @@ function listeningTcpPids(pid: number): string[] {
     })
   }
   const out = spawnSync('ss', ['-tlnp'], { encoding: 'utf8' })
-  return String(out.stdout ?? '').split('\n').filter(line => line.includes(`pid=${String(pid)},`))
+  return String(out.stdout ?? '').split('\n').filter((line) => {
+    if (!line.includes(`pid=${String(pid)},`)) return false
+    // On this host the runtime child inherits the shell's fds, so a listener
+    // the co-owner holds is the co-owner's (the shell's smoke DevTools
+    // endpoint shows up beside the runtime in the process list).
+    return !coOwners.some(other => line.includes(`pid=${String(other)},`))
+  })
 }
 
 /** The report the env-gated smoke channel returns from the shell. */
@@ -465,8 +471,21 @@ export async function runPackagedAppSmoke(artifact: string, platform: NodeJS.Pla
     note('packaged UI live: client tree booted, composer editable, app.isPackaged asserted next')
 
     // ── the env-gated fact report from the shell ──────────────────────────
-    const smokeReport = await page.evaluate('globalThis.dshDesktop && globalThis.dshDesktop.smokeReport ? globalThis.dshDesktop.smokeReport() : \'smokeReport missing (DSH_DESKTOP_SMOKE not visible to the preload)\'', true)
+    const readSmokeReport = async (): Promise<unknown> => page.evaluate(
+      'globalThis.dshDesktop && globalThis.dshDesktop.smokeReport ? globalThis.dshDesktop.smokeReport() : \'smokeReport missing (DSH_DESKTOP_SMOKE not visible to the preload)\'',
+      true,
+    )
+    let smokeReport = await readSmokeReport()
     if (typeof smokeReport === 'string') throw new Error(smokeReport)
+    // The runtime reports its smoke facts after readiness (ready, then the
+    // native round trip, then the report), so poll briefly for the native
+    // fact to settle before judging the generation.
+    const factsDeadline = Date.now() + 30_000
+    while ((smokeReport as DesktopSmokeReport).smokeFacts?.nativeOpenPath === undefined && Date.now() < factsDeadline) {
+      await new Promise(resolveWait => setTimeout(resolveWait, 500))
+      smokeReport = await readSmokeReport()
+      if (typeof smokeReport === 'string') throw new Error(smokeReport)
+    }
     const report = smokeReport as unknown as DesktopSmokeReport
     if (report.isPackaged !== true) failures.push(`app.isPackaged is ${String(report.isPackaged)}`)
     if (report.platform !== manifest.platform || report.arch !== manifest.arch) {
@@ -512,7 +531,7 @@ export async function runPackagedAppSmoke(artifact: string, platform: NodeJS.Pla
     // harness, not the product.
     const runtimePid = report.childPid
     if (typeof runtimePid === 'number' && runtimePid > 0) {
-      const runtimeListeners = listeningTcpPids(runtimePid)
+      const runtimeListeners = listeningTcpPids(runtimePid, [app.pid])
       if (runtimeListeners.length > 0) {
         failures.push(`runtime pid ${String(runtimePid)} has listening TCP sockets: ${runtimeListeners.join(' | ')}`)
       }
