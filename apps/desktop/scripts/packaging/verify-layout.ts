@@ -125,8 +125,12 @@ export async function verifyArtifactLayout(
     } catch (error) {
       check(checks, 'asar header parse', false, String(error))
     }
+    // asar's listFiles joins header paths with the host's path separator,
+    // so on Windows the entries come back backslashed: normalize before
+    // comparing against the POSIX entry names.
+    const normalizedEntries = entries.map(entry => entry.replaceAll('\\', '/'))
     for (const entry of ['/dist/main/index.js', '/src/preload/index.cjs', '/package.json']) {
-      check(checks, `asar contains ${entry}`, entries.includes(entry))
+      check(checks, `asar contains ${entry}`, normalizedEntries.includes(entry))
     }
   }
 
@@ -162,8 +166,14 @@ export async function verifyArtifactLayout(
   const prebuildAnchors: [string, string][] = [
     [`@koromix/koffi-${target}`, 'koffi'],
     [`@img/sharp-${target}`, 'sharp'],
-    [`@img/sharp-libvips-${target}`, 'sharp'],
   ]
+  // The darwin and linux sharp platform packages pair with a separate
+  // `@img/sharp-libvips-*` prebuild; the win32 wrapper bundles the libvips
+  // DLLs (libvips-42.dll, libvips-cpp) inside its own package, so no
+  // separate libvips package is staged there.
+  if (platform !== 'win32') {
+    prebuildAnchors.push([`@img/sharp-libvips-${target}`, 'sharp'])
+  }
   for (const [prebuild, consumer] of prebuildAnchors) {
     const found = findPackageDirs(closureRoot, prebuild)
     const first = found[0]
