@@ -185,8 +185,11 @@ export function createWindowsJobContainment(koffi: JobKoffi): WindowsProcessCont
   // declared before the struct exists is an unknown type.
   const { basic, io, extended } = buildWindowsJobStructs(koffi)
   const createJobObject = kernel32.func('__stdcall', 'CreateJobObjectW', 'void *', ['void *', 'str16'])
+  // lpJobObjectExtendedLimitInfo is a pointer to the structure (LP…);
+  // declaring the struct itself passes it by value and the OS answers
+  // ERROR_MORE_DATA (24) instead of applying the limits.
   const setInformation = kernel32.func('__stdcall', 'SetInformationJobObject', 'int32', [
-    'void *', 'uint32', 'JOBOBJECT_EXTENDED_LIMIT_INFORMATION',
+    'void *', 'uint32', 'JOBOBJECT_EXTENDED_LIMIT_INFORMATION *',
   ])
   const getCurrentProcessId = kernel32.func('__stdcall', 'GetCurrentProcessId', 'uint32', [])
   const openProcess = kernel32.func('__stdcall', 'OpenProcess', 'void *', ['uint32', 'uint32', 'uint32'])
