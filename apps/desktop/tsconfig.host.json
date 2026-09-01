@@ -14,6 +14,8 @@
     "scripts/packaging",
     "scripts/bundle-node.ts",
     "scripts/smoke-packaged-app.ts",
+    "scripts/d4-acceptance.ts",
+    "scripts/d4-acceptance-child.ts",
     "forge.config.ts",
     "tsdown.config.ts"
   ],

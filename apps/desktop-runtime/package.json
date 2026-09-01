@@ -19,6 +19,10 @@
       "types": "./lib/types/native.d.ts",
       "default": "./dist/native.js"
     },
+    "./windows-job": {
+      "types": "./lib/types/windows-job.d.ts",
+      "default": "./dist/windows-job.js"
+    },
     "./directory-picker": {
       "types": "./lib/types/directory-picker.d.ts",
       "default": "./dist/directory-picker.js"

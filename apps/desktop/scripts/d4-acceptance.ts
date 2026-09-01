@@ -76,6 +76,7 @@ const sleep = (ms: number): Promise<void> => new Promise(resolve => setTimeout(r
 /** Control process, spawned by the harness: outside every job. */
 const control = spawn(process.execPath, ['-e', `setTimeout(() => {}, ${SLEEP_MS})`], { stdio: 'ignore' })
 if (control.pid === undefined) fail('control spawn returned no pid')
+const controlPid = control.pid
 
 async function waitExit(child: ChildProcess, timeoutMs: number, label: string): Promise<void> {
   const start = Date.now()
@@ -101,7 +102,7 @@ async function verifyContainment(descendants: number[]): Promise<void> {
     survivors.forEach(killTree)
     fail(`contained descendants ${survivors.join(', ')} outlived the root's job handle close`)
   }
-  if (!alive(control.pid)) {
+  if (!alive(controlPid)) {
     fail('the control process outside the job was killed; containment captured an unrelated process')
   }
   process.stdout.write('d4-acceptance: contained descendants died with the root; the unrelated control survived\n')
@@ -114,8 +115,9 @@ function parseArgs(argv: string[]): { packagedArtifact?: string } {
     if (arg === undefined) continue
     if (arg === '--packaged') {
       i += 1
-      options.packagedArtifact = argv[i]
-      if (options.packagedArtifact === undefined) fail('--packaged requires an artifact directory argument')
+      const value = argv[i]
+      if (value === undefined) fail('--packaged requires an artifact directory argument')
+      options.packagedArtifact = value
     } else if (arg === '--') {
       continue
     } else {
@@ -167,10 +169,10 @@ if (options.packagedArtifact !== undefined) {
 
   let report: { mode: 'product-job'; descendants: number[] } | { mode: 'externally-contained' } | undefined
   let readyVersion: string | undefined
-  root = forkRuntime(true)
-  root.stdout?.on('data', (chunk: Buffer) => { process.stdout.write(`[d4-root] ${String(chunk)}`) })
-  root.stderr?.on('data', (chunk: Buffer) => { process.stderr.write(`[d4-root] ${String(chunk)}`) })
-  root.on('message', (message: { type?: unknown; mode?: unknown; descendants?: unknown; dshVersion?: unknown } | null) => {
+  const packagedRoot = forkRuntime(true)
+  packagedRoot.stdout?.on('data', (chunk: Buffer) => { process.stdout.write(`[d4-root] ${String(chunk)}`) })
+  packagedRoot.stderr?.on('data', (chunk: Buffer) => { process.stderr.write(`[d4-root] ${String(chunk)}`) })
+  packagedRoot.on('message', (message: { type?: unknown; mode?: unknown; descendants?: unknown; dshVersion?: unknown } | null) => {
     if (message === null || typeof message !== 'object') return
     if (message.type === 'd4.acceptance-report' && message.mode === 'externally-contained') {
       report = { mode: 'externally-contained' }
@@ -186,25 +188,25 @@ if (options.packagedArtifact !== undefined) {
 
   const waitReady = async (): Promise<void> => {
     const start = Date.now()
-    while (readyVersion === undefined && root.exitCode === null && Date.now() - start < READY_TIMEOUT_MS) {
+    while (readyVersion === undefined && packagedRoot.exitCode === null && Date.now() - start < READY_TIMEOUT_MS) {
       await sleep(100)
     }
   }
   await waitReady()
-  if (root.exitCode !== null) {
-    killTree(control.pid)
-    fail(`packaged root exited before readiness (code ${String(root.exitCode)}): containment install or packaged boot failed`)
+  if (packagedRoot.exitCode !== null) {
+    killTree(controlPid)
+    fail(`packaged root exited before readiness (code ${String(packagedRoot.exitCode)}): containment install or packaged boot failed`)
   }
   if (report === undefined) {
-    killTree(control.pid)
+    killTree(controlPid)
     fail('the packaged runtime never reported its D4 containment mode')
   }
   if (readyVersion !== manifest.deepseekHarnessVersion) {
-    killTree(control.pid)
+    killTree(controlPid)
     fail(`packaged runtime reports dshVersion ${String(readyVersion)}, the artifact pins ${String(manifest.deepseekHarnessVersion)}`)
   }
   if (report.mode === 'externally-contained') {
-    killTree(control.pid)
+    killTree(controlPid)
     process.stdout.write(
       'd4-acceptance: SKIP (externally contained) — the packaged runtime booted healthy in the fallback under the bundled Node; '
       + 'the product Job Object was not installed and D4 is NOT validated on this host\n',
@@ -214,19 +216,19 @@ if (options.packagedArtifact !== undefined) {
   process.stdout.write(`d4-acceptance: packaged runtime ready (dshVersion ${String(readyVersion)}) under the bundled Node with the job installed\n`)
   const [descA, descB] = report.descendants
   if (descA === undefined || descB === undefined) {
-    killTree(control.pid)
+    killTree(controlPid)
     fail('the packaged runtime reported a malformed descendant list')
   }
   if (!alive(descA) || !alive(descB)) {
-    killTree(control.pid)
+    killTree(controlPid)
     fail('a reported descendant was not alive when the root was killed')
   }
 
   // The event under test: an unexpected root death — one that does NOT let
   // taskkill's own tree walk answer for the job.
-  if (root.pid === undefined) fail('the packaged root spawn returned no pid')
-  killProcess(root.pid)
-  await waitExit(root, READY_TIMEOUT_MS, 'packaged root').catch(error => fail(String(error)))
+  if (packagedRoot.pid === undefined) fail('the packaged root spawn returned no pid')
+  killProcess(packagedRoot.pid)
+  await waitExit(packagedRoot, READY_TIMEOUT_MS, 'packaged root').catch(error => fail(String(error)))
   await verifyContainment([descA, descB])
 
   // Replacement generation: a fresh process under the bundled Node must
@@ -242,13 +244,13 @@ if (options.packagedArtifact !== undefined) {
   if (!restartReady) {
     restart.send?.({ type: 'runtime.shutdown' })
     await waitExit(restart, SHUTDOWN_GRACE_MS, 'restart generation').catch(() => undefined)
-    killTree(control.pid)
+    killTree(controlPid)
     fail('the replacement generation did not reach readiness: the dead job captured it or the packaged boot regressed')
   }
   process.stdout.write('d4-acceptance: replacement generation reached readiness under the bundled Node\n')
   restart.send?.({ type: 'runtime.shutdown' })
   await waitExit(restart, SHUTDOWN_GRACE_MS, 'restart generation')
-  killTree(control.pid)
+  killTree(controlPid)
   process.stdout.write('d4-acceptance: PASS (packaged) — job-contained descendants died with the root, the control survived, and a fresh generation is healthy\n')
   process.exit(0)
 }
@@ -288,13 +290,13 @@ while (reported === undefined && !rootExited && Date.now() - start < READY_TIMEO
   await sleep(100)
 }
 if (reported === undefined) {
-  killTree(control.pid)
+  killTree(controlPid)
   fail(rootExited
     ? `root exited before reporting (code ${String(rootExitCode)}): the containment install or child boot failed`
     : `root did not report within ${String(READY_TIMEOUT_MS)} ms (tsx/koffi boot too slow)`)
 }
 if (reported.mode === 'externally-contained') {
-  killTree(control.pid)
+  killTree(controlPid)
   process.stdout.write(
     'd4-acceptance: SKIP (externally contained) — the source-mode root installed in the fallback; '
     + 'the product Job Object was not installed and D4 is NOT validated on this host\n',
@@ -302,13 +304,13 @@ if (reported.mode === 'externally-contained') {
   process.exit(0)
 }
 if (reported.descendants.length !== 2) {
-  killTree(control.pid)
+  killTree(controlPid)
   fail('root reported a malformed descendant list')
 }
 const [descA, descB] = reported.descendants
 if (descA === undefined || descB === undefined) fail('root reported a malformed descendant list')
 if (!alive(descA) || !alive(descB)) {
-  killTree(control.pid)
+  killTree(controlPid)
   fail('a reported descendant was not alive when the root was killed')
 }
 
@@ -317,6 +319,6 @@ while (!rootExited) {
   await sleep(50)
 }
 await verifyContainment([descA, descB])
-killTree(control.pid)
+killTree(controlPid)
 process.stdout.write('d4-acceptance: PASS (source) — job-contained descendants died with the root; the unrelated control survived\n')
 process.exit(0)

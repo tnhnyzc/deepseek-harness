@@ -30,6 +30,7 @@
     "paths": {
       "@deepseek-ai/dsh-desktop-runtime/transport": ["./apps/desktop-runtime/src/transport.ts"],
       "@deepseek-ai/dsh-desktop-runtime/native": ["./apps/desktop-runtime/src/native.ts"],
+      "@deepseek-ai/dsh-desktop-runtime/windows-job": ["./apps/desktop-runtime/src/windows-job.ts"],
       "@deepseek-ai/cordis": ["./vendor/cordis/src"],
       "@deepseek-ai/cosmokit": ["./vendor/cosmokit/src"],
       "@deepseek-ai/schemastery": ["./vendor/schemastery/src"],

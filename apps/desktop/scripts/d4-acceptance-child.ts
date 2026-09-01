@@ -10,7 +10,7 @@
  */
 
 import { spawn } from 'node:child_process'
-import { CONTAINMENT_MODES, installWindowsProcessContainment } from '../../desktop-runtime/src/windows-job.ts'
+import { CONTAINMENT_MODES, installWindowsProcessContainment } from '@deepseek-ai/dsh-desktop-runtime/windows-job'
 
 if (process.platform !== 'win32') {
   process.stderr.write('d4-acceptance-child: Windows-only gate\n')
