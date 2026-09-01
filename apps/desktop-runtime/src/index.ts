@@ -65,14 +65,20 @@ export interface RuntimeD4ReportMessage {
 }
 
 /**
- * Packaged-app smoke facts (test-only, `DSH_DESKTOP_SMOKE=1`): the result
- * of one real native round trip over the production channel — `openPath`
- * on a path guaranteed not to exist. It must settle as the channel's
- * `open-failed` failure; a success means the probe path materialized and
- * the smoke must fail.
+ * Packaged-app smoke facts (test-only, `DSH_DESKTOP_SMOKE=1`): two bounded
+ * probes over the production native channel. `channelRoundTrip` is a
+ * structurally invalid path the shell's strict parser must return as
+ * `malformed-request` — a full request→response cycle with no OS
+ * involvement, identical on every platform. `nativeOpenPath` is the
+ * product operation on a path guaranteed not to exist: it must settle as
+ * the channel's `open-failed` failure where the OS settles at all; a host
+ * that cannot settle `openPath` (headless, no file handler) records
+ * `probe-aborted` when the bound fires, and a success means the probe path
+ * materialized and the smoke must fail.
  */
 export interface RuntimeSmokeReportMessage {
   type: 'runtime.smoke-report'
+  channelRoundTrip: { code: string }
   nativeOpenPath: { ok: boolean; code?: string; message?: string }
 }
 
@@ -204,10 +210,26 @@ async function main(): Promise<void> {
     // Packaged-app smoke (test-only): one real native round trip over the
     // production channel, reported to the supervisor beside readiness.
     if (process.env.DSH_DESKTOP_SMOKE === '1') {
+      // Probe 1: the deterministic channel round trip. A structurally
+      // invalid path (NUL byte) is rejected by the shell's strict parser
+      // and returned as `malformed-request` over the channel — a full
+      // request→response cycle with no OS involvement. A channel that
+      // cannot round trip never answers, and the bound records `unknown`.
+      const channelProbe = new AbortController()
+      const abortChannelProbe = setTimeout(() => channelProbe.abort(), 10_000)
+      let channelRoundTrip: { code: string }
+      try {
+        await nativeBridge.openPath('dsh-smoke\u0000probe', channelProbe.signal)
+        channelRoundTrip = { code: 'unexpected-success' }
+      } catch (error) {
+        channelRoundTrip = { code: error instanceof NativeError ? String(error.code) : 'unknown' }
+      } finally {
+        clearTimeout(abortChannelProbe)
+      }
+      // Probe 2: the product's own operation on a path guaranteed not to
+      // exist, bound so a host where the OS cannot settle openPath records
+      // `probe-aborted` instead of the OS verdict.
       const probePath = join(home, `dsh-smoke-absent-${String(process.pid)}-${String(Date.now())}`)
-      // Bound the probe: on a host where openPath cannot settle (headless
-      // session, no file handler) the report must still arrive, so an
-      // unabortable signal is a report that never ships.
       const probe = new AbortController()
       const abortProbe = setTimeout(() => probe.abort(), 15_000)
       let nativeOpenPath: { ok: boolean; code?: string; message?: string }
@@ -217,13 +239,13 @@ async function main(): Promise<void> {
       } catch (error) {
         nativeOpenPath = {
           ok: false,
-          code: error instanceof NativeError ? String(error.code) : 'unknown',
+          code: probe.signal.aborted ? 'probe-aborted' : error instanceof NativeError ? String(error.code) : 'unknown',
           message: (error instanceof Error ? error.message : String(error)).slice(0, 512),
         }
       } finally {
         clearTimeout(abortProbe)
       }
-      process.send({ type: 'runtime.smoke-report', nativeOpenPath } satisfies RuntimeSmokeReportMessage)
+      process.send({ type: 'runtime.smoke-report', channelRoundTrip, nativeOpenPath } satisfies RuntimeSmokeReportMessage)
     }
   } catch (error) {
     uninstall()

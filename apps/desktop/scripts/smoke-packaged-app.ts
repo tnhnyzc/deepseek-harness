@@ -145,7 +145,7 @@ interface DesktopSmokeReport {
   electronVersion: string
   childPid: number | null
   runtime: { state: string; runtimeVersion?: string; dshVersion?: string; reason?: string }
-  smokeFacts: { nativeOpenPath?: { ok: boolean; code?: string; message?: string } } | null
+  smokeFacts: { channelRoundTrip?: { code: string }; nativeOpenPath?: { ok: boolean; code?: string; message?: string } } | null
   webPreferences: Record<string, unknown> | null
   devToolsOpened: boolean | null
   permissionPolicy: { defaultDeny: boolean; allowedPermission: string; handlers: string[] }
@@ -478,10 +478,10 @@ export async function runPackagedAppSmoke(artifact: string, platform: NodeJS.Pla
     let smokeReport = await readSmokeReport()
     if (typeof smokeReport === 'string') throw new Error(smokeReport)
     // The runtime reports its smoke facts after readiness (ready, then the
-    // native round trip, then the report), so poll briefly for the native
-    // fact to settle before judging the generation.
-    const factsDeadline = Date.now() + 30_000
-    while ((smokeReport as DesktopSmokeReport).smokeFacts?.nativeOpenPath === undefined && Date.now() < factsDeadline) {
+    // bounded probes, then the report), so poll for the facts to ship
+    // before judging the generation.
+    const factsDeadline = Date.now() + 45_000
+    while ((smokeReport as DesktopSmokeReport).smokeFacts === null && Date.now() < factsDeadline) {
       await new Promise(resolveWait => setTimeout(resolveWait, 500))
       smokeReport = await readSmokeReport()
       if (typeof smokeReport === 'string') throw new Error(smokeReport)
@@ -515,13 +515,23 @@ export async function runPackagedAppSmoke(artifact: string, platform: NodeJS.Pla
       || report.permissionPolicy.handlers.join(',') !== 'request,check') {
       failures.push(`the permission policy is not default-deny with the single clipboard exception: ${JSON.stringify(report.permissionPolicy)}`)
     }
+    const channel = report.smokeFacts?.channelRoundTrip
+    if (channel === undefined || channel.code !== 'malformed-request') {
+      failures.push(`the native channel round trip did not settle as malformed-request: ${JSON.stringify(channel ?? null)}`)
+    } else {
+      note('native channel live: the malformed-path round trip settled as malformed-request over the production channel')
+    }
     const probe = report.smokeFacts?.nativeOpenPath
     if (probe === undefined) {
       failures.push('the runtime published no native round-trip facts (the DSH_DESKTOP_SMOKE generation is missing)')
-    } else if (probe.ok !== false || probe.code !== 'open-failed') {
-      failures.push(`the native openPath probe did not fail as the channel requires: ${JSON.stringify(probe)}`)
+    } else if (probe.ok !== false) {
+      failures.push(`the native openPath probe opened an absent path: ${JSON.stringify(probe)}`)
+    } else if (probe.code === 'open-failed') {
+      note(`native openPath settled as open-failed (${String(probe.message).slice(0, 80)})`)
+    } else if (probe.code === 'probe-aborted') {
+      note('native openPath could not settle on this host (headless, no file handler); the channel round trip proved the relay')
     } else {
-      note(`native channel live: openPath round trip settled as open-failed (${String(probe.message).slice(0, 80)})`)
+      failures.push(`the native openPath probe did not fail as the channel requires: ${JSON.stringify(probe)}`)
     }
 
     // ── zero product TCP listeners ─────────────────────────────────────────

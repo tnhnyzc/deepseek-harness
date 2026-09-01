@@ -158,8 +158,13 @@ describe('parseBootGraphMessage', () => {
 
 describe('parseSmokeReportMessage', () => {
   it('passes a well-formed probe report through', () => {
-    const message = { type: 'runtime.smoke-report', nativeOpenPath: { ok: false, code: 'open-failed', message: 'Failed to open path' } }
+    const message = {
+      type: 'runtime.smoke-report',
+      channelRoundTrip: { code: 'malformed-request' },
+      nativeOpenPath: { ok: false, code: 'open-failed', message: 'Failed to open path' },
+    }
     expect(parseSmokeReportMessage(message)).toEqual({
+      channelRoundTrip: { code: 'malformed-request' },
       nativeOpenPath: { ok: false, code: 'open-failed', message: 'Failed to open path' },
     })
   })
@@ -168,11 +173,13 @@ describe('parseSmokeReportMessage', () => {
     expect(parseSmokeReportMessage(null)).toBeUndefined()
     expect(parseSmokeReportMessage({ type: 'runtime.smoke-report' })).toBeUndefined()
     expect(parseSmokeReportMessage({ nativeOpenPath: { ok: 'no' } })).toBeUndefined()
+    expect(parseSmokeReportMessage({ channelRoundTrip: { code: 'malformed-request' } })).toBeUndefined()
   })
 
   it('drops an over-bound report at the wire', () => {
-    expect(parseSmokeReportMessage({ nativeOpenPath: { ok: false, code: 'x'.repeat(65) } })).toBeUndefined()
-    expect(parseSmokeReportMessage({ nativeOpenPath: { ok: false, message: 'x'.repeat(513) } })).toBeUndefined()
+    expect(parseSmokeReportMessage({ channelRoundTrip: { code: 'x'.repeat(65) }, nativeOpenPath: { ok: false } })).toBeUndefined()
+    expect(parseSmokeReportMessage({ channelRoundTrip: { code: 'malformed-request' }, nativeOpenPath: { ok: false, code: 'x'.repeat(65) } })).toBeUndefined()
+    expect(parseSmokeReportMessage({ channelRoundTrip: { code: 'malformed-request' }, nativeOpenPath: { ok: false, message: 'x'.repeat(513) } })).toBeUndefined()
   })
 })
 

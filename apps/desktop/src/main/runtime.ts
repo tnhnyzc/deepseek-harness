@@ -110,7 +110,7 @@ export interface RuntimeSupervisor {
    * production channel after readiness; `undefined` when none is cached for
    * the live child.
    */
-  smokeFacts(): { nativeOpenPath?: { ok: boolean; code?: string; message?: string } } | undefined
+  smokeFacts(): { channelRoundTrip?: { code: string }; nativeOpenPath?: { ok: boolean; code?: string; message?: string } } | undefined
 }
 
 /** The legal state transitions; anything else throws (fail loud). */
@@ -204,7 +204,7 @@ export function createRuntimeSupervisor(options: RuntimeSupervisorOptions): Runt
   let child: ChildProcess | undefined
   let ready: RuntimeReadyPayload | undefined
   let bootPayload: DshBootPayload | undefined
-  let smokeReport: { nativeOpenPath?: { ok: boolean; code?: string; message?: string } } | undefined
+  let smokeReport: { channelRoundTrip?: { code: string }; nativeOpenPath?: { ok: boolean; code?: string; message?: string } } | undefined
   let reason: string | undefined
   let autoRetried = false
   let spawnError = false
@@ -565,7 +565,7 @@ const SMOKE_REPORT_MAX_MESSAGE_CHARS = 512
  */
 export function parseSmokeReportMessage(
   message: unknown,
-): { nativeOpenPath?: { ok: boolean; code?: string; message?: string } } | undefined {
+): { channelRoundTrip?: { code: string }; nativeOpenPath?: { ok: boolean; code?: string; message?: string } } | undefined {
   if (typeof message !== 'object' || message === null) return undefined
   const candidate = message as Record<string, unknown>
   const probe = candidate.nativeOpenPath
@@ -581,5 +581,9 @@ export function parseSmokeReportMessage(
     if (!boundedString(probeValue.message, SMOKE_REPORT_MAX_MESSAGE_CHARS)) return undefined
     result.message = probeValue.message
   }
-  return { nativeOpenPath: result }
+  const channel = candidate.channelRoundTrip
+  if (typeof channel !== 'object' || channel === null) return undefined
+  const channelCode = (channel as Record<string, unknown>).code
+  if (!boundedString(channelCode, 64)) return undefined
+  return { channelRoundTrip: { code: channelCode }, nativeOpenPath: result }
 }
