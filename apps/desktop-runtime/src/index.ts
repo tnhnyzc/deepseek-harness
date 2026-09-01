@@ -28,7 +28,7 @@ import { bootGraphMessage, createClientBundleFetch } from './boot-graph.ts'
 import { composeDesktopPatches, prepareDesktopProfile, PROFILE_ROOT_FILENAME } from './composition.ts'
 import { createNativeBridge, NativeError } from './native-bridge.ts'
 import { createProcessShutdown } from './shutdown.ts'
-import { installWindowsProcessContainment, type WindowsProcessContainment } from './windows-job.ts'
+import { CONTAINMENT_MODES, installWindowsProcessContainment, type WindowsProcessContainment } from './windows-job.ts'
 import { attachTransportRuntime, type FetchDispatch } from './transport-runtime.ts'
 import { createProcessTransportPort } from './transport-process.ts'
 
@@ -53,15 +53,20 @@ export interface RuntimeReadyMessage {
 
 /**
  * D4 acceptance report (Windows only, `DSH_D4_ACCEPTANCE=1`): published
- * after the job containment installed and before the composition boots,
- * naming the two long-lived descendants the contained root spawned — by
- * birth they are members of the root's job. The acceptance harness waits
- * for readiness, force-kills the root with a single-process kill, and the
- * OS must end both descendants when the last job handle closes.
+ * after the job containment installed and before the composition boots.
+ * `product-job` mode names the two long-lived descendants the contained
+ * root spawned — by birth they are members of the root's job — and the
+ * acceptance harness waits for readiness, force-kills the root with a
+ * single-process kill, and the OS must end both descendants when the last
+ * job handle closes. `externally-contained` mode reports the fallback: no
+ * product job exists, there are no contained descendants to drill, and the
+ * harness must not count the run as a D4 validation.
  */
 export interface RuntimeD4ReportMessage {
   type: 'd4.acceptance-report'
-  descendants: number[]
+  mode: 'product-job' | 'externally-contained'
+  /** Present in `product-job` mode only: the two long-lived descendants. */
+  descendants?: number[]
 }
 
 /**
@@ -139,18 +144,36 @@ async function main(): Promise<void> {
     // A failure here fails the boot loud: a contained runtime is a desktop
     // invariant, not a best effort.
     containment = await installWindowsProcessContainment()
+    if (containment.mode === CONTAINMENT_MODES.externallyContained) {
+      // Loud and structured: the boot continues (the OS keeps the tree
+      // contained in the outer job) but D4 must never be read as validated
+      // in this mode — an externally owned job does not carry the
+      // product's generation-scoped KILL_ON_JOB_CLOSE semantics.
+      const flags = containment.outerJobLimitFlags
+      process.stderr.write(
+        `${BIN_NAME}: d4 fallback: this process tree is already a member of an externally owned Job Object `
+        + `(outer job limit flags: ${flags !== undefined ? `0x${flags.toString(16)}` : 'not queryable from here'}). `
+        + 'The product Job Object is NOT installed and D4 is NOT validated in this mode; the outer job owns tree containment.\n',
+      )
+    }
     // D4 acceptance (Windows only): with the job already installed, the
     // contained root proves the kernel contract — two long-lived
     // descendants join the job by birth, their pids are reported, and the
     // harness force-kills this root with a single-process kill; the OS must
-    // end both descendants when the last job handle closes.
+    // end both descendants when the last job handle closes. In fallback
+    // mode there is no product job to drill: the report says so and the
+    // harness must not count the run as a D4 validation.
     if (process.platform === 'win32' && process.env.DSH_D4_ACCEPTANCE === '1') {
-      const descendants = [0, 1].map(() => {
-        const sleeper = spawn(process.execPath, ['-e', `setTimeout(() => {}, ${String(D4_SLEEP_MS)})`], { stdio: 'ignore' })
-        if (sleeper.pid === undefined) throw new Error(`${BIN_NAME}: D4 descendant spawn returned no pid`)
-        return sleeper.pid
-      })
-      process.send({ type: 'd4.acceptance-report', descendants } satisfies RuntimeD4ReportMessage)
+      if (containment.mode === CONTAINMENT_MODES.externallyContained) {
+        process.send({ type: 'd4.acceptance-report', mode: 'externally-contained' } satisfies RuntimeD4ReportMessage)
+      } else {
+        const descendants = [0, 1].map(() => {
+          const sleeper = spawn(process.execPath, ['-e', `setTimeout(() => {}, ${String(D4_SLEEP_MS)})`], { stdio: 'ignore' })
+          if (sleeper.pid === undefined) throw new Error(`${BIN_NAME}: D4 descendant spawn returned no pid`)
+          return sleeper.pid
+        })
+        process.send({ type: 'd4.acceptance-report', mode: 'product-job', descendants } satisfies RuntimeD4ReportMessage)
+      }
     }
     const home = resolveDshHome()
     const profile = prepareDesktopProfile(INSTALL_ANCHOR, home)

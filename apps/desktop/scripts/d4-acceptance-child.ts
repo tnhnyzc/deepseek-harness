@@ -10,7 +10,7 @@
  */
 
 import { spawn } from 'node:child_process'
-import { installWindowsProcessContainment } from '../../desktop-runtime/src/windows-job.ts'
+import { CONTAINMENT_MODES, installWindowsProcessContainment } from '../../desktop-runtime/src/windows-job.ts'
 
 if (process.platform !== 'win32') {
   process.stderr.write('d4-acceptance-child: Windows-only gate\n')
@@ -18,6 +18,12 @@ if (process.platform !== 'win32') {
 }
 
 const containment = await installWindowsProcessContainment()
+if (containment.mode === CONTAINMENT_MODES.externallyContained) {
+  // Outer job: no product job exists to drill. Report the fallback and
+  // exit cleanly; the harness must not count this as a D4 validation.
+  process.stdout.write(`${JSON.stringify({ mode: 'externally-contained' })}\n`)
+  process.exit(0)
+}
 // The controller must stay referenced: release is what closes the job
 // handle on a graceful end, and process exit is the backstop kill.
 void containment
@@ -27,6 +33,6 @@ const descendants = [0, 1].map(() => {
   if (child.pid === undefined) throw new Error('d4-acceptance-child: descendant spawn returned no pid')
   return child.pid
 })
-process.stdout.write(`${JSON.stringify({ descendants })}\n`)
+process.stdout.write(`${JSON.stringify({ mode: 'product-job', descendants })}\n`)
 // Stay alive: the harness's forced root kill is the event under test.
 setInterval(() => {}, 120_000)

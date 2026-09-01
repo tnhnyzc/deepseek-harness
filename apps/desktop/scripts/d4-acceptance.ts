@@ -16,10 +16,19 @@
  *   (no flag)            the source tree under the harness's Node with the
  *                        real windows-job module (developer iteration)
  *
+ * Outer-job hosts (hosted CI runners, service hosts) already place the
+ * process tree in an externally owned Job Object: the product job cannot
+ * be installed, the runtime boots in its `externally-contained` fallback,
+ * and this gate must NOT count the run as a D4 validation. It then exits 0
+ * with a loud `SKIP (externally contained)` marker so the CI lane can
+ * run; a real D4 validation comes from an unjobbed launch context where
+ * the product Job Object assignment succeeds.
+ *
  * Run from the repository root:
  *   node --import tsx/esm apps/desktop/scripts/d4-acceptance.ts --packaged "apps/desktop/out/DeepSeek Harness Desktop-win32-x64"
  *   node --import tsx/esm apps/desktop/scripts/d4-acceptance.ts
- * Exit codes: 0 pass, 1 acceptance failure, 2 not a Windows host or bad usage.
+ * Exit codes: 0 pass or loud external-containment skip, 1 acceptance
+ * failure, 2 not a Windows host or bad usage.
  */
 
 import { execFileSync, fork, spawn, spawnSync, type ChildProcess } from 'node:child_process'
@@ -156,16 +165,19 @@ if (options.packagedArtifact !== undefined) {
     return child
   }
 
-  let report: { descendants: number[] } | undefined
+  let report: { mode: 'product-job'; descendants: number[] } | { mode: 'externally-contained' } | undefined
   let readyVersion: string | undefined
-  let root = forkRuntime(true)
+  root = forkRuntime(true)
   root.stdout?.on('data', (chunk: Buffer) => { process.stdout.write(`[d4-root] ${String(chunk)}`) })
   root.stderr?.on('data', (chunk: Buffer) => { process.stderr.write(`[d4-root] ${String(chunk)}`) })
-  root.on('message', (message: { type?: unknown; descendants?: unknown; dshVersion?: unknown } | null) => {
+  root.on('message', (message: { type?: unknown; mode?: unknown; descendants?: unknown; dshVersion?: unknown } | null) => {
     if (message === null || typeof message !== 'object') return
-    if (message.type === 'd4.acceptance-report' && Array.isArray(message.descendants) && message.descendants.length === 2
+    if (message.type === 'd4.acceptance-report' && message.mode === 'externally-contained') {
+      report = { mode: 'externally-contained' }
+    } else if (message.type === 'd4.acceptance-report' && message.mode === 'product-job'
+      && Array.isArray(message.descendants) && message.descendants.length === 2
       && message.descendants.every(pid => typeof pid === 'number')) {
-      report = { descendants: message.descendants as number[] }
+      report = { mode: 'product-job', descendants: message.descendants as number[] }
     }
     if (message.type === 'runtime.ready' && typeof message.dshVersion === 'string') {
       readyVersion = message.dshVersion
@@ -185,11 +197,19 @@ if (options.packagedArtifact !== undefined) {
   }
   if (report === undefined) {
     killTree(control.pid)
-    fail('the packaged runtime never reported its D4 descendants')
+    fail('the packaged runtime never reported its D4 containment mode')
   }
   if (readyVersion !== manifest.deepseekHarnessVersion) {
     killTree(control.pid)
     fail(`packaged runtime reports dshVersion ${String(readyVersion)}, the artifact pins ${String(manifest.deepseekHarnessVersion)}`)
+  }
+  if (report.mode === 'externally-contained') {
+    killTree(control.pid)
+    process.stdout.write(
+      'd4-acceptance: SKIP (externally contained) — the packaged runtime booted healthy in the fallback under the bundled Node; '
+      + 'the product Job Object was not installed and D4 is NOT validated on this host\n',
+    )
+    process.exit(0)
   }
   process.stdout.write(`d4-acceptance: packaged runtime ready (dshVersion ${String(readyVersion)}) under the bundled Node with the job installed\n`)
   const [descA, descB] = report.descendants
@@ -239,17 +259,22 @@ const root = spawn(process.execPath, ['--import', 'tsx/esm', join(import.meta.di
 })
 if (root.pid === undefined) fail('root spawn returned no pid')
 
-let reported: { descendants: number[] } | undefined
+let reported: { mode: 'product-job'; descendants: number[] } | { mode: 'externally-contained' } | undefined
 let settled = false
 root.stdout?.on('data', (chunk: Buffer) => {
   if (settled) return
   const line = chunk.toString().trim()
   if (!line.startsWith('{')) return
   try {
-    const parsed = JSON.parse(line) as { descendants?: unknown }
-    if (!Array.isArray(parsed.descendants) || parsed.descendants.some(pid => typeof pid !== 'number')) return
+    const parsed = JSON.parse(line) as { mode?: unknown; descendants?: unknown }
+    if (parsed.mode === 'externally-contained') {
+      settled = true
+      reported = { mode: 'externally-contained' }
+      return
+    }
+    if (parsed.mode !== 'product-job' || !Array.isArray(parsed.descendants) || parsed.descendants.some(pid => typeof pid !== 'number')) return
     settled = true
-    reported = { descendants: parsed.descendants as number[] }
+    reported = { mode: 'product-job', descendants: parsed.descendants as number[] }
   } catch {
     // A partial or non-JSON line; keep waiting for the report.
   }
@@ -262,11 +287,23 @@ const start = Date.now()
 while (reported === undefined && !rootExited && Date.now() - start < READY_TIMEOUT_MS) {
   await sleep(100)
 }
-if (reported === undefined || reported.descendants.length !== 2) {
+if (reported === undefined) {
   killTree(control.pid)
   fail(rootExited
     ? `root exited before reporting (code ${String(rootExitCode)}): the containment install or child boot failed`
     : `root did not report within ${String(READY_TIMEOUT_MS)} ms (tsx/koffi boot too slow)`)
+}
+if (reported.mode === 'externally-contained') {
+  killTree(control.pid)
+  process.stdout.write(
+    'd4-acceptance: SKIP (externally contained) — the source-mode root installed in the fallback; '
+    + 'the product Job Object was not installed and D4 is NOT validated on this host\n',
+  )
+  process.exit(0)
+}
+if (reported.descendants.length !== 2) {
+  killTree(control.pid)
+  fail('root reported a malformed descendant list')
 }
 const [descA, descB] = reported.descendants
 if (descA === undefined || descB === undefined) fail('root reported a malformed descendant list')

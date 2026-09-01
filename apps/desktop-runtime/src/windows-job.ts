@@ -15,6 +15,16 @@
  * The supervisor's stage-9 tree cleanup remains the fallback for the
  * window where this installation has not yet happened (early boot death).
  *
+ * Outer jobs: hosts whose launch context already places the process tree
+ * in a Job Object (hosted CI runners, service hosts) cannot be joined by a
+ * second job — a process already member of a job is refused with
+ * ERROR_ACCESS_DENIED. `IsProcessInJob` (or the assignment rejection as
+ * the proof) detects that case, and the install then returns the
+ * `externally-contained` fallback: the OS still kernel-contains the whole
+ * tree in the outer job, the product job is not installed, the boot
+ * reports the fallback loud, and D4 is NOT claimed validated there.
+ * Every other failure still fails the boot closed.
+ *
  * The Win32 surface used here is frozen Windows ABI since XP, mirrored
  * field-for-field from the SDK headers (winnt.h, as mirrored by Wine's
  * `include/winnt.h` and Microsoft's API reference):
@@ -82,8 +92,33 @@ export const KILL_ON_JOB_CLOSE = 0x2000
 /** JOBOBJECTINFOCLASS.JobObjectExtendedLimitInformation (winnt.h). */
 export const JOB_OBJECT_EXTENDED_LIMIT_INFORMATION = 9
 
+/**
+ * The containment mode a process runs in. `product-job` is the D4 contract:
+ * this process's own job object contains its tree. `externally-contained`
+ * is the fallback for hosts where the process tree is ALREADY a member of
+ * an externally owned job (CI runners, service hosts): a fresh, empty,
+ * fully-privileged job cannot take a member away, so the product job is not
+ * installed — the OS keeps the tree contained in the outer job, and D4 is
+ * NOT validated in this mode. `supervisor-owned` is the non-Windows no-op
+ * (the supervisor owns process-group cleanup).
+ */
+export const CONTAINMENT_MODES = {
+  productJob: 'product-job',
+  externallyContained: 'externally-contained',
+  supervisorOwned: 'supervisor-owned',
+} as const
+
+/** One containment mode. */
+export type ContainmentMode = (typeof CONTAINMENT_MODES)[keyof typeof CONTAINMENT_MODES]
+
 /** OpenProcess right required by AssignProcessToJobObject (winnt.h). */
 const PROCESS_SET_QUOTA = 0x100
+
+/** ERROR_ACCESS_DENIED (winerror.h): the assignment-rejection outer-job proof. */
+const ERROR_ACCESS_DENIED = 5
+
+/** S_OK (winnt.h): IsProcessInJob succeeded. */
+const S_OK = 0
 
 /**
  * The verified 64-bit (LP64: x64 and arm64) sizes and offsets of the job
@@ -105,6 +140,10 @@ export interface JobKoffi {
   load(path: string): { func(convention: string, name: string, result: string, args: string[]): (...args: unknown[]) => unknown }
   struct(name: string, fields: Record<string, unknown>): unknown
   sizeof(type: unknown): number
+  /** Encode a value into a scratch buffer usable as a pointer out-parameter. */
+  encode(type: unknown, value: unknown): Buffer
+  /** Decode the scratch buffer an out-parameter call wrote through. */
+  decode(type: unknown, buffer: Buffer): unknown
 }
 
 /**
@@ -149,30 +188,77 @@ export function buildWindowsJobStructs(koffi: JobKoffi): { basic: unknown; io: u
  * Process-tree containment for the current process.
  */
 export interface WindowsProcessContainment {
+  /** The containment mode this process runs in (see {@link CONTAINMENT_MODES}). */
+  readonly mode: ContainmentMode
   /**
-   * Release the job handle. When the process tree is already quiescent the
-   * close is a no-op; when members still outlive the root (a hung dispose),
-   * closing a KILL_ON_JOB_CLOSE job terminates them. Idempotent; process
-   * exit closing the handle is the backstop either way.
+   * Fallback mode only: the outer job's `LimitFlags` when the
+   * NULL-handle job query succeeded from this process; absent when the
+   * outer job does not grant the query.
+   */
+  readonly outerJobLimitFlags?: number
+  /**
+   * Release the job handle. Product-job mode: when the process tree is
+   * already quiescent the close is a no-op; when members still outlive the
+   * root (a hung dispose), closing a KILL_ON_JOB_CLOSE job terminates
+   * them. Fallback and supervisor modes: a no-op (no product handle
+   * exists). Idempotent; process exit closing the handle is the backstop
+   * either way.
    */
   release(): void
 }
 
 /**
  * Install the containment for this process.
- * @returns the containment controller on Windows; a no-op controller
- * elsewhere (POSIX containment is process-group signaling owned by the
- * supervisor).
- * @throws on Windows when the job object cannot be created or this
- * process cannot be assigned to it — a contained runtime is a desktop
- * invariant, so boot fails loud instead of running uncontained.
+ * @returns the containment controller on Windows; a supervisor-owned no-op
+ * controller elsewhere (POSIX containment is process-group signaling owned
+ * by the supervisor).
+ * @throws on Windows when the job object cannot be created, its limit block
+ * cannot be set, or this process cannot be assigned to it for any reason
+ * other than a proven pre-existing outer job membership — a contained
+ * runtime is a desktop invariant, so boot fails loud instead of running
+ * uncontained. A proven outer job instead returns the
+ * `externally-contained` fallback controller (the OS keeps the tree
+ * contained in the outer job).
  */
 export async function installWindowsProcessContainment(): Promise<WindowsProcessContainment> {
   if (process.platform !== 'win32') {
-    return { release: () => {} }
+    return { mode: CONTAINMENT_MODES.supervisorOwned, release: () => {} }
   }
   const koffi = (await import('koffi')).default as unknown as JobKoffi
   return createWindowsJobContainment(koffi)
+}
+
+/**
+ * The zeroed extended limit block: no limit is enabled in the query buffer
+ * (read-only) and every field but LimitFlags stays zero in the product-job
+ * set (no accidental limits are enabled).
+ */
+function zeroExtendedLimits(): Record<string, unknown> {
+  return {
+    BasicLimitInformation: {
+      PerProcessUserTimeLimit: 0,
+      PerJobUserTimeLimit: 0,
+      LimitFlags: 0,
+      MinimumWorkingSetSize: 0,
+      MaximumWorkingSetSize: 0,
+      ActiveProcessLimit: 0,
+      Affinity: 0,
+      PriorityClass: 0,
+      SchedulingClass: 0,
+    },
+    IoInfo: {
+      ReadOperationCount: 0,
+      WriteOperationCount: 0,
+      OtherOperationCount: 0,
+      ReadTransferCount: 0,
+      WriteTransferCount: 0,
+      OtherTransferCount: 0,
+    },
+    ProcessMemoryLimit: 0,
+    JobMemoryLimit: 0,
+    PeakProcessMemoryUsed: 0,
+    PeakJobMemoryUsed: 0,
+  }
 }
 
 /**
@@ -180,10 +266,21 @@ export async function installWindowsProcessContainment(): Promise<WindowsProcess
  * it. Exported separately so tests inject a recorded koffi stand-in; the
  * platform gate and the koffi import stay in
  * {@link installWindowsProcessContainment}.
+ *
+ * Outer-job detection, before and as a proof: `IsProcessInJob` (kernel32,
+ * Windows 10 1809+) is probed first; when it is missing or fails the probe
+ * is unusable and the product path runs, where an assignment rejected with
+ * ERROR_ACCESS_DENIED is itself the proof — a fresh, empty, fully
+ * privileged job can only refuse a member the process already belongs to
+ * in an outer job. Either proof returns the `externally-contained`
+ * fallback controller (the OS keeps the whole tree contained in the outer
+ * job); every other failure throws.
  * @param koffi - the koffi module (or a test stand-in with its surface).
- * @returns the containment controller owning the job handle.
+ * @returns the containment controller: the job handle in product mode, the
+ * no-op fallback controller in the outer-job cases.
  * @throws with the failing Win32 function name and error code when any
- * step fails; handles opened before the failure are closed.
+ * step fails outside the proven outer-job cases; handles opened before the
+ * failure are closed.
  */
 export function createWindowsJobContainment(koffi: JobKoffi): WindowsProcessContainment {
   const kernel32 = koffi.load('kernel32.dll')
@@ -205,6 +302,19 @@ export function createWindowsJobContainment(koffi: JobKoffi): WindowsProcessCont
   const assign = kernel32.func('__stdcall', 'AssignProcessToJobObject', 'int32', ['void *', 'void *'])
   const closeHandle = kernel32.func('__stdcall', 'CloseHandle', 'int32', ['void *'])
   const lastError = kernel32.func('__stdcall', 'GetLastError', 'uint32', [])
+  // A NULL job handle queries the calling process's own job.
+  const queryJobObject = kernel32.func('__stdcall', 'QueryInformationJobObject', 'int32', [
+    'void *', 'uint32', 'void *', 'uint32', 'uint32 *',
+  ])
+  // IsProcessInJob landed in kernel32 with Windows 10 1809: on older hosts
+  // the export is missing, and koffi throws at the func() declaration — an
+  // unusable probe, never a boot failure.
+  let isProcessInJob: ((...args: unknown[]) => unknown) | undefined
+  try {
+    isProcessInJob = kernel32.func('__stdcall', 'IsProcessInJob', 'int32', ['uint32 *'])
+  } catch {
+    isProcessInJob = undefined
+  }
 
   // The FFI boundary: koffi results are unknown until used; the code only
   // ever reaches the diagnostic message.
@@ -224,42 +334,70 @@ export function createWindowsJobContainment(koffi: JobKoffi): WindowsProcessCont
     }
   }
 
+  /**
+   * The fallback controller: no product job exists (nothing to release);
+   * the outer job's limit flags are recorded when the NULL-handle query
+   * grants them, for the boot diagnostic.
+   */
+  const fallback = (): WindowsProcessContainment => {
+    let outerJobLimitFlags: number | undefined
+    try {
+      const limitsBuffer = koffi.encode(extended, zeroExtendedLimits())
+      const lengthBuffer = koffi.encode('uint32', 0)
+      if (queryJobObject(null, JOB_OBJECT_EXTENDED_LIMIT_INFORMATION, limitsBuffer, koffi.sizeof(extended), lengthBuffer) === 1) {
+        const info = koffi.decode(extended, limitsBuffer) as { BasicLimitInformation: { LimitFlags: number } }
+        outerJobLimitFlags = info.BasicLimitInformation.LimitFlags
+      }
+    } catch {
+      // The outer job does not grant the query from this process: the
+      // flags stay absent and the diagnostic says so.
+    }
+    return {
+      mode: CONTAINMENT_MODES.externallyContained,
+      ...(outerJobLimitFlags !== undefined ? { outerJobLimitFlags } : {}),
+      release: () => {},
+    }
+  }
+
+  // Probe first: a usable `IsProcessInJob` S_OK answer settles the outer-
+  // job case without creating a job this process cannot join.
+  if (isProcessInJob !== undefined) {
+    try {
+      const memberBuffer = koffi.encode('uint32', 0)
+      if (isProcessInJob(memberBuffer) === S_OK && koffi.decode('uint32', memberBuffer) === 1) {
+        return fallback()
+      }
+    } catch {
+      // The call failed: the probe is unusable; the assignment below proves
+      // the same case by rejection.
+    }
+  }
+
   const job = createJobObject(null, null)
   if (job === null) throw failed('CreateJobObjectW', lastError())
   let selfHandle: unknown = null
   try {
-    const limits = {
-      BasicLimitInformation: {
-        PerProcessUserTimeLimit: 0,
-        PerJobUserTimeLimit: 0,
-        LimitFlags: KILL_ON_JOB_CLOSE,
-        MinimumWorkingSetSize: 0,
-        MaximumWorkingSetSize: 0,
-        ActiveProcessLimit: 0,
-        Affinity: 0,
-        PriorityClass: 0,
-        SchedulingClass: 0,
-      },
-      IoInfo: {
-        ReadOperationCount: 0,
-        WriteOperationCount: 0,
-        OtherOperationCount: 0,
-        ReadTransferCount: 0,
-        WriteTransferCount: 0,
-        OtherTransferCount: 0,
-      },
-      ProcessMemoryLimit: 0,
-      JobMemoryLimit: 0,
-      PeakProcessMemoryUsed: 0,
-      PeakJobMemoryUsed: 0,
-    }
+    const limits = zeroExtendedLimits()
+    const basicLimits = limits.BasicLimitInformation as Record<string, unknown>
+    basicLimits.LimitFlags = KILL_ON_JOB_CLOSE
     if (!setInformation(job, JOB_OBJECT_EXTENDED_LIMIT_INFORMATION, limits, koffi.sizeof(extended))) {
       throw failed('SetInformationJobObject', lastError())
     }
     const pid = getCurrentProcessId()
     selfHandle = openProcess(PROCESS_SET_QUOTA, 0, pid)
     if (selfHandle === null) throw failed('OpenProcess', lastError())
-    if (!assign(job, selfHandle)) throw failed('AssignProcessToJobObject', lastError())
+    if (!assign(job, selfHandle)) {
+      const code = lastError()
+      if (code === ERROR_ACCESS_DENIED) {
+        // A fresh, empty job with full creator rights refuses only a
+        // process already member of an outer job: proven fallback case.
+        closeHandle(selfHandle)
+        selfHandle = null
+        closeHandle(job)
+        return fallback()
+      }
+      throw failed('AssignProcessToJobObject', code)
+    }
   } catch (error) {
     if (selfHandle !== null) closeHandle(selfHandle)
     closeHandle(job)
@@ -268,6 +406,7 @@ export function createWindowsJobContainment(koffi: JobKoffi): WindowsProcessCont
 
   let released = false
   return {
+    mode: CONTAINMENT_MODES.productJob,
     release: () => {
       if (released) return
       released = true
