@@ -112,6 +112,9 @@ describe('createWindowsJobContainment', () => {
     }
     for (const value of Object.values(limits.IoInfo)) expect(value).toBe(0)
     expect(limits.ProcessMemoryLimit).toBe(0)
+    // The fourth argument is the buffer length current kernels verify; an
+    // omitted or wrong length is ERROR_MORE_DATA (24) on the real OS.
+    expect(setCall.args[3]).toBe(WINDOWS_JOB_ABI.extendedLimitSize)
     // The extended struct embeds the basic and io structs (the flag is in
     // the basic block, not a flat sibling field).
     const extendedDecl = structs.find(s => s.name === 'JOBOBJECT_EXTENDED_LIMIT_INFORMATION')

@@ -58,6 +58,13 @@
  * process handle passed to `AssignProcessToJobObject` needs
  * `PROCESS_SET_QUOTA` (0x0100).
  *
+ * Current SDKs declare a fourth `SetInformationJobObject` parameter — the
+ * information buffer length, which current kernels verify (an omitted
+ * length leaves the register undefined and the call fails with
+ * ERROR_MORE_DATA, 24). Older kernels ignore the extra register, so the
+ * four-argument form is the portable one; the CI probe executes the call
+ * against the shipping kernel to keep this verified.
+ *
  * The koffi structs below reproduce exactly that layout; the install
  * refuses to run when koffi computes a different size, and the Windows CI
  * lane compiles a C probe against the real SDK headers and cross-checks
@@ -185,11 +192,13 @@ export function createWindowsJobContainment(koffi: JobKoffi): WindowsProcessCont
   // declared before the struct exists is an unknown type.
   const { basic, io, extended } = buildWindowsJobStructs(koffi)
   const createJobObject = kernel32.func('__stdcall', 'CreateJobObjectW', 'void *', ['void *', 'str16'])
-  // lpJobObjectExtendedLimitInfo is a pointer to the structure (LP…);
-  // declaring the struct itself passes it by value and the OS answers
-  // ERROR_MORE_DATA (24) instead of applying the limits.
+  // Current SDKs declare the fourth parameter (the information buffer
+  // length, verified by the kernel — omitting it leaves the register
+  // undefined and the call fails with ERROR_MORE_DATA, 24). Older
+  // kernels ignore the extra register, so the 4-argument form is the
+  // forward- and backward-compatible one.
   const setInformation = kernel32.func('__stdcall', 'SetInformationJobObject', 'int32', [
-    'void *', 'uint32', 'JOBOBJECT_EXTENDED_LIMIT_INFORMATION *',
+    'void *', 'uint32', 'JOBOBJECT_EXTENDED_LIMIT_INFORMATION *', 'uint32',
   ])
   const getCurrentProcessId = kernel32.func('__stdcall', 'GetCurrentProcessId', 'uint32', [])
   const openProcess = kernel32.func('__stdcall', 'OpenProcess', 'void *', ['uint32', 'uint32', 'uint32'])
@@ -244,7 +253,7 @@ export function createWindowsJobContainment(koffi: JobKoffi): WindowsProcessCont
       PeakProcessMemoryUsed: 0,
       PeakJobMemoryUsed: 0,
     }
-    if (!setInformation(job, JOB_OBJECT_EXTENDED_LIMIT_INFORMATION, limits)) {
+    if (!setInformation(job, JOB_OBJECT_EXTENDED_LIMIT_INFORMATION, limits, koffi.sizeof(extended))) {
       throw failed('SetInformationJobObject', lastError())
     }
     const pid = getCurrentProcessId()

@@ -3,7 +3,10 @@
  * `windows-job-abi-probe.c` with the Visual Studio toolchain's cl.exe
  * against the machine's real SDK headers, runs it, and asserts that the C
  * compiler's sizes, offsets, and constants equal both the verified SDK
- * values and the koffi declaration in `src/windows-job.ts`. The fake-Win32
+ * values and the koffi declaration in `src/windows-job.ts`. The probe also
+ * executes one real `SetInformationJobObject` call (four-argument form with
+ * the buffer length, on a memberless job), so a kernel that rejects the
+ * layout or signature fails here on the shipping machine. The fake-Win32
  * unit test proves the call sequence; only this gate and the D4 acceptance
  * run prove the layout against the real kernel.
  *
@@ -119,8 +122,16 @@ try {
   }
   const output = execFileSync(probeExe, [], { encoding: 'utf8' })
   const reported: Record<string, number> = {}
+  let setInfoOk = Number.NaN
+  let setInfoErr = Number.NaN
   for (const line of output.split('\n')) {
-    const [key, value] = line.trim().split(' ')
+    const fields = line.trim().split(/\s+/)
+    const [key, value] = fields
+    if (key === 'SET_INFO') {
+      setInfoOk = Number(fields[1])
+      setInfoErr = Number(fields[2])
+      continue
+    }
     if (key === undefined || value === undefined) continue
     reported[key] = value.startsWith('0x') ? Number.parseInt(value, 16) : Number(value)
   }
@@ -129,6 +140,9 @@ try {
     if (actual !== expected) {
       fail(`SDK header ${key} is ${String(actual)}, expected ${String(expected)}: the Win32 job ABI changed; re-verify against the SDK before shipping`)
     }
+  }
+  if (setInfoOk !== 1 || setInfoErr !== 0) {
+    fail(`SetInformationJobObject on this machine returned ${String(setInfoOk)} (win32 error ${String(setInfoErr)}): the kernel no longer accepts the 144-byte extended limit block with its buffer length — re-verify the Win32 job ABI against this OS before shipping`)
   }
   process.stdout.write(`check-windows-job-abi: SDK headers — basic ${String(reported.BASIC_LIMIT_SIZE)}, io ${String(reported.IO_COUNTERS_SIZE)}, extended ${String(reported.EXTENDED_LIMIT_SIZE)} bytes; LimitFlags @ ${String(reported.LIMIT_FLAGS_OFFSET)}; KILL_ON_JOB_CLOSE 0x${String(reported.KILL_ON_JOB_CLOSE.toString(16))}; info class ${String(reported.INFO_CLASS)}\n`)
 
@@ -149,7 +163,7 @@ try {
       fail(`koffi sizeof(${name}) is ${String(actual)}, the pinned ABI constant is ${String(WINDOWS_JOB_ABI.extendedLimitSize)}`)
     }
   }
-  process.stdout.write(`check-windows-job-abi: PASS — koffi mirrors the SDK layout (${String(reported.EXTENDED_LIMIT_SIZE)}-byte extended limit block)\n`)
+  process.stdout.write(`check-windows-job-abi: PASS — koffi mirrors the SDK layout (${String(reported.EXTENDED_LIMIT_SIZE)}-byte extended limit block); SetInformationJobObject accepted the extended limits on this kernel\n`)
   process.exit(0)
 } finally {
   rmSync(workDir, { recursive: true, force: true })
