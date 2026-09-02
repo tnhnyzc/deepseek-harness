@@ -11,7 +11,8 @@
  * provider (the parity seam) and the patched directory dialog.
  * Self-skips without a built app or a GUI session.
  */
-import { existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { realpath } from 'node:fs/promises'
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
@@ -262,7 +263,10 @@ describe.skipIf(!guiAvailable() || !runtimeBuilt)('desktop UX', () => {
     userData = join(work, 'user-data')
     home = join(userData, 'harness')
     mkdirSync(join(work, 'ux-ws'), { recursive: true })
-    workspaceDir = realpathSync(join(work, 'ux-ws'))
+    // Same identity canon as the packaged smoke: seed through the product's
+    // realpathNormalize (fs.realpath) so the stored path is a fixed point of
+    // the attach-time cwd check (8.3 short temp roots on the windows runner).
+    workspaceDir = await realpath(join(work, 'ux-ws'))
     seedWorkspaceRegistry(home, workspaceDir)
     app = await launchApp()
     win = await app.firstWindow()

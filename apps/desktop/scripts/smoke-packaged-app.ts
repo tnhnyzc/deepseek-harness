@@ -41,7 +41,8 @@
  */
 
 import { spawn, spawnSync, type ChildProcess } from 'node:child_process'
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
+import { realpath } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import type { AddressInfo } from 'node:net'
@@ -433,12 +434,17 @@ export async function runPackagedAppSmoke(artifact: string, platform: NodeJS.Pla
   const providerUrl = `http://127.0.0.1:${(provider.address() as AddressInfo).port}`
   let app: PackagedApp | undefined
   try {
-    // The workspace path is realpath'd because the client validates the
-    // session cwd against the stored workspace path through realpath: on
-    // macOS and many Linux hosts the temp root is a symlink (/var -> /private).
+    // Seed the workspace path through the product's own identity canon
+    // (realpathNormalize == fs.realpath from node:fs/promises), not the sync
+    // realpathSync: attachSession re-canonicalizes the session cwd and
+    // compares it string-equal to the stored path, so the seed must be a fixed
+    // point of that exact function. On the GitHub windows runner %TEMP% is an
+    // 8.3 short name (C:\Users\RUNNER~1\...) where the sync and promise forms
+    // disagree; on macOS and many Linux hosts the temp root is a symlink
+    // (/var -> /private).
     const rawWorkspaceDir = join(work, 'workspace')
     mkdirSync(rawWorkspaceDir, { recursive: true })
-    const workspaceDir = realpathSync(rawWorkspaceDir)
+    const workspaceDir = await realpath(rawWorkspaceDir)
     writeFileSync(join(workspaceDir, 'keep.txt'), 'workspace\n')
     seedWorkspaceRegistry(home, workspaceDir)
 
