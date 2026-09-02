@@ -316,7 +316,14 @@ export function createRuntimeSupervisor(options: RuntimeSupervisorOptions): Runt
       '}',
     ].join('\n')
     try {
-      const worker = spawn('powershell', ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-Command', script], { stdio: 'ignore', windowsHide: true })
+      // Resolve PowerShell by its stable system path, not the bare name: the
+      // shell may run under a constrained PATH (the packaged-app smoke pins
+      // PATH to system32) that lacks the WindowsPowerShell\v1.0 directory,
+      // and a failed spawn emits 'error' asynchronously — an unhandled one
+      // takes the shell down inside this exit handler. Cleanup is best-effort,
+      // so the error is swallowed and the orphans simply remain.
+      const worker = spawn('C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe', ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-Command', script], { stdio: 'ignore', windowsHide: true })
+      worker.on('error', () => {})
       worker.unref()
     } catch {
       // No PowerShell: cleanup stays best-effort; the orphans remain and

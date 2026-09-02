@@ -40,6 +40,7 @@ Status: implemented
 - asar 必须镜像开发检出布局(`dist/main` + `src/preload`,清单带 `type: module`):外壳在两个世界都通过 `getAppPath() + '/src/preload/index.cjs'` 解析 preload。被压平的 asar 表现为静默 preload ENOENT 与 renderer 在首次 IPC 上的崩溃。
 - 打包运行时可执行文件位于 `resources/node/<target>/node`——外壳的路径表达式与暂存布局必须一致,否则首次启动以 spawn ENOENT 失败。
 - session 工作区附着校验把 session cwd 与存储的工作区路径做单边比较:先用产品的 `realpathNormalize`(`node:fs/promises` 的 `fs.realpath`)把 cwd 规范化,再与按原样存储的路径做字符串相等比较,因此存储路径本身必须已经是该确切规范化的不动点。`registry.create()` 在存储前先规范化;绕过它的播种必须走同一个 `realpathNormalize` 而非同步 `realpathSync` —— GitHub windows runner 的 `%TEMP%` 是 8.3 短名(`C:\Users\RUNNER~1\...`),同步与 Promise 两种形式在那里结果不同;在 macOS 与许多 Linux 主机上临时根是符号链接(`/var` → `/private/var`)。
+- Windows 上的死代清理按稳定的系统路径(`C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe`)而非裸名解析 PowerShell,并给该 spawn 挂上 `'error'` 监听:shell 可能运行在受限 PATH 下(打包 app 冒烟把 PATH 钉死到 `system32`),其中没有 `WindowsPowerShell\v1.0` 目录,而失败的 `spawn` 是异步发出 `'error'` 的——未被处理的一个会在退出处理器内把 shell 拖垮,使崩溃/重启演练卡死(DevTools HTTP 与 renderer CDP 双双不可达)。
 - 运行时子进程收到的是策划过的环境,不是 shell 的:测试专用的 `DSH_DESKTOP_SMOKE=1` 门必须经监督者的 `extraEnv` 转发,运行时才会发布冒烟事实、桥才会暴露冒烟方法。
 - 发行归档是 `DeepSeek Harness Desktop-<version>-<platform>-<arch>.zip`(macOS 用 `ditto`、Windows 用 PowerShell `Compress-Archive`)或 `.tar.gz`(Linux 用 `tar`),各带 `.sha256` 侧车——在 fuse 与签名之后创建,所以归档携带的是定稿字节。
 - `@electron/fuses` 的 `FuseV1Options` 是数值枚举:`Object.values` 返回名称与值两个方向,所以 fuse 迭代必须用显式数值索引列表。

@@ -410,6 +410,65 @@ async function waitForPage(page: CdpPage, expression: string, timeoutMs: number,
 }
 
 /**
+ * Forensics for a stalled crash/restart drill: who is still alive and who is
+ * still running. `1 + 1` proves the renderer's JS thread; `root.dataset.state`
+ * shows whether the shell has projected the failure at all (a live renderer
+ * that never leaves its pre-crash state means the shell never sent the
+ * transition); the DevTools HTTP endpoint (served by the shell's browser
+ * process) is reachable while the browser network stack runs.
+ * @param app - the launched packaged app (shell process + DevTools port).
+ * @param deadPid - the runtime pid the drill just killed abnormally.
+ * @param platform - the artifact's platform.
+ * @returns a compact record embedded in the failure message.
+ */
+async function gatherCrashDrillDiagnostics(
+  app: PackagedApp,
+  deadPid: number,
+  platform: NodeJS.Platform,
+): Promise<Record<string, unknown>> {
+  const pidAlive = (pid: number): boolean => {
+    if (platform === 'win32') {
+      const out = spawnSync('tasklist', ['/FI', `PID eq ${String(pid)}`, '/NH'], { encoding: 'utf8', windowsHide: true })
+      return String(out.stdout ?? '').includes(String(pid))
+    }
+    try {
+      process.kill(pid, 0)
+      return true
+    } catch {
+      return false
+    }
+  }
+  let rendererEval: string
+  let uiState: string
+  try {
+    const probe = await boundedEvaluate(app.page, '1 + 1')
+    rendererEval = `ok (${String(probe)})`
+    uiState = String(await boundedEvaluate(app.page, "(() => { const root = document.getElementById('root'); return root === null ? 'no-root' : (root.dataset.state ?? 'no-state') })()"))
+  } catch {
+    rendererEval = 'unresponsive'
+    uiState = 'unresponsive'
+  }
+  let devtoolsHttp: string
+  try {
+    const res = await fetch(`http://127.0.0.1:${String(app.cdpPort)}/json/version`, { signal: AbortSignal.timeout(3_000) })
+    devtoolsHttp = `http ${String(res.status)}`
+  } catch (error) {
+    devtoolsHttp = `unreachable (${error instanceof Error ? error.name : String(error)})`
+  }
+  return {
+    shellPid: app.pid,
+    shellExited: app.child.exitCode !== null || app.child.signalCode !== null
+      ? { code: app.child.exitCode, signal: app.child.signalCode }
+      : false,
+    deadRuntimePid: deadPid,
+    runtimeAlive: pidAlive(deadPid),
+    rendererEval,
+    uiState,
+    devtoolsHttp,
+  }
+}
+
+/**
  * Run the packaged-app smoke against one packaged artifact.
  * @param artifact - the `.app` bundle, Windows, or Linux app directory.
  * @param platform - the artifact's platform.
@@ -433,6 +492,7 @@ export async function runPackagedAppSmoke(artifact: string, platform: NodeJS.Pla
   await new Promise<void>(resolveListen => provider.listen(0, '127.0.0.1', resolveListen))
   const providerUrl = `http://127.0.0.1:${(provider.address() as AddressInfo).port}`
   let app: PackagedApp | undefined
+  let drillDeadPid: number | undefined
   try {
     // Seed the workspace path through the product's own identity canon
     // (realpathNormalize == fs.realpath from node:fs/promises), not the sync
@@ -671,6 +731,7 @@ export async function runPackagedAppSmoke(artifact: string, platform: NodeJS.Pla
       throw new Error('the crash drill needs a ready runtime with a positive pid')
     }
     const deadPid = report.childPid
+    drillDeadPid = deadPid
     if (platform === 'win32') {
       spawnSync('taskkill', ['/F', '/PID', String(deadPid)], { stdio: 'ignore', windowsHide: true })
     } else {
@@ -706,7 +767,13 @@ export async function runPackagedAppSmoke(artifact: string, platform: NodeJS.Pla
     }
     note(`crash drill: Restart brought a fresh generation to readiness (new runtime pid ${String(afterReport?.childPid)})`)
   } catch (error) {
-    failures.push(error instanceof Error ? error.message : String(error))
+    const message = error instanceof Error ? error.message : String(error)
+    if (drillDeadPid !== undefined && app !== undefined) {
+      const diagnostics = await gatherCrashDrillDiagnostics(app, drillDeadPid, platform)
+      failures.push(`${message}; crash-drill diagnostics ${JSON.stringify(diagnostics)}`)
+    } else {
+      failures.push(message)
+    }
   } finally {
     if (app !== undefined) {
       stopApp(app, platform)
