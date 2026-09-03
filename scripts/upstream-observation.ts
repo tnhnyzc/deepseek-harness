@@ -5,8 +5,10 @@
  * readiness report.
  *
  * Safety contract — this is a READ-ONLY, NON-AUTHORITATIVE probe:
- * - it fetches upstream into `FETCH_HEAD` only (never a branch, never a tag,
- *   never a merge, never the pinned SHA in `UPSTREAM.md`);
+ * - it fetches upstream into `FETCH_HEAD` only, straight from the canonical
+ *   upstream URL recorded in `UPSTREAM.md` (never a developer-local remote, so
+ *   it works in a fresh checkout; never a branch, never a tag, never a merge,
+ *   never the pinned SHA in `UPSTREAM.md`);
  * - the apply probe runs in a throwaway `git worktree` that is removed before
  *   exit, so the release checkout and branch are never touched;
  * - it ALWAYS exits 0. A fetch failure or an inapplicable delta is reported
@@ -25,7 +27,6 @@ import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 
 const repoRoot = resolve(import.meta.dirname, '..')
-const upstreamRemote = 'upstream'
 
 type Status = 'upstream-unchanged' | 'upstream-compatible' | 'upstream-needs-adaptation' | 'upstream-unknown'
 
@@ -58,13 +59,16 @@ function git(args: string[], opts: { input?: string; allowFail?: boolean } = {})
   }
 }
 
-/** The pinned revision is the single source of truth in `UPSTREAM.md`. */
-function readPin(): { sha: string; tag: string } {
+/** The pinned revision and the canonical upstream URL are the single source of truth in `UPSTREAM.md`. */
+function readPin(): { sha: string; tag: string; repo: string } {
   const text = readFileSync(join(repoRoot, 'UPSTREAM.md'), 'utf8')
   const sha = /Upstream SHA:\s*`([0-9a-f]{40})`/.exec(text)?.[1]
   const tag = /Release tag:\s*`([^`]+)`/.exec(text)?.[1]
-  if (sha === undefined || tag === undefined) throw new Error('UPSTREAM.md did not expose the pinned SHA/tag')
-  return { sha, tag }
+  const repo = /Upstream repository:\s*`([^`]+)`/.exec(text)?.[1]
+  if (sha === undefined || tag === undefined || repo === undefined) {
+    throw new Error('UPSTREAM.md did not expose the pinned SHA/tag/repo')
+  }
+  return { sha, tag, repo }
 }
 
 /** Top-level `<group>/<pkg>` histogram of the files a range changed. */
@@ -119,9 +123,10 @@ function observe(): Report {
     deltaApplies: null,
     applyError: '',
   }
-  // Read-only fetch into FETCH_HEAD only.
+  // Read-only fetch into FETCH_HEAD only, straight from the canonical upstream
+  // URL (no developer-local remote, so a fresh checkout works the same).
   try {
-    git(['fetch', upstreamRemote, 'master', '--no-tags'])
+    git(['fetch', pin.repo, 'master', '--no-tags'])
   } catch (error) {
     base.note = `upstream fetch failed (read-only observation, non-blocking): ${error instanceof Error ? error.message : String(error)}`
     return base
