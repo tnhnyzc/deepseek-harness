@@ -82,6 +82,35 @@ export function guiAvailable(): boolean {
   return process.env.DISPLAY !== undefined || process.env.WAYLAND_DISPLAY !== undefined
 }
 
+/**
+ * The PATH the smoke constrains the packaged app to: the OS runtime directories
+ * only. Nothing here resolves Node/npm/pnpm/dsh, so the runtime child — which
+ * the app forks at its explicit bundled-Node path, never a PATH lookup — is
+ * proven to be the bundled Node.
+ */
+function constrainedPath(platform: NodeJS.Platform): string {
+  return platform === 'win32' ? 'C:\\Windows\\system32;C:\\Windows' : '/usr/bin:/bin:/usr/sbin:/sbin'
+}
+
+/**
+ * Prove the constrained PATH genuinely has no Node toolchain: resolve each of
+ * node/npm/pnpm/dsh in a child spawned under that PATH and assert none is
+ * found. This makes "the packaged runtime runs the bundled Node" an executed
+ * fact rather than an inference from "the app booted".
+ */
+function assertNoRuntimeOnPath(platform: NodeJS.Platform): void {
+  const path = constrainedPath(platform)
+  for (const tool of ['node', 'npm', 'pnpm', 'dsh']) {
+    const probe = platform === 'win32'
+      ? spawnSync('where.exe', [tool], { env: { ...process.env, PATH: path }, stdio: 'pipe', windowsHide: true })
+      : spawnSync('/bin/sh', ['-c', `command -v ${tool} || true`], { env: { ...process.env, PATH: path }, stdio: 'pipe' })
+    const found = String(probe.stdout ?? '').trim()
+    if (found !== '') {
+      throw new Error(`the smoke's constrained PATH resolves ${tool} at ${found}; the packaged runtime must have no system Node toolchain`)
+    }
+  }
+}
+
 /** Locate the packaged artifact: an explicit argument, else the single platform directory under `out/`. */
 function locateArtifact(explicit: string | undefined, platform: NodeJS.Platform): string {
   if (explicit !== undefined) return resolve(explicit)
@@ -494,6 +523,9 @@ export async function runPackagedAppSmoke(artifact: string, platform: NodeJS.Pla
   let app: PackagedApp | undefined
   let drillDeadPid: number | undefined
   try {
+    // Explicit no-node proof: the PATH the app is about to run under must not
+    // resolve the Node toolchain, so the bundled Node is the only runtime.
+    assertNoRuntimeOnPath(platform)
     // Seed the workspace path through the product's own identity canon
     // (realpathNormalize == fs.realpath from node:fs/promises), not the sync
     // realpathSync: attachSession re-canonicalizes the session cwd and
@@ -517,7 +549,7 @@ export async function runPackagedAppSmoke(artifact: string, platform: NodeJS.Pla
         // variables) and constrain only PATH: the product must boot without
         // system Node/pnpm on PATH.
         ...process.env,
-        PATH: platform === 'win32' ? 'C:\\Windows\\system32;C:\\Windows' : '/usr/bin:/bin:/usr/sbin:/sbin',
+        PATH: constrainedPath(platform),
         DSH_DESKTOP_SMOKE: '1',
         DEEPSEEK_API_KEY: 'keyless-packaged-smoke',
         DEEPSEEK_BASE_URL: providerUrl,
