@@ -1476,6 +1476,38 @@ publication conflict is B1.
 
 ---
 
+## Upstream observation and re-pin (stage 12)
+
+This contract is pinned to one upstream SHA (`UPSTREAM.md`). Because DSH
+changes rapidly, two CI tracks manage the drift (SPEC §30):
+
+- **Release track (authoritative)** — `ci.yml` builds and tests **only**
+  against the pinned SHA. It is the gate that blocks a release.
+- **Observation track (non-authoritative)** —
+  `scripts/upstream-observation.ts`, run by
+  `.github/workflows/upstream-observation.yml` on a weekly schedule and on
+  manual dispatch **only** (never on `pull_request`/`push`). It fetches
+  upstream `master` into `FETCH_HEAD`, reports drift (commits ahead of the pin,
+  pin reachability, newer release tags, changed top-level paths), and runs the
+  desktop delta (pin → fork head) through `git apply --check` in a throwaway
+  worktree, reporting `upstream-compatible` / `upstream-needs-adaptation` /
+  `upstream-unchanged`. It is read-only, **always exits 0** (a finding is a
+  report, never a build failure), and never merges, writes a tag, or changes
+  the pin. A broken observation therefore can never read as a broken release.
+
+**Re-pin procedure (run deliberately, never auto-merged):** (1) select the new
+upstream SHA (a release tag is preferred); (2) inspect the upstream
+architectural changes; (3) update this contract; (4) run the full authoritative
+suite against the new SHA; (5) manually test the agent / tool / approval /
+question flows; (6) only then change the pinned SHA in `UPSTREAM.md`.
+
+**Current readiness** (observation, 2026-09-03): `upstream-needs-adaptation` —
+upstream has advanced 1834 commits since the pin and changed files the desktop
+delta touches, so the delta does not apply cleanly. Stage 12 did **not** re-pin;
+the dedicated re-pin is the next task and runs its own full validation.
+
+---
+
 ## Desktop Extension Surface
 
 Classification of every anticipated desktop need:

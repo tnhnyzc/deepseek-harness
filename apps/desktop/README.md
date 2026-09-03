@@ -106,6 +106,42 @@ Run from the repository root (monorepo convention):
 pnpm test apps/desktop  # supervisor, smoke, and protocol tests
 ```
 
+### Four-layer regression architecture (stage 12)
+
+The desktop test estate is organized into four layers that localize a failure
+to its tier; the full rationale is the
+[stage 12 Agent Note](../../.agents/notes/implemented/architecture/2026-09-03-desktop-stage12-test-architecture.md).
+
+- **A — unit**: the keyless package/unit suite (`pnpm run test`), unchanged.
+- **B — real DSH runtime, no Electron**:
+  `apps/desktop-runtime/tests/runtime-journey.spec.ts` boots the built runtime
+  under the pinned DSH and drives create → prompt → stream (the live event
+  mux) → cancel → history → shutdown over the broker's own fork-IPC transport.
+  Self-skips until the runtime is built.
+- **C — desktop integration**: the real renderer over the carrier —
+  `dsh-parity`, `dsh-event-correctness`, `dsh-crash-recovery`, `desktop-ux`,
+  and `desktop-clipboard-security` (the suites below).
+- **D — end-to-end**: `dsh-user-journey.spec.ts` (fresh profile, the real
+  picker path, the full journey, persistence/relaunch) and
+  `packaged-user-journey.spec.ts` (the extracted release archive,
+  `app.isPackaged`, the bundled Node, a workflow, clean quit + reopen, and the
+  checksum). `migration.spec.ts` proves a user's persisted data survives a
+  release upgrade.
+
+Each layer self-skips on a missing environmental precondition (no GUI, no
+built artifact). A **required** CI lane sets `DSH_DESKTOP_E2E_REQUIRED=1`,
+which turns a missing precondition into a loud `beforeAll` failure instead of
+a skip — a required lane never passes vacuously.
+
+Run a layer directly (from the repository root):
+
+```sh
+npx vitest run apps/desktop-runtime/tests/runtime-journey.spec.ts
+npx vitest run apps/desktop/tests/dsh-user-journey.spec.ts
+npx vitest run apps/desktop/tests/packaged-user-journey.spec.ts
+npx vitest run apps/desktop/tests/migration.spec.ts
+```
+
 - `tests/runtime.spec.ts` always runs: the supervisor against a fixture
   runtime over real fork IPC (state machine, death, exactly-one auto-retry
   before ready, graceful and forced process-tree shutdown, restart).

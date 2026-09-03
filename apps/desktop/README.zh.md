@@ -83,6 +83,37 @@ pnpm start              # electron . from the package root (dev)
 pnpm test apps/desktop  # supervisor, smoke, and protocol tests
 ```
 
+### 四层回归架构（第 12 阶段）
+
+桌面测试资产被组织成四个能把失败定位到其所属层级的层级；完整理由见
+[第 12 阶段 Agent Note](../../.agents/notes/implemented/architecture/2026-09-03-desktop-stage12-test-architecture.zh.md)。
+
+- **A —— 单元测试**：无密钥的包/单元测试套件（`pnpm run test`），未改动。
+- **B —— 真实 DSH 运行时，无 Electron**：
+  `apps/desktop-runtime/tests/runtime-journey.spec.ts` 在钉扎的 DSH 下启动
+  已构建的运行时，并经由 broker 自身那套 fork-IPC 传输驱动 create → prompt →
+  流（活动事件 mux）→ cancel → history → shutdown。运行时未构建前自我跳过。
+- **C —— 桌面集成**：真实渲染进程走载体 —— `dsh-parity`、
+  `dsh-event-correctness`、`dsh-crash-recovery`、`desktop-ux`、
+  `desktop-clipboard-security`（下文所列套件）。
+- **D —— 端到端**：`dsh-user-journey.spec.ts`（全新配置、真实选择器路径、
+  完整旅程、持久化/重启）与 `packaged-user-journey.spec.ts`（解压后的发布
+  归档、`app.isPackaged`、捆绑 Node、一个工作流、干净退出 + 重开、以及
+  校验和）。`migration.spec.ts` 证明用户持久化数据在发布升级后存活。
+
+每个层级在缺环境前置条件（无 GUI、无已构建工件）时自我跳过。**必需**的
+CI 车道设置 `DSH_DESKTOP_E2E_REQUIRED=1`，把缺失的前置条件变成 `beforeAll`
+里的大声失败而非跳过——必需车道绝不会空转通过。
+
+从仓库根目录直接运行某一层：
+
+```sh
+npx vitest run apps/desktop-runtime/tests/runtime-journey.spec.ts
+npx vitest run apps/desktop/tests/dsh-user-journey.spec.ts
+npx vitest run apps/desktop/tests/packaged-user-journey.spec.ts
+npx vitest run apps/desktop/tests/migration.spec.ts
+```
+
 - `tests/runtime.spec.ts` 总是运行：监督者对 fixture 运行时、经真实 fork IPC
   （状态机、死亡、ready 前恰一次自动重试、优雅与强杀进程树关闭、重启）。
 - `tests/desktop-transport.spec.ts` 总是运行：renderer 客户端对 fake port
