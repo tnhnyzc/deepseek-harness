@@ -43,3 +43,4 @@ apps/desktop/out/
 worktrees/
 .agents/worktrees/
 .typert-*/
+upstream-observation-report.md

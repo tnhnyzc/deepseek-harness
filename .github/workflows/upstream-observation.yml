@@ -1,0 +1,81 @@
+name: Upstream observation
+
+# SPEC §30, the non-authoritative track: periodically observe how far upstream
+# `deepseek-ai/deepseek-harness` has drifted from the pinned DSH revision and
+# whether the desktop delta still applies, and publish a re-pin readiness
+# report. This is a READ-ONLY, NON-BLOCKING probe:
+#   - it runs on a schedule and on manual dispatch only — never on pull_request
+#     or push — so it can never gate a release;
+#   - the script fetches upstream into FETCH_HEAD and probes in a throwaway
+#     worktree; it never merges, never writes a tag, and never changes the
+#     pinned SHA in UPSTREAM.md;
+#   - the script always exits 0 (a drift finding or a fetch failure is a
+#     report, not a failure). The authoritative release track is ci.yml, which
+#     builds and tests only against the pinned SHA.
+on:
+  schedule:
+    # Weekly; a deterministic UTC slot.
+    - cron: '0 6 * * 1'
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+env:
+  OBSERVATION_NODE_VERSION: '24'
+  DSH_TELEMETRY_DISABLED: '1'
+
+concurrency:
+  group: upstream-observation
+  cancel-in-progress: false
+
+jobs:
+  observe:
+    # A single light, standard-hosted job: git + node only. It intentionally
+    # does not consume the paid enterprise pool a periodic, non-blocking probe
+    # would otherwise sit on.
+    runs-on: ubuntu-24.04
+    name: upstream drift probe
+    steps:
+      # Full history so the pin → upstream-master and pin → fork-head ranges are
+      # computable from a single clone.
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - uses: pnpm/action-setup@v4
+        with:
+          dest: ${{ runner.temp }}/setup-pnpm
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: ${{ env.OBSERVATION_NODE_VERSION }}
+          cache: pnpm
+
+      - name: Install (immutable)
+        run: pnpm install --frozen-lockfile
+
+      - name: Run the upstream observation
+        id: observe
+        run: |
+          set -o pipefail
+          node --import tsx/esm scripts/upstream-observation.ts "$RUNNER_TEMP/upstream-observation-report.md" \
+            | tee "$RUNNER_TEMP/observation-out.txt"
+          status=$(head -n 1 "$RUNNER_TEMP/observation-out.txt")
+          echo "status=$status" >> "$GITHUB_OUTPUT"
+          {
+            echo "## Upstream observation"
+            echo
+            echo "Status: \`$status\`"
+            echo
+            echo "(Non-authoritative. The release track builds and tests only against the pinned SHA. See the uploaded report for the re-pin readiness checklist.)"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload the readiness report
+        uses: actions/upload-artifact@v4
+        with:
+          name: upstream-observation-report
+          path: ${{ runner.temp }}/upstream-observation-report.md
+          if-no-files-found: error
+          retention-days: 90
