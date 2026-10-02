@@ -703,19 +703,29 @@ describe.skipIf(!guiAvailable() || !runtimeBuilt)('desktop DSH crash recovery (s
 
   it('crashes mid-generation: the turn is interrupted, not completed, and the session resumes', async () => {
     await sendPrompt('crash stream')
-    // Cut only once a chunk is durably recorded: the recovered transcript's
-    // prefix must be provable from the log, not from flush timing.
-    await waitForLog(list => list.some(r => r.type === 'assistant/chunk' && JSON.stringify(r.data).includes('CRASHX_1')))
+    // Cut only once the stream is visibly live. v2 format: in-progress
+    // block text is renderer-side state until the block settles as
+    // `assistant/message`, and a SIGKILL never settles it — so the gate is
+    // the rendered transcript, not a durable record.
+    await expect.poll(() => bodyText().then(text => text.includes('CRASHX_1')), { timeout: 60_000 }).toBe(true)
     const before = new Set(sessionLogRecords().map(r => r.seq))
     await crashAndRestart()
     await openTurnSession()
-    await expect.poll(() => bodyText().then(text => /CRASHX_\d/.test(text)), { timeout: 60_000 }).toBe(true)
-    // The durably recorded prefix survived; nothing after the cut: the
-    // scripted tail never reached the log or the recovered transcript.
-    expect(sessionLogRecords().some(r => r.type === 'assistant/chunk' && JSON.stringify(r.data).includes('CRASHX_1'))).toBe(true)
+    // The recovered history is loaded (the durable user message renders)
+    // and shows no model text: the hard crash fabricated no partial block,
+    // so nothing of the in-progress turn is durable and the recovered
+    // transcript carries none of it (the turn's interrupted tail renders
+    // instead).
+    await expect.poll(async () => {
+      const text = await bodyText()
+      return text.includes('crash stream') && !text.includes('CRASHX_1')
+    }, { timeout: 60_000 }).toBe(true)
+    // Nothing after the cut either: the scripted tail never reached the log
+    // or the recovered transcript.
     const body = await bodyText()
     expect(body).not.toContain('CRASHX_FINAL')
     expect(sessionLogRecords().some(r => JSON.stringify(r).includes('CRASHX_FINAL'))).toBe(false)
+    expect(sessionLogRecords().some(r => JSON.stringify(r).includes('CRASHX_1'))).toBe(false)
     // The pinned persistence repair closed the interrupted tail: a turn/end
     // with the `interrupted` reason exists, and no turn ended `completed` in
     // this crash window.
@@ -900,10 +910,11 @@ describe.skipIf(!guiAvailable() || !runtimeBuilt)('desktop DSH crash recovery (s
     // crash generations.
     expect(body).toContain('interrupted after it was recorded')
     expect(/subagent/.test(body)).toBe(true)
-    // The earliest turn's durable prefix and its interrupted end survived
-    // both crash generations, with no tail token ever written.
+    // The interrupted end survived both crash generations. v2 format
+    // settles no partial block on a hard crash, so no model text of the
+    // in-progress turn was ever written — and no tail token either.
     const records = sessionLogRecords()
-    expect(records.some(r => r.type === 'assistant/chunk' && JSON.stringify(r.data).includes('CRASHX_1'))).toBe(true)
+    expect(records.some(r => JSON.stringify(r).includes('CRASHX_1'))).toBe(false)
     expect(records.some(r => JSON.stringify(r).includes('CRASHX_FINAL'))).toBe(false)
     expect([...turnEndReasons().values()]).toContain('interrupted')
     const sessions = await rpc<{ items: SessionSummary[] }>(win, 'session/list', { _request: {} }, 'crash-turn')

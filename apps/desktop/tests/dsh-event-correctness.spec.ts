@@ -315,25 +315,6 @@ function sessionLogRecords(): Array<{ seq: number; type: string; data: unknown }
   return records
 }
 
-/**
- * Durable streamed text, counted by exact `text-delta` chunk. The chunk
- * protocol (block-start / text-delta / block-end / usage / finish) repeats a
- * block's full text in its `block-end` record, so a substring count would
- * double-count; only the deltas are the streamed units.
- */
-function loggedChunkTokens(tokens: string[]): Record<string, number> {
-  const counts: Record<string, number> = {}
-  for (const token of tokens) counts[token] = 0
-  for (const record of sessionLogRecords()) {
-    if (record.type !== 'assistant/chunk') continue
-    const chunk = (record.data as { chunk?: { type?: unknown; text?: unknown } })?.chunk
-    if (chunk?.type !== 'text-delta' || typeof chunk.text !== 'string') continue
-    const current = counts[chunk.text]
-    if (current !== undefined) counts[chunk.text] = current + 1
-  }
-  return counts
-}
-
 /** How often one token occurs in a string (exact-multiplicity probe). */
 function countOccurrences(haystack: string, needle: string): number {
   let count = 0
@@ -471,38 +452,44 @@ describe.skipIf(!guiAvailable() || !runtimeBuilt)('desktop DSH event correctness
     expect(rows.filter(row => row.includes('write the burst file one')).length).toBe(1)
     expect(rows.filter(row => row.includes('write the burst file two')).length).toBe(1)
     // No partial-then-final duplication inside the finished messages.
-    const body = await win.evaluate(() => document.body.innerText)
+    // Probe the DOM (rows' textContent), not innerText: alpha.1's
+    // turn-process virtualization collapses out-of-viewport rows
+    // (`hidden="until-found"`), so innerText covers only the visible window.
+    const domText = rows.join('\u0000')
     for (const token of ['BURST_A1_', 'BURST_A2', 'BURST_B1_', 'BURST_B2', 'BURST_C1']) {
-      expect(countOccurrences(body, token), `token ${token}`).toBe(1)
+      expect(countOccurrences(domText, token), `token ${token}`).toBe(1)
     }
-    // The durable log agrees: every chunk exactly once, in the scripted
-    // order, around the two tool rounds, under one turn/end.
-    const tokens = ['BURST_A1_', 'BURST_A2', 'BURST_B1_', 'BURST_B2', 'BURST_C1']
-    const logged = loggedChunkTokens(tokens)
-    for (const token of tokens) expect(logged[token], `logged ${token}`).toBe(1)
+    // The durable log agrees (v2 format): the v2 log carries no
+    // `assistant/chunk` records; each model-visible text block settles as
+    // exactly one `assistant/message`, so multiplicity and order are
+    // asserted on the settled messages — three distinct messages in the
+    // scripted order, around the two tool rounds, under one turn/end.
     const records = sessionLogRecords()
     const seqOf = (probe: (r: { seq: number; type: string; data: unknown }) => boolean): number =>
       Math.max(-1, ...records.filter(probe).map(r => r.seq))
-    const deltaSeq = (token: string): number => seqOf((r) => {
-      const chunk = (r.data as { chunk?: { type?: unknown; text?: unknown } })?.chunk
-      return r.type === 'assistant/chunk' && chunk?.type === 'text-delta' && chunk.text === token
-    })
-    const sA1 = deltaSeq('BURST_A1_')
-    const sA2 = deltaSeq('BURST_A2')
+    const settledMessages = records.filter(r => r.type === 'assistant/message' && JSON.stringify(r.data).includes('BURST_'))
+    expect(settledMessages.length, 'one settled message per text block, not coalesced').toBe(3)
+    const sA = seqOf(r => r.type === 'assistant/message' && JSON.stringify(r.data).includes('BURST_A1_'))
+    const sB = seqOf(r => r.type === 'assistant/message' && JSON.stringify(r.data).includes('BURST_B1_'))
+    const sC = seqOf(r => r.type === 'assistant/message' && JSON.stringify(r.data).includes('BURST_C1'))
     const sT1 = seqOf(r => r.type === 'tool/call' && JSON.stringify(r.data).includes('burst file one'))
-    const sB1 = deltaSeq('BURST_B1_')
-    const sT1r = seqOf(r => r.type === 'tool/result' && r.seq > sT1 && r.seq < sB1)
     const sT2 = seqOf(r => r.type === 'tool/call' && JSON.stringify(r.data).includes('burst file two'))
-    const sC1 = deltaSeq('BURST_C1')
+    const sT1r = seqOf(r => r.type === 'tool/result' && r.seq > sT1 && r.seq < sB)
+    const sT2r = seqOf(r => r.type === 'tool/result' && r.seq > sT2 && r.seq < sC)
     const sEnd = seqOf(r => r.type === 'turn/end')
-    expect([sA1, sA2, sT1, sT1r, sB1, sT2, sC1, sEnd].every(s => s !== -1)).toBe(true)
-    expect(sA1).toBeLessThan(sA2)
-    expect(sA2).toBeLessThan(sT1)
+    expect([sA, sB, sC, sT1, sT1r, sT2, sT2r, sEnd].every(s => s !== -1)).toBe(true)
+    expect(sA).toBeLessThan(sT1)
     expect(sT1).toBeLessThan(sT1r)
-    expect(sT1r).toBeLessThan(sB1)
-    expect(sB1).toBeLessThan(sT2)
-    expect(sT2).toBeLessThan(sC1)
-    expect(sC1).toBeLessThan(sEnd)
+    expect(sT1r).toBeLessThan(sB)
+    expect(sB).toBeLessThan(sT2)
+    expect(sT2).toBeLessThan(sT2r)
+    expect(sT2r).toBeLessThan(sC)
+    expect(sC).toBeLessThan(sEnd)
+    // Each settled message carries its block's full text (A and B keep
+    // both of their deltas inside one message).
+    for (const [probe, full] of [['BURST_A1_', 'BURST_A1_BURST_A2'], ['BURST_B1_', 'BURST_B1_BURST_B2'], ['BURST_C1', 'BURST_C1']] as const) {
+      expect(JSON.stringify(settledMessages.find(r => JSON.stringify(r.data).includes(probe))?.data), `settled ${probe}`).toContain(full)
+    }
     // Exactly one tool round per call: no duplicated tool events in the log.
     expect(records.filter(r => r.type === 'tool/call' && JSON.stringify(r.data).includes('burst file')).length).toBe(2)
     assertCleanConsole()
@@ -520,19 +507,32 @@ describe.skipIf(!guiAvailable() || !runtimeBuilt)('desktop DSH event correctness
     expect(sessions.items.every(item => !item.running)).toBe(true)
     // Nothing after the cut: the script's tail never reached the log, and
     // the transcript agrees with the log token for token — the fold neither
-    // drops a logged chunk nor renders one the log lacks (and nothing is
-    // synthesized to make the interrupted turn look finished).
+    // drops settled text nor renders one the log lacks (and nothing is
+    // synthesized to make the interrupted turn look finished). v2 format:
+    // the cancelled block settles as one partial `assistant/message` with
+    // `interrupted: true` carrying the delivered prefix; the v2 log has no
+    // `assistant/chunk` records.
     const tokens = ['CANCELX_1', 'CANCELX_2', 'CANCELX_3', 'CANCELX_4', 'CANCELX_5', 'CANCELX_6', 'CANCELX_7', 'CANCELX_8']
-    const logged = loggedChunkTokens(tokens)
-    const body = await win.evaluate(() => document.body.innerText)
-    for (const token of tokens) {
-      expect(countOccurrences(body, token), `rendered ${token}`).toBe(logged[token])
-    }
-    expect(logged['CANCELX_8'], 'the tail chunk after the cancel must not be durable').toBe(0)
-    expect(body.includes('CANCELX_8')).toBe(false)
-    // The turn still ended: a durable terminal exists after the cut.
     const after = sessionLogRecords().filter(r => !before.has(r.seq))
-    expect(after.some(r => r.type === 'turn/end')).toBe(true)
+    const interrupted = after.filter(r => r.type === 'assistant/message' && (r.data as { interrupted?: unknown }).interrupted === true)
+    expect(interrupted.length, 'one settled prefix for the cancelled block').toBe(1)
+    const settled = JSON.stringify(interrupted[0]?.data)
+    const contained = tokens.slice(0, 7).filter(token => settled.includes(token))
+    expect(contained.length, 'the cut left at least the rendered token settled').toBeGreaterThanOrEqual(1)
+    expect(contained.join(''), 'the settled prefix is contiguous from the first token').toBe(tokens.slice(0, contained.length).join(''))
+    expect(settled.includes('CANCELX_8'), 'the tail chunk after the cancel must not be durable').toBe(false)
+    // Rendered DOM (rows' textContent; innerText covers only the viewport
+    // under turn-process virtualization) equals the settled prefix exactly.
+    const domText = (await chatFlowRows()).join('\u0000')
+    for (const token of tokens) {
+      expect(countOccurrences(domText, token), `rendered ${token}`).toBe(settled.includes(token) ? 1 : 0)
+    }
+    // The turn still ended: a durable cancellation terminal exists after
+    // the cut.
+    const end = after.filter(r => r.type === 'turn/end').at(-1)
+    expect(end, 'a turn/end after the cut').toBeDefined()
+    if (end === undefined) throw new Error('a turn/end after the cut')
+    expect(JSON.stringify(end.data), 'the turn ended by cancellation').toContain('"aborted"')
     assertCleanConsole()
   }, 180_000)
 
@@ -557,17 +557,23 @@ describe.skipIf(!guiAvailable() || !runtimeBuilt)('desktop DSH event correctness
     await openTurnSession()
     await expect.poll(() => win.evaluate(() => document.body.innerText.includes('RELOADX_FINAL')), { timeout: 30_000 }).toBe(true)
     const tokens = ['RELOADX_1', 'RELOADX_2', 'RELOADX_3', 'RELOADX_4', 'RELOADX_5', 'RELOADX_6', 'RELOADX_7', 'RELOADX_FINAL']
-    const logged = loggedChunkTokens(tokens)
-    for (const token of tokens) expect(logged[token], `logged ${token}`).toBe(1)
-    const body = await win.evaluate(() => document.body.innerText)
-    for (const token of tokens) {
-      expect(countOccurrences(body, token), `rendered ${token}`).toBe(1)
-    }
-    // The fold is lossless end to end: the final message carries the full
-    // concatenated text in order.
     const records = sessionLogRecords()
-    const finalMessage = records.filter(r => r.type === 'assistant/message' && JSON.stringify(r.data).includes('RELOADX_FINAL')).at(-1)
-    expect(JSON.stringify(finalMessage?.data)).toContain('RELOADX_1RELOADX_2RELOADX_3RELOADX_4RELOADX_5RELOADX_6RELOADX_7RELOADX_FINAL')
+    // The fold is lossless end to end (v2 format: no `assistant/chunk`
+    // records; the stream settles as one `assistant/message`): the settled
+    // message carries the full concatenated text in order — including the
+    // tokens emitted after the renderer detached — and it settled exactly
+    // once.
+    const finalMessages = records.filter(r => r.type === 'assistant/message' && JSON.stringify(r.data).includes('RELOADX_FINAL'))
+    expect(finalMessages.length, 'the reloaded stream settles exactly once').toBe(1)
+    const settled = JSON.stringify(finalMessages[0]?.data)
+    expect(settled).toContain('RELOADX_1RELOADX_2RELOADX_3RELOADX_4RELOADX_5RELOADX_6RELOADX_7RELOADX_FINAL')
+    for (const token of tokens) expect(settled.includes(token), `durable ${token}`).toBe(true)
+    // Rendered DOM (rows' textContent; innerText covers only the viewport
+    // under turn-process virtualization) agrees: every token exactly once.
+    const domText = (await chatFlowRows()).join('\u0000')
+    for (const token of tokens) {
+      expect(countOccurrences(domText, token), `rendered ${token}`).toBe(1)
+    }
     // The turn completed — the reload must not leave it stuck or aborted.
     const after = records.filter(r => !before.has(r.seq))
     expect(JSON.stringify(after.filter(r => r.type === 'turn/end').at(-1)?.data)).toContain('"completed"')
@@ -576,7 +582,7 @@ describe.skipIf(!guiAvailable() || !runtimeBuilt)('desktop DSH event correctness
     // prompt is spliced into the next-turn inbox and removed again at turn
     // start, so the splices of this turn's own prompt are expected.)
     for (const r of after) {
-      expect(['user/message', 'assistant/chunk', 'assistant/message', 'turn/start', 'turn/end', 'step/start', 'step/end', 'request/header', 'request/context', 'session/title', 'session/title-llm-request', 'agent/inbox/spliced'], `unexpected gap event ${r.type}`).toContain(r.type)
+      expect(['user/message', 'assistant/message', 'turn/start', 'turn/end', 'step/start', 'step/end', 'request/header', 'request/context', 'session/title', 'session/title-llm-request', 'agent/inbox/spliced'], `unexpected gap event ${r.type}`).toContain(r.type)
     }
     assertCleanConsole()
   }, 300_000)
