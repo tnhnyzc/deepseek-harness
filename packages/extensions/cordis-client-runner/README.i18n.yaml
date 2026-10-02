@@ -2,5 +2,5 @@
 # side as of the last confirmed-consistent state. Both languages carry equal authority;
 # after editing either side, bring the other along and re-record with:
 #   pnpm run verify-translation-pairing --write packages/extensions/cordis-client-runner/README.md
-README.md: 2bddc5e1b11d2a43f3e7fd8d65241c8633fe07e9
-README.zh.md: 85c4ccd0ee85437d4c8357c7b521d306f0f1d171
+README.md: 3b5762786e0f5b00fc80533ca4fa97a3d4cd0a4b
+README.zh.md: d68dc218f75e65c9a1787a5e43f018c9cdfa3383

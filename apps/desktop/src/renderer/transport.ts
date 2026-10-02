@@ -40,6 +40,13 @@ import {
   parseTransportMessage,
 } from '@deepseek-ai/dsh-desktop-runtime/transport'
 
+/**
+ * Renderer-safe UUID source. The transport must not pull the host crypto
+ * package into the renderer (renderer dependency boundary); the pinned
+ * Chromium exposes `crypto.randomUUID()` directly.
+ */
+const randomUUID = (): string => globalThis.crypto.randomUUID()
+
 /** The dummy origin every transport fetch resolves against; only the pathname routes. */
 const TRANSPORT_BASE_URL = 'http://dsh.local'
 
@@ -89,14 +96,17 @@ export interface DesktopTransport {
   /** Fetch-compatible request over the transport. */
   fetch(input: string | Request, init?: RequestInit): Promise<Response>
   /**
-   * Open one opaque stream named by the url the DSH client would name it.
-   * @param url - the stream name the opener would use.
+   * Open one opaque stream named by the route the DSH client would name it.
+   * @param url - the stream route the opener would use.
    * @param signal - optional caller cancellation for the open's whole
    * lifetime, including the pending open acknowledgement: an abort while
    * the acknowledgement waits posts the generic stream close that releases
    * the runtime-side open and rejects the open with the abort terminal.
+   * @param data - the opaque initial request body the opener sends with the
+   * open (the DSH-facing adapter encodes its RPC payload there); one opaque
+   * byte field, bounded to a single frame.
    */
-  openStream(url: string, signal?: AbortSignal): Promise<DesktopStream>
+  openStream(url: string, signal?: AbortSignal, data?: Uint8Array): Promise<DesktopStream>
   /** Tear the channel down: settle every pending operation. */
   close(): void
 }
@@ -408,7 +418,7 @@ export function createDesktopTransport(port: TransportPortLike): DesktopTranspor
       ...(init ?? {}),
       ...(streamBody !== undefined ? { duplex: 'half' as const } : {}),
     })
-    const requestId = crypto.randomUUID()
+    const requestId = randomUUID()
     const op: FetchOp = {
       requestId,
       signal: request.signal,
@@ -524,9 +534,9 @@ export function createDesktopTransport(port: TransportPortLike): DesktopTranspor
     return new Response(nullBody ? null : body, { status: head.status, statusText: head.statusText, headers: head.headers })
   }
 
-  const openStreamFn = async (url: string, signal?: AbortSignal): Promise<DesktopStream> => {
+  const openStreamFn = async (url: string, signal?: AbortSignal, data?: Uint8Array): Promise<DesktopStream> => {
     if (closed) throw transportClosedError()
-    const id = crypto.randomUUID()
+    const id = randomUUID()
     const op: StreamOp = {
       id,
       ack: deferred<void>(),
@@ -582,7 +592,7 @@ export function createDesktopTransport(port: TransportPortLike): DesktopTranspor
       // A pre-armed abort already settled the open: the open itself never
       // goes out (the close onAbort posted no-ops at the peer, the way a
       // pre-armed fetch posts fetch.abort).
-      post({ type: 'stream.open', streamId: id, url: new URL(url, TRANSPORT_BASE_URL).href })
+      post({ type: 'stream.open', streamId: id, url: new URL(url, TRANSPORT_BASE_URL).href, ...(data !== undefined ? { data } : {}) })
     }
     const handle: DesktopStream = {
       id,

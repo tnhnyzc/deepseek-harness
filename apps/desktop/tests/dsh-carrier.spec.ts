@@ -1,13 +1,18 @@
 // @vitest-environment jsdom
 /**
  * Unit coverage for the DSH desktop carrier: the `__DSH_TRANSPORT__` seam
- * shape, the event-path vs fetch routing inside the carrier's API client,
- * and the bundle loader (fetch over the fetch primitive, execution through
- * the documented classic-script seam). A scripted fake transport stands in
- * for the stage 3 port; nothing here decodes an envelope beyond what the
- * pinned client's own schemas require.
+ * shape (the candidate's `ClientTransportHooks`), the stream opener's codec
+ * bridge (endpoint→route, payload and items as opaque JSON bytes), the unary
+ * fetch primitive, and the bundle loader (fetch over the fetch primitive,
+ * execution through the documented classic-script seam). A scripted fake
+ * transport stands in for the stage 3 port; nothing here decodes an envelope
+ * beyond the codec's own JSON framing.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import {
+  endpointRoute,
+  frameRemoteItem,
+} from '@deepseek-ai/dsh-desktop-runtime/remote-codec'
 import {
   evaluateClassicScript,
   installDesktopCarrier,
@@ -21,22 +26,15 @@ interface FetchCall {
 }
 
 interface ScriptedStream {
-  frames: string[]
+  url: string
+  data?: Uint8Array
+  frames: Uint8Array[]
   closed: boolean
 }
 
 /** The transport input is a url string or a Request; both carry an href. */
 function urlText(url: string | Request): string {
   return url instanceof Request ? url.url : url
-}
-
-/** The fake always sends a JSON string body; refuse anything else loudly. */
-function requestBody(call: FetchCall): Record<string, unknown> {
-  const body = call.init?.body
-  if (typeof body !== 'string') {
-    throw new Error(`fake transport: expected a string body, got ${typeof body}`)
-  }
-  return JSON.parse(body) as Record<string, unknown>
 }
 
 function fakeTransport(behavior?: {
@@ -57,16 +55,16 @@ function fakeTransport(behavior?: {
       if (behavior?.fetch) return behavior.fetch(call)
       throw new Error(`fake transport: unexpected fetch ${urlText(url)}`)
     },
-    async openStream(_url, signal) {
+    async openStream(url, signal, data) {
       if (signal !== undefined) openSignals.push(signal)
-      const stream: ScriptedStream = { frames: [], closed: false }
+      const stream: ScriptedStream = { url: urlText(url), frames: [], closed: false, ...(data !== undefined ? { data } : {}) }
       streams.push(stream)
       behavior?.onStream?.(stream)
       const handle: DesktopStream = {
         id: `fake-${String(streams.length)}`,
         outcome: new Promise<void>(() => { /* never settles in the fake */ }),
         async* frames() {
-          for (const frame of stream.frames) yield new TextEncoder().encode(frame)
+          for (const frame of stream.frames) yield frame
           await new Promise<void>((resolveWait) => {
             const check = (): void => { if (stream.closed) resolveWait(); else setTimeout(check, 5) }
             check()
@@ -106,28 +104,30 @@ describe('installDesktopCarrier', () => {
     delete (globalThis as { __DSH_TRANSPORT__?: unknown }).__DSH_TRANSPORT__
   })
 
-  it('installs the pinned seam shape on the page global', () => {
+  it('installs the carrier seam shape on the page global', () => {
     const transport = fakeTransport()
     installDesktopCarrier(transport, evaluation)
     const hooks = (globalThis as unknown as {
       __DSH_TRANSPORT__: {
-        createApiClient: () => unknown
         fetch: (input: URL, init: RequestInit) => Promise<Response>
+        openStream: (endpoint: string, payload: unknown, signal: AbortSignal) => AsyncIterable<unknown>
         loadBundle?: (url: string) => Promise<void>
+        ownsHost?: boolean
       }
     }).__DSH_TRANSPORT__
-    expect(typeof hooks.createApiClient).toBe('function')
     expect(typeof hooks.fetch).toBe('function')
+    expect(typeof hooks.openStream).toBe('function')
     expect(typeof hooks.loadBundle).toBe('function')
-    // The API client is one instance for the page's whole lifetime.
-    expect(hooks.createApiClient()).toBe(hooks.createApiClient())
+    // The transport owns the Host outright (a local spawned runtime).
+    expect(hooks.ownsHost).toBe(true)
   })
 
   it('routes the generic RPC fetch through the fetch primitive', async () => {
     const transport = fakeTransport({
       fetch: async (call) => {
-        const body = requestBody(call) as { rpcId: string }
-        return envelopeResponse(body.rpcId, {})
+        const body = call.init?.body
+        const rpcId = typeof body === 'string' ? (JSON.parse(body) as { rpcId: string }).rpcId : 'r'
+        return envelopeResponse(rpcId, {})
       },
     })
     installDesktopCarrier(transport, evaluation)
@@ -145,7 +145,7 @@ describe('installDesktopCarrier', () => {
   })
 })
 
-describe('DesktopApiClient routing (through the seam client)', () => {
+describe('stream opener codec bridge (through the seam)', () => {
   let evaluation: { evaluateScript: (source: string) => Promise<void> }
 
   beforeEach(() => {
@@ -156,67 +156,55 @@ describe('DesktopApiClient routing (through the seam client)', () => {
     delete (globalThis as { __DSH_TRANSPORT__?: unknown }).__DSH_TRANSPORT__
   })
 
-  it('sends a unary call over the fetch primitive and parses the pinned envelope', async () => {
-    const transport = fakeTransport({
-      fetch: async (call) => {
-        const body = requestBody(call) as { rpcId: string }
-        return envelopeResponse(body.rpcId, { items: [] })
-      },
-    })
-    installDesktopCarrier(transport, evaluation)
-    const hooks = (globalThis as unknown as {
-      __DSH_TRANSPORT__: {
-        createApiClient: () => {
-          sessions: { list: (payload: object, signal?: AbortSignal) => Promise<{ result: { ok: boolean; value: { items: unknown[] } } }> }
-        }
-      }
-    }).__DSH_TRANSPORT__
-    const response = await hooks.createApiClient().sessions.list({}, new AbortController().signal)
-    expect(response.result.ok).toBe(true)
-    expect(transport.calls).toHaveLength(1)
-    // The pinned client resolves the method path against location.origin,
-    // not a fixed hostname; the transport carries whatever origin the page has.
-    expect(transport.calls[0]?.url).toBe(new URL('/api/session.list', location.origin).href)
-    const sent = requestBody(transport.calls[0] ?? { url: '' }) as { type: string; method: string }
-    expect(sent.type).toBe('client-request')
-    expect(sent.method).toBe('session.list')
-    expect(transport.streams).toHaveLength(0)
-  })
-
-  it('opens the mux event path on the stream primitive, not the fetch primitive', async () => {
+  it('opens on the stream primitive with the route and the codec payload, and decodes the items', async () => {
+    const payloads = [
+      { type: 'session/title', sessionId: 's1', title: 'one' },
+      { type: 'session/log', sessionId: 's1', entry: { n: 1 } },
+    ]
     const transport = fakeTransport({
       onStream: (stream) => {
-        // A malformed frame: the pinned reader drops it with a log and
-        // keeps reading, so the drop is the proof the bytes reached it.
-        stream.frames.push('data: not-a-real-mux-frame\n\n')
+        for (const payload of payloads) stream.frames.push(frameRemoteItem(payload))
         stream.closed = true
       },
     })
-    const dropLog = vi.spyOn(console, 'error').mockImplementation(() => undefined)
     installDesktopCarrier(transport, evaluation)
     const hooks = (globalThis as unknown as {
-      __DSH_TRANSPORT__: {
-        createApiClient: () => { events: { mux: (payload: object, signal: AbortSignal, onOpen?: () => void) => AsyncIterable<unknown> } }
-      }
+      __DSH_TRANSPORT__: { openStream: (endpoint: string, payload: unknown, signal: AbortSignal) => AsyncIterable<unknown> }
     }).__DSH_TRANSPORT__
-    const onOpen = vi.fn()
-    const frameCount = { value: 0 }
-    const muxController = new AbortController()
-    for await (const _frame of hooks.createApiClient().events.mux({}, muxController.signal, onOpen)) {
-      frameCount.value += 1
+    const items: unknown[] = []
+    const controller = new AbortController()
+    for await (const item of hooks.openStream('events.mux', { args: {} }, controller.signal)) {
+      items.push(item)
     }
-    // The opener resolved (onOpen fired), no fetch-primitive traffic ran,
-    // and the frame flowed into the pinned SSE reader (dropped, logged).
-    // Restore only after asserting: mockRestore clears the call history.
-    expect(onOpen).toHaveBeenCalledTimes(1)
+    expect(items).toEqual(payloads)
     expect(transport.streams).toHaveLength(1)
     expect(transport.calls).toHaveLength(0)
-    // The caller's signal rides the open itself, so the transport owns the
-    // cancellation for the stream's whole lifetime, pending open included.
-    expect(transport.openSignals).toEqual([muxController.signal])
-    expect(frameCount.value).toBe(0)
-    expect(dropLog).toHaveBeenCalledWith(expect.stringContaining('/api/events.mux'), expect.anything())
-    dropLog.mockRestore()
+    expect(transport.openSignals).toEqual([controller.signal])
+    // The route is the codec's endpoint→route map; the initial body is the
+    // codec's JSON payload.
+    expect(transport.streams[0]?.url).toBe(endpointRoute('events.mux'))
+    expect(new TextDecoder().decode(transport.streams[0]?.data ?? new Uint8Array())).toBe(JSON.stringify({ args: {} }))
+  })
+
+  it('reassembles an item that spans several wire frames', async () => {
+    const payload = { type: 'session/log', sessionId: 's1', entry: 'y'.repeat(100 * 1024) }
+    const framed = frameRemoteItem(payload)
+    const transport = fakeTransport({
+      onStream: (stream) => {
+        // Split the framed item across three wire frames.
+        stream.frames.push(framed.subarray(0, 20_000), framed.subarray(20_000, 50_000), framed.subarray(50_000))
+        stream.closed = true
+      },
+    })
+    installDesktopCarrier(transport, evaluation)
+    const hooks = (globalThis as unknown as {
+      __DSH_TRANSPORT__: { openStream: (endpoint: string, payload: unknown, signal: AbortSignal) => AsyncIterable<unknown> }
+    }).__DSH_TRANSPORT__
+    const items: unknown[] = []
+    for await (const item of hooks.openStream('events.mux', { args: {} }, new AbortController().signal)) {
+      items.push(item)
+    }
+    expect(items).toEqual([payload])
   })
 })
 

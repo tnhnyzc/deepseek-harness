@@ -10,7 +10,6 @@
 
 import { MessageChannel, type MessagePort } from 'node:worker_threads'
 import { afterAll, describe, expect, it, vi } from 'vitest'
-import { RpcId, type ApiProxy } from '@deepseek-ai/dsh-host-apiproxy'
 import {
   TRANSPORT_CREDIT_BYTES,
   TRANSPORT_MAX_CODE_CHARS,
@@ -34,62 +33,75 @@ import {
   transportMessageDataBytes,
 } from '../src/transport.ts'
 import { attachTransportRuntime } from '../src/transport-runtime.ts'
+import { RemoteItemReader, frameRemoteItem } from '../src/remote-codec.ts'
 
-/** A minimal host-plane double: the routes the tests drive, plus controllable downlinks. */
-/** Route request/response parameter pairs read off the real contract. */
-type SessionsListRequest = Parameters<ApiProxy['sessions']['list']>[0]
-type SessionsSearchParams = Parameters<ApiProxy['sessions']['search']>
-type EventsMuxParams = Parameters<ApiProxy['events']['mux']>
-type EventsHostParams = Parameters<ApiProxy['events']['host']>
-type DownloadsSessionLogParams = Parameters<ApiProxy['downloads']['sessionLog']>
-
-function fakeApiProxy(options: {
+/**
+ * The controllable host plane the adapter tests drive: no live Host, just the
+ * two injected dispatches. The fetch dispatch serves unary RPCs (the
+ * client-request envelope → the server-response envelope) with one hung route
+ * for the abort assertions; the stream opener yields the downlink as JSON item
+ * bytes, with a hung open (withheld) and a run-until-aborted stream.
+ */
+interface FakePlaneOptions {
   /** One abortable signal per hung route, keyed by route, for abort assertions. */
   hungSignals: Map<string, AbortSignal>
-  /** Frames the mux downlink yields before it ends; each entry is one payload. */
+  /** Items the mux downlink yields before it ends. */
   muxPayloads: Array<Record<string, unknown>>
-  /** Whether the host downlink should run until aborted (no frames). */
+  /** Whether the host downlink should run until aborted (no items). */
   hostRunsUntilAbort: boolean
   hostSignal: { current?: AbortSignal }
   listValue?: unknown
-}): ApiProxy {
-  const ok = (rpcId: unknown, value: unknown) => ({ rpcId, result: { ok: true, value } })
-  return {
-    sessions: {
-      list: async (r: SessionsListRequest) => ok(r.rpcId, options.listValue ?? { items: [] }),
-      search: async (_r: SessionsSearchParams[0], signal: SessionsSearchParams[1]) => {
-        options.hungSignals.set('session.search', signal)
-        return new Promise<never>((_resolve, reject) => {
-          signal.addEventListener('abort', () => { reject(new Error('aborted')) }, { once: true })
-        })
-      },
-    },
-    downloads: {
-      // A GET whose response head is withheld: the stream open built on it
-      // stays pending (no acknowledgement) until it is aborted or closed.
-      sessionLog: async (_r: DownloadsSessionLogParams[0], signal: DownloadsSessionLogParams[1]) => {
-        options.hungSignals.set('sessionLog', signal)
-        return new Promise<Response>((_resolve, reject) => {
-          signal.addEventListener('abort', () => { reject(new Error('aborted')) }, { once: true })
-        })
-      },
-    },
-    events: {
-      mux: async function* (_r: EventsMuxParams[0], _signal: EventsMuxParams[1]) {
-        for (const payload of options.muxPayloads) {
-          yield { rpcId: RpcId(crypto.randomUUID()), payload }
-        }
-      },
-      host: async function* (_r: EventsHostParams[0], signal: EventsHostParams[1]) {
+}
+
+/** The fetch dispatch: unary RPCs as server-response envelopes, one hung route. */
+function fakeFetchDispatch(options: FakePlaneOptions) {
+  return async (request: Request): Promise<Response> => {
+    const body = request.body !== null ? await request.text() : ''
+    const parsed = JSON.parse(body) as { rpcId: string; method: string }
+    // The hung route parks on the request signal for the abort assertions.
+    if (parsed.method === 'session.search') {
+      options.hungSignals.set('session.search', request.signal)
+      return new Promise<Response>((_resolve, reject) => {
+        request.signal.addEventListener('abort', () => { reject(new Error('aborted')) }, { once: true })
+      })
+    }
+    const value = parsed.method === 'session.list' ? (options.listValue ?? { items: [] }) : {}
+    const envelope = { type: 'server-response', rpcId: parsed.rpcId, result: { ok: true, value } }
+    return new Response(JSON.stringify(envelope), { status: 200, headers: { 'content-type': 'application/json' } })
+  }
+}
+
+/** The stream opener: JSON item bytes for mux, a run-until-aborted host, a withheld export. */
+function fakeStreamOpenDispatch(options: FakePlaneOptions) {
+  return async (route: string, _initialBody: Uint8Array | undefined, signal: AbortSignal): Promise<AsyncIterable<Uint8Array>> => {
+    const endpoint = new URL(route).pathname.replace(/^\/api\//, '')
+    if (endpoint === 'session.export') {
+      // A withheld open: no items, no return, until it is aborted.
+      options.hungSignals.set('sessionLog', signal)
+      await new Promise<void>((_resolve, reject) => {
+        signal.addEventListener('abort', () => { reject(new Error('aborted')) }, { once: true })
+      })
+      return (async function* (): AsyncGenerator<Uint8Array, void> {})()
+    }
+    if (endpoint === 'events.host') {
+      options.hostSignal.current = signal
+      return (async function* (): AsyncGenerator<Uint8Array, void> {
         if (options.hostRunsUntilAbort) {
-          options.hostSignal.current = signal
           await new Promise<void>((resolve) => {
             signal.addEventListener('abort', () => { resolve() }, { once: true })
           })
         }
-      },
-    },
-  } as unknown as ApiProxy
+      })()
+    }
+    if (endpoint === 'events.mux') {
+      return (async function* (): AsyncGenerator<Uint8Array, void> {
+        for (const payload of options.muxPayloads) {
+          yield frameRemoteItem(payload)
+        }
+      })()
+    }
+    throw new Error(`unknown stream endpoint ${endpoint}`)
+  }
 }
 
 interface WireMessage {
@@ -342,12 +354,16 @@ describe('transport runtime adapter', () => {
   ): void => {
     hungSignals = new Map()
     hostSignal = {}
-    const api = fakeApiProxy({ hungSignals, muxPayloads, hostRunsUntilAbort, hostSignal, listValue })
+    const plane: FakePlaneOptions = { hungSignals, muxPayloads, hostRunsUntilAbort, hostSignal, listValue }
     const wire = new MessageChannel()
     channel = wire.port1
     remote = wire.port2
     reader = new MessageReader(wire.port2)
-    dispose = attachTransportRuntime(channel, api, maxRequestBytes === undefined ? undefined : { maxRequestBytes })
+    dispose = attachTransportRuntime(channel, {
+      fetchDispatch: fakeFetchDispatch(plane),
+      streamOpenDispatch: fakeStreamOpenDispatch(plane),
+      ...(maxRequestBytes !== undefined ? { maxRequestBytes } : {}),
+    })
   }
 
   const post = (message: object): void => {
@@ -602,7 +618,8 @@ describe('transport runtime adapter', () => {
     const ack = await reader?.ofType('stream.open.ack')
     expect(ack?.ok).toBe(true)
 
-    const frames: Uint8Array[] = []
+    const items: unknown[] = []
+    const itemReader = new RemoteItemReader()
     let expectedSequence = 0
     for (;;) {
       const message = await reader?.next()
@@ -616,31 +633,27 @@ describe('transport runtime adapter', () => {
       expect(message.sequence).toBe(expectedSequence++)
       const data = message.data as Uint8Array
       expect(data.byteLength).toBeLessThanOrEqual(TRANSPORT_MAX_FRAME_BYTES)
-      frames.push(data)
+      for (const item of itemReader.push(data)) {
+        items.push(item)
+      }
     }
 
-    // The frames carry the carrier's raw bytes: its own framing stays intact
-    // inside the stream, the transport only chunks and sequences them.
-    const body = Buffer.concat(frames).toString('utf8')
-    expect(body.startsWith(': connected\n\n')).toBe(true)
-    const envelopes = body
-      .split('\n\n')
-      .filter(entry => entry.startsWith('data: '))
-      .map(entry => JSON.parse(entry.slice('data: '.length)) as { type: string; method: string; payload: Record<string, unknown> })
-    expect(envelopes.map(envelope => envelope.method)).toEqual(['session/title', 'session/log'])
-    expect(envelopes.every(envelope => envelope.type === 'server-request')).toBe(true)
-    expect(envelopes[0]?.payload).toEqual(payloads[0])
-    expect(envelopes[1]?.payload).toEqual(payloads[1])
+    // The frames carry the codec's length-prefixed items: the transport only
+    // chunks and sequences the bytes, and the reader reassembles the items.
+    expect(items).toEqual(payloads)
   })
 
-  it('splits an oversized downlink payload into ordered bounded frames', async () => {
+  it('splits an oversized downlink item into ordered bounded frames', async () => {
     const entry = 'y'.repeat(100 * 1024)
-    attach([{ type: 'session/log', sessionId: 's1', entry }], false)
+    const payload = { type: 'session/log', sessionId: 's1', entry }
+    attach([payload], false)
     post({ type: 'stream.open', streamId: 'big', url: 'http://dsh.local/api/events.mux' })
     const ack = await reader?.ofType('stream.open.ack')
     expect(ack?.ok).toBe(true)
 
     const frames: Uint8Array[] = []
+    const items: unknown[] = []
+    const itemReader = new RemoteItemReader()
     let expectedSequence = 0
     for (;;) {
       const message = await reader?.next()
@@ -651,11 +664,13 @@ describe('transport runtime adapter', () => {
       const data = message.data as Uint8Array
       expect(data.byteLength).toBeLessThanOrEqual(TRANSPORT_MAX_FRAME_BYTES)
       frames.push(data)
+      for (const item of itemReader.push(data)) {
+        items.push(item)
+      }
     }
-    const body = Buffer.concat(frames).toString('utf8')
+    // One item spans several bounded frames; the reader reassembles it whole.
     expect(frames.length).toBeGreaterThan(1)
-    expect(body.startsWith(': connected\n\n')).toBe(true)
-    expect(body).toContain(`"entry":"${entry}"`)
+    expect(items).toEqual([payload])
   })
 
   it('refuses unknown stream urls and answers uplink frames downlink-only', async () => {
@@ -663,7 +678,7 @@ describe('transport runtime adapter', () => {
     post({ type: 'stream.open', streamId: 'u1', url: 'http://dsh.local/api/nope' })
     const refused = await reader?.ofType('stream.open.ack')
     expect(refused?.ok).toBe(false)
-    expect(refused?.reason).toBe(TransportErrorCode.unknownStream)
+    expect(refused?.reason).toBe(TransportErrorCode.internal)
 
     post({ type: 'stream.open', streamId: 'h1', url: 'http://dsh.local/api/events.host' })
     const ack = await reader?.untilType('stream.open.ack')

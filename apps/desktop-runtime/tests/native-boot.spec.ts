@@ -1,8 +1,9 @@
 /**
  * Real-boot acceptance for the desktop native capability channel: forks the
  * built runtime under a temporary home and plays the Electron main side over
- * the child IPC channel — the runtime's host.pickDirectory and host.openPath
- * cross as native.request messages and settle only on the main-side
+ * the child IPC channel — the runtime's directoryPicker.pick and
+ * session.openWorkspacePath cross as native.request messages and settle only on
+ * the main-side
  * responses, a client abort terminates an in-flight operation and crosses as
  * a real native.abort message whose late result is dropped, and a
  * main-issued cancel settles the pick as a channel failure. Self-skips when
@@ -33,7 +34,7 @@ interface WireMessage {
 interface NativeRequest {
   type: 'native.request'
   requestId: string
-  method: 'directory.pick' | 'path.open'
+  method: 'directory.pick' | 'path.open' | 'path.openText'
   path?: string
 }
 
@@ -251,16 +252,16 @@ describe.skipIf(!existsSync(ENTRY))('desktop native capability boot', () => {
     }
   }, SHUTDOWN_TIMEOUT_MS)
 
-  it('reports the injected opener through host.describe', async () => {
-    openFetch(link, 'native-describe', 'native-rpc-1', 'host.describe', {})
+  it('reports the injected opener through session/canOpenWorkspacePath', async () => {
+    openFetch(link, 'native-describe', 'native-rpc-1', 'session/canOpenWorkspacePath', { args: {} })
     const result = await readFetch(link, 'native-describe')
     const envelope = JSON.parse(result.body) as Envelope
     expect(envelope.result.ok).toBe(true)
-    expect(envelope.result.value?.canOpenPath).toBe(true)
+    expect(envelope.result.value).toBe(true)
   }, 45_000)
 
-  it('crosses host.pickDirectory to the main side and carries the chosen path back', async () => {
-    openFetch(link, 'native-pick', 'native-rpc-2', 'host.pickDirectory', {})
+  it('crosses directoryPicker.pick to the main side and carries the chosen path back', async () => {
+    openFetch(link, 'native-pick', 'native-rpc-2', 'directoryPicker/pick', { args: {} })
     const nativeRequest = await link.nextNativeRequest()
     expect(nativeRequest.method).toBe('directory.pick')
     expect(nativeRequest.requestId).not.toBe('')
@@ -269,21 +270,21 @@ describe.skipIf(!existsSync(ENTRY))('desktop native capability boot', () => {
     const envelope = JSON.parse(result.body) as Envelope
     expect(envelope.type).toBe('server-response')
     expect(envelope.rpcId).toBe('native-rpc-2')
-    expect(envelope.result).toEqual({ ok: true, value: { path: CHOSEN_DIRECTORY } })
+    expect(envelope.result).toEqual({ ok: true, value: CHOSEN_DIRECTORY })
   }, 45_000)
 
   it('carries the operator cancel of the chooser back as a null path', async () => {
-    openFetch(link, 'native-pick-cancel', 'native-rpc-3', 'host.pickDirectory', {})
+    openFetch(link, 'native-pick-cancel', 'native-rpc-3', 'directoryPicker/pick', { args: {} })
     const nativeRequest = await link.nextNativeRequest()
     expect(nativeRequest.method).toBe('directory.pick')
     link.send({ type: 'native.response', requestId: nativeRequest.requestId, ok: true, path: null })
     const result = await readFetch(link, 'native-pick-cancel')
     const envelope = JSON.parse(result.body) as Envelope
-    expect(envelope.result).toEqual({ ok: true, value: { path: null } })
+    expect(envelope.result).toEqual({ ok: true, value: null })
   }, 45_000)
 
-  it('crosses host.openPath with the DSH-resolved path and carries the open back', async () => {
-    openFetch(link, 'native-open', 'native-rpc-4', 'host.openPath', { path: OPEN_TARGET })
+  it('crosses session.openWorkspacePath with the DSH-resolved path and carries the open back', async () => {
+    openFetch(link, 'native-open', 'native-rpc-4', 'session/openWorkspacePath', { args: { request: { path: OPEN_TARGET } } })
     const nativeRequest = await link.nextNativeRequest()
     expect(nativeRequest.method).toBe('path.open')
     expect(nativeRequest.path).toBe(OPEN_TARGET)
@@ -294,31 +295,42 @@ describe.skipIf(!existsSync(ENTRY))('desktop native capability boot', () => {
   }, 45_000)
 
   it('maps a main-side open failure onto the DSH wire vocabulary', async () => {
-    openFetch(link, 'native-open-fail', 'native-rpc-5', 'host.openPath', { path: OPEN_TARGET })
+    openFetch(link, 'native-open-fail', 'native-rpc-5', 'session/openWorkspacePath', { args: { request: { path: OPEN_TARGET } } })
     const nativeRequest = await link.nextNativeRequest()
     expect(nativeRequest.method).toBe('path.open')
     link.send({ type: 'native.response', requestId: nativeRequest.requestId, ok: false, code: 'open-failed', message: 'no default application' })
     const result = await readFetch(link, 'native-open-fail')
     const envelope = JSON.parse(result.body) as Envelope
     expect(envelope.result.ok).toBe(false)
-    expect(envelope.result.error?.code).toBe('internal')
+    expect(envelope.result.error?.code).toBe('gateway/internal')
     expect(envelope.result.error?.message).toContain('no default application')
   }, 45_000)
 
+  it('crosses settings.openSettingsDocument as a text-document open and carries the open back', async () => {
+    openFetch(link, 'native-open-text', 'native-rpc-10', 'settings/openSettingsDocument', { args: {} })
+    const nativeRequest = await link.nextNativeRequest()
+    expect(nativeRequest.method).toBe('path.openText')
+    expect(nativeRequest.path).not.toBe('')
+    link.send({ type: 'native.response', requestId: nativeRequest.requestId, ok: true })
+    const result = await readFetch(link, 'native-open-text')
+    const envelope = JSON.parse(result.body) as Envelope
+    expect(envelope.result).toEqual({ ok: true, value: { opened: true } })
+  }, 45_000)
+
   it('settles a main-issued cancel as a channel failure, not an operator cancel', async () => {
-    openFetch(link, 'native-pick-cancel-msg', 'native-rpc-6', 'host.pickDirectory', {})
+    openFetch(link, 'native-pick-cancel-msg', 'native-rpc-6', 'directoryPicker/pick', { args: {} })
     const nativeRequest = await link.nextNativeRequest()
     expect(nativeRequest.method).toBe('directory.pick')
     link.send({ type: 'native.cancel', requestId: nativeRequest.requestId, reason: 'generation ended' })
     const result = await readFetch(link, 'native-pick-cancel-msg')
     const envelope = JSON.parse(result.body) as Envelope
     expect(envelope.result.ok).toBe(false)
-    expect(envelope.result.error?.code).toBe('internal')
+    expect(envelope.result.error?.code).toBe('gateway/internal')
     expect(envelope.result.error?.message).toContain('generation ended')
   }, 45_000)
 
   it('terminates an in-flight pick on client abort, crosses the caller cancel, and drops the late result', async () => {
-    openFetch(link, 'native-pick-abort', 'native-rpc-7', 'host.pickDirectory', {})
+    openFetch(link, 'native-pick-abort', 'native-rpc-7', 'directoryPicker/pick', { args: {} })
     const nativeRequest = await link.nextNativeRequest()
     expect(nativeRequest.method).toBe('directory.pick')
     link.send({ type: 'fetch.abort', requestId: 'native-pick-abort' })
@@ -332,19 +344,19 @@ describe.skipIf(!existsSync(ENTRY))('desktop native capability boot', () => {
     await expect(link.drainAborts()).resolves.toBeUndefined()
     // The runtime stays healthy: a later pick still crosses the channel and
     // settles normally.
-    openFetch(link, 'native-pick-after-abort', 'native-rpc-8', 'host.pickDirectory', {})
+    openFetch(link, 'native-pick-after-abort', 'native-rpc-8', 'directoryPicker/pick', { args: {} })
     const second = await link.nextNativeRequest()
     expect(second.method).toBe('directory.pick')
     link.send({ type: 'native.response', requestId: second.requestId, ok: true, path: CHOSEN_DIRECTORY })
     const result = await readFetch(link, 'native-pick-after-abort')
     const envelope = JSON.parse(result.body) as Envelope
-    expect(envelope.result).toEqual({ ok: true, value: { path: CHOSEN_DIRECTORY } })
+    expect(envelope.result).toEqual({ ok: true, value: CHOSEN_DIRECTORY })
     // No operation is in flight: nothing further crosses the channel.
     await expect(link.drainNative(300)).resolves.toEqual([])
   }, 45_000)
 
   it('terminates an in-flight open on client abort and crosses the caller cancel', async () => {
-    openFetch(link, 'native-open-abort', 'native-rpc-9', 'host.openPath', { path: OPEN_TARGET })
+    openFetch(link, 'native-open-abort', 'native-rpc-9', 'session/openWorkspacePath', { args: { request: { path: OPEN_TARGET } } })
     const nativeRequest = await link.nextNativeRequest()
     expect(nativeRequest.method).toBe('path.open')
     link.send({ type: 'fetch.abort', requestId: 'native-open-abort' })

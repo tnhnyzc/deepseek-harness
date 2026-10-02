@@ -78,7 +78,7 @@ export function createNativeChannel(options: NativeChannelOptions): NativeChanne
     const value = raw as Record<string, unknown>
     const requestId = typeof value.requestId === 'string' && value.requestId !== '' ? value.requestId : undefined
     if (requestId === undefined) return undefined
-    const methodKnown = value.method === 'directory.pick' || value.method === 'path.open'
+    const methodKnown = value.method === 'directory.pick' || value.method === 'path.open' || value.method === 'path.openText'
     return failure(requestId, methodKnown ? 'malformed-request' : 'unknown-method', 'the request was not a well-formed native request')
   }
 
@@ -120,12 +120,15 @@ export function createNativeChannel(options: NativeChannelOptions): NativeChanne
           const code = request.method === 'directory.pick' ? 'dialog-failed' : 'open-failed'
           const fallback = request.method === 'directory.pick'
             ? 'the directory chooser failed'
-            : 'the path could not be opened'
+            : request.method === 'path.openText'
+              ? 'the text document could not be opened'
+              : 'the path could not be opened'
           finish(requestId, failure(requestId, codeFor(error, code), messageFor(error, fallback)))
         })
     }
     if (request.method === 'directory.pick') settle(options.capabilities.pickDirectory(options.getWindow()))
-    else settle(options.capabilities.openPath(request.path))
+    else if (request.method === 'path.open') settle(options.capabilities.openPath(request.path))
+    else settle(options.capabilities.openTextFile(request.path))
   }
 
   const teardown = (reason: string): void => {

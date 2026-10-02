@@ -1,22 +1,25 @@
 /**
- * The DSH desktop carrier: installs the pinned `__DSH_TRANSPORT__` seam over
- * the stage 3 transport so the existing DSH client tree runs unchanged.
- * `createApiClient` returns an `AbstractApiClient` whose transport aspect is
- * this carrier — unary calls (and the generic RPC channel's fetch) ride the
- * fetch primitive, and the two downstream event streams ride the stream
- * primitive, wrapped in a Response whose body replays the carrier's frames
- * so the base class's own SSE reader parses them. `loadBundle` carries the
- * module system's bundle bytes: fetch over the fetch primitive, executed as
- * a classic script (the pinned module protocol registers through
- * `window.__ModuleLoader__.load` at execution). Nothing here decodes an
- * envelope or names a business method; the pinned client owns all of that.
+ * The DSH desktop carrier: installs the `__DSH_TRANSPORT__` seam (the
+ * candidate's `ClientTransportHooks`) over the stage 3 transport so the
+ * candidate DSH client tree runs unchanged. The candidate client owns all DSH
+ * semantics; this carrier only routes its transport surface onto the generic
+ * byte channel — unary RPC rides the fetch primitive, stream Remote methods
+ * ride the stream primitive (the DSH-facing codec maps the endpoint to a route
+ * and encodes the payload and items as opaque JSON bytes at this boundary),
+ * and `loadBundle` carries the module system's bundle bytes: fetch over the
+ * fetch primitive, executed as a classic script (the candidate module protocol
+ * registers through `window.__ModuleLoader__.load` at execution). Nothing here
+ * decodes an RPC envelope or names a business method.
  * @module @deepseek-ai/dsh-desktop/src/renderer/dsh-carrier
  */
 
-import { HOST_EVENTS_PATH, MUX_EVENTS_PATH } from '@deepseek-ai/dsh-client-connection/src/api-path.ts'
 import type { ClientTransportHooks } from '@deepseek-ai/dsh-client-connection/client'
-import { AbstractApiClient, type IApiClient } from '@deepseek-ai/dsh-host-apiproxy/client'
-import type { DesktopTransport } from './transport.ts'
+import {
+  RemoteItemReader,
+  encodeRemotePayload,
+  endpointRoute,
+} from '@deepseek-ai/dsh-desktop-runtime/remote-codec'
+import type { DesktopStream, DesktopTransport } from './transport.ts'
 
 /**
  * The documented test seam: a replacement for the classic-script evaluator.
@@ -30,8 +33,8 @@ export interface CarrierEvaluation {
 /**
  * Execute one script source as a same-origin classic script (blob object
  * url). The bundle bytes arrive through the trusted transport, so a blob
- * under the document origin keeps the pinned classic-script semantics
- * without widening the CSP beyond `blob:`.
+ * under the document origin keeps the classic-script semantics without
+ * widening the CSP beyond `blob:`.
  * @param source - the script text to execute.
  * @returns a promise settling when the script has executed (or failed).
  */
@@ -72,73 +75,61 @@ export async function loadClientBundle(carrier: DesktopTransport, url: string, e
 }
 
 /**
- * The carrier's API client: the pinned abstract client over the transport.
- * The only platform decision is routing — the two downstream event paths
- * open the stream primitive; everything else is the fetch primitive.
+ * One stream Remote method over the stream primitive. The opener's frames are
+ * the codec's opaque JSON bytes; this only replays them, decoded, as the
+ * candidate's decoded-item iterable so the base client's stream consumption
+ * (framing, envelope and item-schema parsing) runs unchanged. The caller's
+ * signal rides the open itself: the transport owns its cancellation for the
+ * stream's whole lifetime, including the pending open acknowledgement, and the
+ * stream is closed on every terminal.
+ * @param carrier - the transport client the stream frames cross.
+ * @param endpoint - the Remote endpoint the client names the stream by.
+ * @param payload - the Remote endpoint's open arguments.
+ * @param signal - the caller's cancellation for the open's whole lifetime.
+ * @returns an iterable of the stream's decoded items.
  */
-class DesktopApiClient extends AbstractApiClient {
-  constructor(private readonly carrier: DesktopTransport) {
-    super()
-  }
-
-  /** The transport aspect: stream primitive for the event paths, fetch primitive for the rest. */
-  protected doFetch(input: URL, init?: RequestInit): Promise<Response> {
-    if (input.pathname === MUX_EVENTS_PATH || input.pathname === HOST_EVENTS_PATH) {
-      return this.streamResponse(input, init?.signal ?? undefined)
+function openRemoteStream(
+  carrier: DesktopTransport,
+  endpoint: string,
+  payload: unknown,
+  signal: AbortSignal,
+): AsyncIterable<unknown> {
+  return (async function* (): AsyncGenerator<unknown, void> {
+    let stream: DesktopStream
+    try {
+      stream = await carrier.openStream(endpointRoute(endpoint), signal, encodeRemotePayload(payload))
+    } catch (error) {
+      throw error
     }
-    return this.carrier.fetch(input.href, init)
-  }
-
-  /**
-   * One downstream event stream over the stream primitive. The carrier's
-   * frames are the host carrier's own SSE bytes; this only replays them into
-   * a readable Response body, so the base class's SSE reader — framing,
-   * envelope and frame-schema parsing, onOpen timing — runs unchanged. The
-   * caller's signal rides the open itself: the transport owns its
-   * cancellation for the stream's whole lifetime, including the pending
-   * open acknowledgement, and removes its listener on every terminal.
-   */
-  private streamResponse(url: URL, signal: AbortSignal | undefined): Promise<Response> {
-    return this.carrier.openStream(url.href, signal).then((stream) => {
-      const frames = stream.frames()
-      const body = new ReadableStream<Uint8Array>({
-        async pull(controller) {
-          const result = await frames.next()
-          if (result.done) {
-            controller.close()
-            return
-          }
-          controller.enqueue(result.value)
-        },
-        cancel: () => {
-          // The consumer gave up: end the stream at the carrier (the local
-          // generator settles with it).
-          stream.close()
-        },
-      })
-      return new Response(body, {
-        status: 200,
-        statusText: 'OK',
-        headers: { 'content-type': 'text/event-stream', 'cache-control': 'no-cache' },
-      })
-    })
-  }
+    const reader = new RemoteItemReader()
+    try {
+      for await (const frame of stream.frames()) {
+        for (const item of reader.push(frame)) {
+          yield item
+        }
+      }
+    } finally {
+      stream.close()
+    }
+  })()
 }
 
 /**
- * Install the pinned carrier seam on the page global. Must run before the
- * DSH client tree boots: the connection plugin reads `__DSH_TRANSPORT__`
- * once, at apply time.
+ * Install the carrier seam on the page global. Must run before the DSH client
+ * tree boots: the connection plugin reads `__DSH_TRANSPORT__` once, at apply
+ * time. The transport owns the Host outright (it runs inside this shell's
+ * spawned runtime), so the privileged surface is reachable regardless of the
+ * page authority.
  * @param carrier - the transport client the seam carries.
  * @param evaluation - optional test seam standing in for script execution.
  * @returns nothing; the seam is on `globalThis.__DSH_TRANSPORT__`.
  */
 export function installDesktopCarrier(carrier: DesktopTransport, evaluation?: CarrierEvaluation): void {
-  const api: IApiClient = new DesktopApiClient(carrier)
   const hooks: ClientTransportHooks = {
-    createApiClient: () => api,
     fetch: (input, init) => carrier.fetch(input.href, init),
+    openStream: (endpoint, payload, signal) => openRemoteStream(carrier, endpoint, payload, signal),
     loadBundle: url => loadClientBundle(carrier, url, evaluation),
+    ownsHost: true,
   }
   ;(globalThis as { __DSH_TRANSPORT__?: ClientTransportHooks }).__DSH_TRANSPORT__ = hooks
 }

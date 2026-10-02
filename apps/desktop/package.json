@@ -20,7 +20,7 @@
     "@deepseek-ai/dsh-client-modules": "workspace:^",
     "@deepseek-ai/dsh-client-web": "workspace:^",
     "@deepseek-ai/dsh-desktop-runtime": "workspace:^",
-    "@deepseek-ai/dsh-host-apiproxy": "workspace:^",
+    "@deepseek-ai/dsh-util-crypto": "workspace:^",
     "@electron-forge/shared-types": "7.11.2",
     "@electron/asar": "^4.3.0",
     "@electron/fuses": "^2.1.3",

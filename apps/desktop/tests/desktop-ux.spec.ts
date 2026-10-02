@@ -21,6 +21,7 @@ import type { ElectronApplication, Page } from 'playwright'
 import { _electron as electron } from 'playwright'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import { DESKTOP_APP_NAME } from '../src/main/menu.ts'
+import { composerEditable, composerSubmit, rpc, workspaceFollowBaseline } from './support/electron-world.js'
 
 const appDir = join(import.meta.dirname, '..')
 const mainEntry = join(appDir, 'dist', 'main', 'index.js')
@@ -139,26 +140,6 @@ let win: Page
 const pageErrors: string[] = []
 const consoleErrors: string[] = []
 
-interface RpcEnvelope<T> {
-  type: string
-  result: { ok: boolean; value: T; error?: { code?: string; message?: string } }
-}
-
-function rpc<T>(method: string, payload: unknown): Promise<T> {
-  return win.evaluate(async ({ m, p }: { m: string; p: unknown }) => {
-    const transport = globalThis as unknown as { __DSH_TRANSPORT__: { fetch: (input: URL, init: RequestInit) => Promise<Response> } }
-    const response = await transport.__DSH_TRANSPORT__.fetch(new URL(`/api/${m}`, location.origin), {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ type: 'client-request', rpcId: `ux-${m}`, method: m, payload: p }),
-    })
-    return JSON.parse(await response.text()) as RpcEnvelope<T>
-  }, { m: method, p: payload }).then((envelope) => {
-    if (!envelope.result.ok) throw new Error(`${method} failed: ${envelope.result.error?.code}: ${envelope.result.error?.message}`)
-    return envelope.result.value
-  })
-}
-
 interface SessionSummary {
   sessionId: string
   blank: boolean
@@ -166,7 +147,7 @@ interface SessionSummary {
 }
 
 async function sessionCount(): Promise<number> {
-  const sessions = await rpc<{ items: SessionSummary[] }>('session.list', {})
+  const sessions = await rpc<{ items: SessionSummary[] }>(win, 'session/list', { _request: {} }, 'ux-count')
   return sessions.items.length
 }
 
@@ -240,14 +221,6 @@ async function openSidebar(): Promise<void> {
   }
 }
 
-/** The conversation composer is live when its textarea is writable. */
-function composerEditable(): Promise<boolean> {
-  return win.evaluate(() => {
-    const el = document.querySelector('[data-composer-card] textarea') as HTMLTextAreaElement | null
-    return el !== null && !el.readOnly
-  })
-}
-
 function assertCleanConsole(): void {
   expect(pageErrors).toEqual([])
   expect(consoleErrors).toEqual([])
@@ -296,8 +269,8 @@ describe.skipIf(!guiAvailable() || !runtimeBuilt)('desktop UX', () => {
     }
     // Startup auto-selection opens the seeded workspace's blank session.
     await win.waitForFunction(() => {
-      const el = document.querySelector('[data-composer-card] textarea')
-      return el !== null && !(el as HTMLTextAreaElement).readOnly
+      const el = document.querySelector('[data-composer-input]') as HTMLElement | null
+      return el !== null && el.isContentEditable === true
     }, undefined, { timeout: 60_000 })
   }, 240_000)
 
@@ -395,14 +368,12 @@ describe.skipIf(!guiAvailable() || !runtimeBuilt)('desktop UX', () => {
     // A finished turn first: while a workspace's blank session is current,
     // the pinned New Session action reuses it by design, so the new-session
     // count only moves from a non-blank current session.
-    const composer = win.locator('[data-composer-card] textarea')
-    await composer.fill('ux done')
-    await composer.press('Enter')
+    await composerSubmit(win, 'ux done')
     await expect.poll(() => win.evaluate(() => document.body.innerText.includes('UX_DONE')), { timeout: 30_000 }).toBe(true)
     const before = await sessionCount()
     expect(await clickMenu(['File', 'New Session'])).toBe(true)
     await expect.poll(sessionCount, { timeout: 15_000 }).toBe(before + 1)
-    await expect.poll(composerEditable, { timeout: 15_000 }).toBe(true)
+    await expect.poll(() => composerEditable(win), { timeout: 15_000 }).toBe(true)
     assertCleanConsole()
   }, 90_000)
 
@@ -423,10 +394,10 @@ describe.skipIf(!guiAvailable() || !runtimeBuilt)('desktop UX', () => {
       }
       ;(dialog as unknown as Record<string, unknown>).showOpenDialog = stub
     })
-    const workspacesBefore = await rpc<{ items: { workspaceId: string }[] }>('workspace.list', {})
+    const workspacesBefore = await workspaceFollowBaseline(win)
     expect(await clickMenu(['File', 'Open Workspace…'])).toBe(true)
     // The add-only picker raises the composed directory flow, which drives
-    // host.pickDirectory into the desktop picker and the patched dialog.
+    // directoryPicker.pick into the desktop picker and the patched dialog.
     const recorder = await app.evaluate(async () => {
       const read = (): { calls: number; properties: string[] } | undefined =>
         (globalThis as Record<string, unknown>).__uxDialogRecorder as { calls: number; properties: string[] } | undefined
@@ -441,21 +412,19 @@ describe.skipIf(!guiAvailable() || !runtimeBuilt)('desktop UX', () => {
     expect(recorder.calls).toBe(1)
     expect(recorder.properties).toContain('openDirectory')
     // Cancel: no workspace is adopted, the affordance stays available.
-    await expect.poll(async () => (await rpc<{ items: { workspaceId: string }[] }>('workspace.list', {})).items.length, { timeout: 10_000 })
-      .toBe(workspacesBefore.items.length)
+    await expect.poll(async () => (await workspaceFollowBaseline(win)).length, { timeout: 10_000 })
+      .toBe(workspacesBefore.length)
     assertCleanConsole()
   }, 90_000)
 
   it('cancels a running turn through the Session menu', async () => {
-    const composer = win.locator('[data-composer-card] textarea')
-    await composer.fill('ux cancel')
-    await composer.press('Enter')
+    await composerSubmit(win, 'ux cancel')
     const stop = win.locator('button[aria-label="Stop generating"], button[aria-label="停止生成"]')
     await stop.first().waitFor({ timeout: 30_000 })
     expect(await clickMenu(['Session', 'Cancel Current Run'])).toBe(true)
     await expect.poll(async () => stop.count(), { timeout: 30_000 }).toBe(0)
-    await expect.poll(composerEditable, { timeout: 30_000 }).toBe(true)
-    const sessions = await rpc<{ items: SessionSummary[] }>('session.list', {})
+    await expect.poll(() => composerEditable(win), { timeout: 30_000 }).toBe(true)
+    const sessions = await rpc<{ items: SessionSummary[] }>(win, 'session/list', { _request: {} }, 'ux-cancel')
     expect(sessions.items.every(item => !item.running)).toBe(true)
     assertCleanConsole()
   }, 120_000)

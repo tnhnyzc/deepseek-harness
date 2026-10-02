@@ -586,8 +586,8 @@ export async function runPackagedAppSmoke(artifact: string, platform: NodeJS.Pla
       let editable: unknown
       try {
         editable = await boundedEvaluate(page, `(() => {
-          const el = document.querySelector('[data-composer-card] textarea')
-          return el !== null && !el.readOnly
+          const el = document.querySelector('[data-composer-input]')
+          return el !== null && el.isContentEditable === true
         })()`)
         composerUnresponsive = 0
       } catch {
@@ -602,7 +602,7 @@ export async function runPackagedAppSmoke(artifact: string, platform: NodeJS.Pla
         // the hero text (is the seeded workspace visible to the picker?).
         const diagnostic = await boundedEvaluate(page, `(async () => {
           const card = document.querySelector('[data-composer-card]')
-          const ta = card !== null ? card.querySelector('textarea') : null
+          const ta = document.querySelector('[data-composer-input]')
           const root = document.getElementById('root')
           let runtime = null
           try {
@@ -738,14 +738,13 @@ export async function runPackagedAppSmoke(artifact: string, platform: NodeJS.Pla
     }
 
     // ── a bounded real carrier round trip ─────────────────────────────────
-    // Synthetic DOM input under CDP: the React-controlled textarea takes the
-    // native value setter + input event, and Enter arrives as a keydown.
+    // The release-B composer is a Lexical contenteditable: focus it, insert
+    // the text via the native input command, and submit with an Enter keydown.
     await boundedEvaluate(page, `(() => {
-      const el = document.querySelector('[data-composer-card] textarea')
-      if (el === null) throw new Error('the composer textarea is gone')
-      const setter = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value').set
-      setter.call(el, 'packaged carrier turn')
-      el.dispatchEvent(new Event('input', { bubbles: true }))
+      const el = document.querySelector('[data-composer-input]')
+      if (el === null) throw new Error('the composer input is gone')
+      el.focus()
+      document.execCommand('insertText', false, 'packaged carrier turn')
       el.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true, cancelable: true }))
       return true
     })()`)

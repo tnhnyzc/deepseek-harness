@@ -20,6 +20,7 @@ import type { AddressInfo } from 'node:net'
 import type { ElectronApplication, Page } from 'playwright'
 import { _electron as electron } from 'playwright'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
+import { composerEditable, composerSubmit, rpc, workspaceFollowBaseline } from './support/electron-world.js'
 
 const appDir = join(import.meta.dirname, '..')
 const mainEntry = join(appDir, 'dist', 'main', 'index.js')
@@ -205,26 +206,6 @@ let win: Page
 const pageErrors: string[] = []
 const consoleErrors: string[] = []
 
-interface RpcEnvelope<T> {
-  type: string
-  result: { ok: boolean; value: T; error?: { code?: string; message?: string } }
-}
-
-function rpc<T>(method: string, payload: unknown): Promise<T> {
-  return win.evaluate(async ({ m, p }: { m: string; p: unknown }) => {
-    const transport = globalThis as unknown as { __DSH_TRANSPORT__: { fetch: (input: URL, init: RequestInit) => Promise<Response> } }
-    const response = await transport.__DSH_TRANSPORT__.fetch(new URL(`/api/${m}`, location.origin), {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ type: 'client-request', rpcId: `parity-${m}`, method: m, payload: p }),
-    })
-    return JSON.parse(await response.text()) as RpcEnvelope<T>
-  }, { m: method, p: payload }).then((envelope) => {
-    if (!envelope.result.ok) throw new Error(`${method} failed: ${envelope.result.error?.code}: ${envelope.result.error?.message}`)
-    return envelope.result.value
-  })
-}
-
 interface SessionSummary {
   sessionId: string
   blank: boolean
@@ -288,14 +269,17 @@ function decodeSessionArtifact(file: string): string {
     .join('')
 }
 
-/** The session/title rows currently durable in the on-disk JSONL logs. */
+/** The session/title rows currently durable in the on-disk JSONL logs. Reads
+ *  every generation (session.jsonl, session.v<N>.jsonl, each optionally
+ *  zstd) because a post-repin session persists to a versioned generation. */
 function sessionLogTitles(): Record<string, { seq: number; title: unknown; source: unknown }[]> {
   const logs: string[] = []
+  const isSessionLog = (name: string): boolean => /^session(\.v\d+)?\.jsonl(\.zstd)?$/.test(name)
   const walk = (dir: string): void => {
     for (const entry of readdirSync(dir, { withFileTypes: true })) {
       const path = join(dir, entry.name)
       if (entry.isDirectory()) walk(path)
-      else if (entry.name === 'session.jsonl' || entry.name === 'session.jsonl.zstd') logs.push(path)
+      else if (isSessionLog(entry.name)) logs.push(path)
     }
   }
   walk(home)
@@ -327,14 +311,6 @@ async function awaitDurableTitle(title: string, source: string, timeoutMs: numbe
     await new Promise((resolve) => { setTimeout(resolve, 250) })
   }
   throw new Error(`title row "${title}" (source ${source}) never durable; on-disk rows: ${JSON.stringify(sessionLogTitles())}`)
-}
-
-/** The conversation composer is live when its textarea is writable. */
-function composerEditable(): Promise<boolean> {
-  return win.evaluate(() => {
-    const el = document.querySelector('[data-composer-card] textarea') as HTMLTextAreaElement | null
-    return el !== null && !el.readOnly
-  })
 }
 
 /** The session tree lives in the sidebar, which a fresh profile opens collapsed. */
@@ -403,10 +379,12 @@ describe.skipIf(!guiAvailable() || !runtimeBuilt)('desktop DSH web parity', () =
     // The client's startup auto-selection connects the most recent workspace
     // and opens its blank session once the baselines are in; the unlocked
     // composer is the terminal state of that user-visible path.
-    await expect.poll(composerEditable, { timeout: 60_000 }).toBe(true)
-    const workspaces = await rpc<{ items: { workspaceId: string; title: string; path: string }[] }>('workspace.list', {})
-    expect(workspaces.items.map(item => item.title)).toEqual(['parity-probe'])
-    const sessions = await rpc<{ items: SessionSummary[] }>('session.list', {})
+    await expect.poll(() => composerEditable(win), { timeout: 60_000 }).toBe(true)
+    // Release B lists workspaces through the workspace/follow baseline (the
+    // unary workspace/list was removed), so read the baseline via the stream.
+    const workspaces = await workspaceFollowBaseline(win)
+    expect(workspaces.map(item => item.title)).toEqual(['parity-probe'])
+    const sessions = await rpc<{ items: SessionSummary[] }>(win, 'session/list', { _request: {} }, 'parity-sess')
     expect(sessions.items).toHaveLength(1)
     expect(sessions.items[0]?.blank).toBe(true)
     expect(sessions.items[0]?.running).toBe(false)
@@ -414,9 +392,7 @@ describe.skipIf(!guiAvailable() || !runtimeBuilt)('desktop DSH web parity', () =
   }, 90_000)
 
   it('streams an assistant reply incrementally', async () => {
-    const composer = win.locator('[data-composer-card] textarea')
-    await composer.fill('parity turn a')
-    await composer.press('Enter')
+    await composerSubmit(win, 'parity turn a')
     // Incremental streaming: the partial text must paint BEFORE the final text.
     await win.waitForFunction(
       () => {
@@ -432,14 +408,17 @@ describe.skipIf(!guiAvailable() || !runtimeBuilt)('desktop DSH web parity', () =
   }, 90_000)
 
   it('renders the bash tool call and result in the conversation and trajectory', async () => {
-    const composer = win.locator('[data-composer-card] textarea')
-    await composer.fill('parity turn b')
-    await composer.press('Enter')
+    await composerSubmit(win, 'parity turn b')
     await expect.poll(() => win.evaluate(() => document.body.innerText.includes('TOOL_B_DONE')), { timeout: 60_000 }).toBe(true)
-    // The collapsed tool card shows the tool and its description; opening
-    // the row reveals the command it ran.
+    // Release B groups a turn's tool calls into a turn-process node that is
+    // collapsed by default: its disclosure button (the "N tool call" row)
+    // expands the node to reveal the tool-call row, and opening that row
+    // reveals the command it ran.
+    const toolDisclosure = win.getByRole('button', { name: /tool call|工具调用/ }).first()
+    await toolDisclosure.waitFor({ state: 'visible', timeout: 15_000 })
+    await toolDisclosure.click()
     const toolRow = win.locator('[data-chat-flow-key]').filter({ hasText: 'write the parity b file' }).first()
-    await expect.poll(async () => toolRow.count(), { timeout: 15_000 }).toBe(1)
+    await toolRow.waitFor({ state: 'visible', timeout: 15_000 })
     await toolRow.click()
     await expect.poll(() => win.evaluate(() => document.body.innerText.includes('b-out.txt')), { timeout: 15_000 }).toBe(true)
     // The trajectory view carries the same round.
@@ -451,9 +430,7 @@ describe.skipIf(!guiAvailable() || !runtimeBuilt)('desktop DSH web parity', () =
 
   it('asks for approval on a sandbox escalation and runs it after Allow once', async () => {
     await switchAccessMode('Read Only')
-    const composer = win.locator('[data-composer-card] textarea')
-    await composer.fill('parity turn c')
-    await composer.press('Enter')
+    await composerSubmit(win, 'parity turn c')
     const panel = win.locator('[data-approval-key]')
     await panel.waitFor({ timeout: 60_000 })
     await panel.getByRole('button', { name: 'Allow once' }).click()
@@ -465,9 +442,7 @@ describe.skipIf(!guiAvailable() || !runtimeBuilt)('desktop DSH web parity', () =
   }, 180_000)
 
   it('rejects the escalation on Reject and does not run the command', async () => {
-    const composer = win.locator('[data-composer-card] textarea')
-    await composer.fill('parity turn d')
-    await composer.press('Enter')
+    await composerSubmit(win, 'parity turn d')
     const panel = win.locator('[data-approval-key]')
     await panel.waitFor({ timeout: 60_000 })
     await panel.getByRole('button', { name: 'Reject' }).click()
@@ -479,9 +454,7 @@ describe.skipIf(!guiAvailable() || !runtimeBuilt)('desktop DSH web parity', () =
 
   it('answers an ask_user_question through the question composer', async () => {
     await switchAccessMode('Workspace Write')
-    const composer = win.locator('[data-composer-card] textarea')
-    await composer.fill('parity turn e')
-    await composer.press('Enter')
+    await composerSubmit(win, 'parity turn e')
     const question = win.locator('[data-question-key]')
     await question.waitFor({ timeout: 60_000 })
     await expect.poll(() => question.getByText('Pick a color for the parity probe.').count(), { timeout: 10_000 }).toBeGreaterThan(0)
@@ -493,15 +466,13 @@ describe.skipIf(!guiAvailable() || !runtimeBuilt)('desktop DSH web parity', () =
   }, 180_000)
 
   it('cancels a running turn with Stop generating', async () => {
-    const composer = win.locator('[data-composer-card] textarea')
-    await composer.fill('parity turn f')
-    await composer.press('Enter')
+    await composerSubmit(win, 'parity turn f')
     await expect.poll(() => win.evaluate(() => document.body.innerText.includes('CANCEL_CHUNK_1')), { timeout: 30_000 }).toBe(true)
     const stop = win.getByRole('button', { name: 'Stop generating' })
     await stop.click({ timeout: 10_000 })
     await expect.poll(async () => stop.count(), { timeout: 30_000 }).toBe(0)
-    await expect.poll(composerEditable, { timeout: 30_000 }).toBe(true)
-    const sessions = await rpc<{ items: SessionSummary[] }>('session.list', {})
+    await expect.poll(() => composerEditable(win), { timeout: 30_000 }).toBe(true)
+    const sessions = await rpc<{ items: SessionSummary[] }>(win, 'session/list', { _request: {} }, 'parity-cancel')
     expect(sessions.items.every(item => !item.running)).toBe(true)
     assertCleanConsole()
   }, 120_000)
@@ -528,10 +499,10 @@ describe.skipIf(!guiAvailable() || !runtimeBuilt)('desktop DSH web parity', () =
 
   it('creates a second session with New session', async () => {
     await win.getByRole('button', { name: 'New session' }).first().click()
-    await expect.poll(async () => (await rpc<{ items: SessionSummary[] }>('session.list', {})).items.length, { timeout: 15_000 }).toBe(2)
+    await expect.poll(async () => (await rpc<{ items: SessionSummary[] }>(win, 'session/list', { _request: {} }, 'parity-new')).items.length, { timeout: 15_000 }).toBe(2)
     // The new blank session is open with a live composer.
-    await expect.poll(composerEditable, { timeout: 15_000 }).toBe(true)
-    const sessions = await rpc<{ items: SessionSummary[] }>('session.list', {})
+    await expect.poll(() => composerEditable(win), { timeout: 15_000 }).toBe(true)
+    const sessions = await rpc<{ items: SessionSummary[] }>(win, 'session/list', { _request: {} }, 'parity-new2')
     expect(sessions.items.filter(item => item.blank).length).toBeGreaterThanOrEqual(1)
     assertCleanConsole()
   }, 90_000)
@@ -570,11 +541,11 @@ describe.skipIf(!guiAvailable() || !runtimeBuilt)('desktop DSH web parity', () =
     expect(await win.evaluate(() => document.getElementById('root')?.dataset.state)).toBe('ready')
     // Auto-selection restores the workspace and reopens its (reused) blank
     // session before the welcome question is meaningful.
-    await expect.poll(composerEditable, { timeout: 60_000 }).toBe(true)
+    await expect.poll(() => composerEditable(win), { timeout: 60_000 }).toBe(true)
     // The welcome acknowledgement persisted: no first-run notice on relaunch.
     expect(await win.getByRole('button', { name: 'Continue' }).count()).toBe(0)
-    await expect.poll(async () => (await rpc<{ items: SessionSummary[] }>('session.list', {})).items.length, { timeout: 30_000 }).toBe(2)
-    const sessions = await rpc<{ items: SessionSummary[] }>('session.list', {})
+    await expect.poll(async () => (await rpc<{ items: SessionSummary[] }>(win, 'session/list', { _request: {} }, 'parity-reopen')).items.length, { timeout: 30_000 }).toBe(2)
+    const sessions = await rpc<{ items: SessionSummary[] }>(win, 'session/list', { _request: {} }, 'parity-reopen2')
     expect(sessions.items.every(item => !item.running)).toBe(true)
     // The cold list reads the title from the persisted projection cache: the
     // projection cache's disposal drain durably checkpointed the rename during

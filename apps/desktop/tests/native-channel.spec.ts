@@ -15,7 +15,13 @@ interface Harness {
   channel: ReturnType<typeof createNativeChannel>
 }
 
-function makeHarness(capabilities: NativeCapabilities = stubCapabilities()): Harness {
+function makeHarness(overrides: Partial<NativeCapabilities> = {}): Harness {
+  const capabilities: NativeCapabilities = {
+    pickDirectory: async () => '/tmp/chosen',
+    openPath: async () => undefined,
+    openTextFile: async () => undefined,
+    ...overrides,
+  }
   const sent: NativeMessage[] = []
   const channel = createNativeChannel({
     capabilities,
@@ -23,13 +29,6 @@ function makeHarness(capabilities: NativeCapabilities = stubCapabilities()): Har
     getWindow: () => undefined,
   })
   return { sent, channel }
-}
-
-function stubCapabilities(): NativeCapabilities {
-  return {
-    pickDirectory: async () => '/tmp/chosen',
-    openPath: async () => undefined,
-  }
 }
 
 describe('createNativeChannel', () => {
@@ -55,6 +54,32 @@ describe('createNativeChannel', () => {
     await vi.waitFor(() => { expect(harness.sent).toHaveLength(1) })
     expect(harness.sent[0]).toEqual({ type: 'native.response', requestId: 'b', ok: true })
     expect(opened).toEqual(['/tmp/doc.txt'])
+  })
+
+  it('answers a path.openText request by dispatching to the text-document opener', async () => {
+    const openedText: string[] = []
+    const openedPath: string[] = []
+    const harness = makeHarness({
+      pickDirectory: async () => null,
+      openPath: async (path) => { openedPath.push(path) },
+      openTextFile: async (path) => { openedText.push(path) },
+    })
+    harness.channel.handle({ type: 'native.request', requestId: 't', method: 'path.openText', path: '/tmp/cordis.yml' })
+    await vi.waitFor(() => { expect(harness.sent).toHaveLength(1) })
+    expect(harness.sent[0]).toEqual({ type: 'native.response', requestId: 't', ok: true })
+    expect(openedText).toEqual(['/tmp/cordis.yml'])
+    expect(openedPath).toEqual([])
+  })
+
+  it('maps a text-document capability failure onto the open-failed code', async () => {
+    const harness = makeHarness({
+      pickDirectory: async () => null,
+      openPath: async () => undefined,
+      openTextFile: async () => { throw new NativeCapabilityError('open-failed', 'no editor') },
+    })
+    harness.channel.handle({ type: 'native.request', requestId: 't', method: 'path.openText', path: '/tmp/cordis.yml' })
+    await vi.waitFor(() => { expect(harness.sent).toHaveLength(1) })
+    expect(harness.sent[0]).toEqual({ type: 'native.response', requestId: 't', ok: false, code: 'open-failed', message: 'no editor' })
   })
 
   it('maps a capability failure onto its closed code', async () => {

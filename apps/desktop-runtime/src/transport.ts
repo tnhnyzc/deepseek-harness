@@ -263,15 +263,18 @@ export interface FetchError {
 }
 
 /**
- * Primitive B — open an opaque stream. `url` is the endpoint as the DSH
- * client names it, absolute: the renderer resolves it against the transport
- * dummy origin before it goes on the wire, so the runtime's carrier sees the
- * same url form a fetch would.
+ * Primitive B — open an opaque stream. `url` is the route the opener names
+ * the stream by, absolute: the renderer resolves it against the transport
+ * dummy origin before it goes on the wire. `data`, when present, is the
+ * opaque initial request body the opener sends with the open (the DSH-facing
+ * adapter encodes its RPC payload there); it is one opaque byte field, not an
+ * RPC-semantic value, and carries no more than one frame of bytes.
  */
 export interface StreamOpen {
   type: 'stream.open'
   streamId: string
   url: string
+  data?: Uint8Array
 }
 
 /** Primitive B — the runtime accepts (or refuses) the open. */
@@ -394,6 +397,21 @@ function readData(value: unknown): Uint8Array {
   return value instanceof Uint8Array ? value : fail('data: expected a Uint8Array')
 }
 
+/**
+ * The bounded opaque initial-request-body check for `stream.open.data`: a
+ * wrong type is a refusal, and a body over one frame is a wire refusal (the
+ * open's payload is one opaque byte field, not a streamed body).
+ * @param value - the received initial body.
+ * @param label - the field name for the over-bound refusal.
+ * @returns the body.
+ */
+function readBoundedData(value: unknown, label: string): Uint8Array {
+  if (!(value instanceof Uint8Array)) fail(`${label}: expected a Uint8Array`)
+  return value.byteLength <= TRANSPORT_MAX_FRAME_BYTES
+    ? value
+    : fail(`${label}: ${String(value.byteLength)} bytes exceed the ${String(TRANSPORT_MAX_FRAME_BYTES)} byte bound`)
+}
+
 function readHeaders(value: unknown): Array<[string, string]> {
   if (!Array.isArray(value)) fail('headers: expected an array of [name, value] pairs')
   if (value.length > TRANSPORT_MAX_HEADER_COUNT) {
@@ -497,12 +515,15 @@ export function parseTransportMessage(value: unknown): DesktopTransportMessage {
         code: readBoundedText(raw.code, 'fetch.error.code: expected a non-empty string', TRANSPORT_MAX_CODE_CHARS, 'fetch.error.code'),
         message: readBoundedText(raw.message, 'fetch.error.message: expected a string', TRANSPORT_MAX_MESSAGE_CHARS, 'fetch.error.message', false),
       }
-    case 'stream.open':
+    case 'stream.open': {
+      const data = raw.data === undefined ? undefined : readBoundedData(raw.data, 'stream.open.data')
       return {
         type,
         streamId: readId(raw.streamId, 'stream.open.streamId'),
         url: readBoundedText(raw.url, 'stream.open.url: expected a non-empty string', TRANSPORT_MAX_URL_CHARS, 'stream.open.url'),
+        ...(data !== undefined ? { data } : {}),
       }
+    }
     case 'stream.open.ack': {
       const reason = readOptionalReason(raw.reason, 'stream.open.ack.reason')
       return {
@@ -540,6 +561,9 @@ export function parseTransportMessage(value: unknown): DesktopTransportMessage {
 /** Whether a message carries frame or body bytes (the size guard's only interest). */
 export function transportMessageDataBytes(message: DesktopTransportMessage): number {
   if (message.type === 'fetch.request.chunk' || message.type === 'fetch.response.chunk' || message.type === 'stream.frame') {
+    return message.data.byteLength
+  }
+  if (message.type === 'stream.open' && message.data !== undefined) {
     return message.data.byteLength
   }
   return 0

@@ -1,5 +1,5 @@
 /**
- * The OS capability registry: the two closed capabilities over an
+ * The OS capability registry: the three closed capabilities over an
  * injectable OS port, their success/cancel/failure mapping, and the bounded,
  * redaction-safe diagnostic messages.
  */
@@ -16,6 +16,7 @@ function ports(overrides: Partial<NativeCapabilityPorts> = {}): NativeCapability
   return {
     showOpenDialog: vi.fn(async () => ({ canceled: false, filePaths: ['/tmp/chosen'] })),
     openPath: vi.fn(async () => ''),
+    openTextFile: vi.fn(async () => ''),
     ...overrides,
   }
 }
@@ -93,5 +94,30 @@ describe('createNativeCapabilities', () => {
     const error = await capabilities.openPath('/tmp/x').catch((thrown: unknown) => thrown)
     expect(error).toBeInstanceOf(NativeCapabilityError)
     expect((error as NativeCapabilityError).message).toHaveLength(MAX_DIAGNOSTIC_CHARS)
+  })
+
+  it('resolves a text-document open into void', async () => {
+    const openText = vi.fn(async () => '')
+    const capabilities = createNativeCapabilities(ports({ openTextFile: openText }))
+    await expect(capabilities.openTextFile('/tmp/cordis.yml')).resolves.toBeUndefined()
+    expect(openText).toHaveBeenCalledWith('/tmp/cordis.yml')
+  })
+
+  it('maps a text-document shell failure string to the open-failed code', async () => {
+    const capabilities = createNativeCapabilities(ports({
+      openTextFile: async () => 'no editor for .yml',
+    }))
+    await expect(capabilities.openTextFile('/tmp/cordis.yml')).rejects.toMatchObject({
+      name: 'NativeCapabilityError',
+      code: 'open-failed',
+      message: 'no editor for .yml',
+    })
+  })
+
+  it('maps a throw during the text-document open to the open-failed code', async () => {
+    const capabilities = createNativeCapabilities(ports({
+      openTextFile: async () => { throw new Error('editor refused') },
+    }))
+    await expect(capabilities.openTextFile('/tmp/cordis.yml')).rejects.toMatchObject({ code: 'open-failed', message: 'editor refused' })
   })
 })

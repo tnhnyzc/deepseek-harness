@@ -23,14 +23,27 @@ import type { HostConnectionService } from '@deepseek-ai/dsh-client-connection'
 import { provideCmdline } from '@deepseek-ai/dsh-cmdline'
 import { resolveDshHome } from '@deepseek-ai/dsh-home-paths'
 import { DSH_LAUNCH_ENVIRONMENT_KEY } from '@deepseek-ai/dsh-launch-environment'
-import { toFetchHandler } from '@deepseek-ai/dsh-host-apiproxy'
 import { bootGraphMessage, createClientBundleFetch } from './boot-graph.ts'
 import { composeDesktopPatches, prepareDesktopProfile, PROFILE_ROOT_FILENAME } from './composition.ts'
 import { createNativeBridge, NativeError } from './native-bridge.ts'
 import { createProcessShutdown } from './shutdown.ts'
 import { CONTAINMENT_MODES, installWindowsProcessContainment, type WindowsProcessContainment } from './windows-job.ts'
-import { attachTransportRuntime, type FetchDispatch } from './transport-runtime.ts'
+import { attachTransportRuntime, type FetchDispatch, type StreamOpenDispatch } from './transport-runtime.ts'
+import {
+  decodeRemotePayload,
+  frameRemoteItem,
+  routeEndpoint,
+} from './remote-codec.ts'
 import { createProcessTransportPort } from './transport-process.ts'
+
+/**
+ * The host stream carrier opener the runtime reads off the gateway service.
+ * A structural face (not the gateway's own type): the gateway package is not a
+ * composite project this app references, and the runtime only needs the opener.
+ */
+interface GatewayWireStream {
+  readonly open: (endpoint: string, payload: unknown, signal: AbortSignal) => Promise<AsyncIterable<unknown>>
+}
 
 const BIN_NAME = 'dsh-desktop-runtime'
 
@@ -48,7 +61,7 @@ export interface RuntimeReadyMessage {
   type: 'runtime.ready'
   runtimeVersion: string
   dshVersion: string
-  capabilities: { apiProxy: boolean; httpServer: boolean }
+  capabilities: { connection: boolean; httpServer: boolean }
 }
 
 /**
@@ -106,7 +119,7 @@ function readyMessage(ctx: Context): RuntimeReadyMessage {
     runtimeVersion: readVersion(INSTALL_ANCHOR),
     dshVersion: readVersion(DSH_BASE_MANIFEST),
     capabilities: {
-      apiProxy: ctx.get('apiProxy') !== undefined,
+      connection: ctx.get('connection') !== undefined,
       httpServer: ctx.get('webServer') !== undefined,
     },
   }
@@ -176,7 +189,7 @@ async function main(): Promise<void> {
       }
     }
     const home = resolveDshHome()
-    const profile = prepareDesktopProfile(INSTALL_ANCHOR, home)
+    const profile = await prepareDesktopProfile(INSTALL_ANCHOR, home)
     const homePatches = loadOptionalPatches(BIN_NAME, join(home, PROFILE_PATCH_FILENAME)) ?? []
     const { patches } = composeDesktopPatches(profile, homePatches, SHIPPED_PRESET_ROOT)
     const rootConfig = join(profile.dir, PROFILE_ROOT_FILENAME)
@@ -185,37 +198,53 @@ async function main(): Promise<void> {
       provideCmdline(hostCtx, { args: [], exit: (code) => { void shutdown.shutdown(code) } })
       // The desktop native seats: the directory-picker native capability and
       // the gateway's default-application opener both cross to Electron main
-      // over the native channel. Text-file opening keeps the DSH native
-      // opener: the pinned Electron shell API has no text-editor intent.
+      // over the native channel. Path and text-document opens both delegate to
+      // the channel; the Electron shell opens each with the default
+      // application (it names no separate text-editor intent).
       hostCtx.provide('desktopDirectoryPick', (signal: AbortSignal) => nativeBridge.pickDirectory(signal))
       hostCtx.provide('nativeOpeners', {
+        canOpenPath: () => true,
         openPath: (path: string, signal: AbortSignal) => nativeBridge.openPath(path, signal),
+        openTextFile: (path: string, signal: AbortSignal) => nativeBridge.openTextFile(path, signal),
       })
     })
-    const apiProxy = ctx.get('apiProxy')
-    if (apiProxy === undefined) throw new Error('boot settled without the apiProxy service; the desktop runtime cannot serve transport')
+    // The host Connection service composes the in-process RPC interceptor
+    // dispatch (the Typert gateway) for the fetch channel, and the gateway's
+    // own stream carrier serves the stream channel; without either the runtime
+    // cannot serve transport.
+    const connection = ctx.get('connection') as HostConnectionService | undefined
+    if (connection === undefined) throw new Error('boot settled without the connection service; the desktop runtime cannot serve transport')
+    const gateway = ctx.get('typertGateway') as { readonly wireStream: GatewayWireStream } | undefined
+    if (gateway === undefined) throw new Error('boot settled without the typertGateway service; the desktop runtime cannot serve streams')
     // The client boot table composes the __DSH_BOOT__ graph and owns the
     // bundle paths; without it the renderer cannot boot the DSH client tree.
     const clientModules = ctx.get('clientModules')
     if (clientModules === undefined) {
       throw new Error('boot settled without the clientModules service; the desktop runtime cannot serve the client boot graph')
     }
-    // The host Connection service contributes the in-process RPC interceptor
-    // dispatch (the Typert gateway) ahead of the API proxy fallback; without
-    // it the fetch channel is the bare carrier.
-    const connection = ctx.get('connection') as HostConnectionService | undefined
-    const apiHandler = toFetchHandler(apiProxy)
+    const fetchHandler = connection.createSharedFetchHandler('/api')
     const bundleFetch = createClientBundleFetch(clientModules)
-    const unaryHandler = connection !== undefined
-      ? connection.createSharedFetchHandler('/api', apiHandler)
-      : apiHandler
     const fetchDispatch: FetchDispatch = (request) => {
       const pathname = new URL(request.url).pathname
       return request.method === 'GET' && pathname.startsWith('/plugins/')
         ? bundleFetch(request)
-        : unaryHandler.fetch(request)
+        : fetchHandler.fetch(request)
     }
-    transportDispose = attachTransportRuntime(transportPort, apiProxy, { fetchDispatch })
+    // The DSH-facing stream opener: map the route to the RPC endpoint, decode
+    // the opaque initial body to the RPC payload, open the host stream
+    // carrier, and re-encode its decoded items as opaque bytes. The generic
+    // wire and broker never see the endpoint or the values.
+    const streamOpenDispatch: StreamOpenDispatch = async (route, initialBody, signal) => {
+      const endpoint = routeEndpoint(route)
+      const payload = initialBody !== undefined ? decodeRemotePayload(initialBody) : undefined
+      const items = await gateway.wireStream.open(endpoint, payload, signal)
+      return (async function* (): AsyncGenerator<Uint8Array, void> {
+        for await (const item of items) {
+          yield frameRemoteItem(item)
+        }
+      })()
+    }
+    transportDispose = attachTransportRuntime(transportPort, { fetchDispatch, streamOpenDispatch })
     dispose = () => {
       // Containment releases with the tree: any member that outlived the
       // dispose dies when the job handle closes.
@@ -239,13 +268,13 @@ async function main(): Promise<void> {
       // request→response cycle with no OS involvement. A channel that
       // cannot round trip never answers, and the bound records `unknown`.
       const channelProbe = new AbortController()
-      const abortChannelProbe = setTimeout(() => channelProbe.abort(), 10_000)
+      const abortChannelProbe = setTimeout(() => { channelProbe.abort() }, 10_000)
       let channelRoundTrip: { code: string }
       try {
         await nativeBridge.openPath('dsh-smoke\u0000probe', channelProbe.signal)
         channelRoundTrip = { code: 'unexpected-success' }
       } catch (error) {
-        channelRoundTrip = { code: error instanceof NativeError ? String(error.code) : 'unknown' }
+        channelRoundTrip = { code: error instanceof NativeError ? error.code : 'unknown' }
       } finally {
         clearTimeout(abortChannelProbe)
       }
@@ -254,7 +283,7 @@ async function main(): Promise<void> {
       // `probe-aborted` instead of the OS verdict.
       const probePath = join(home, `dsh-smoke-absent-${String(process.pid)}-${String(Date.now())}`)
       const probe = new AbortController()
-      const abortProbe = setTimeout(() => probe.abort(), 15_000)
+      const abortProbe = setTimeout(() => { probe.abort() }, 15_000)
       let nativeOpenPath: { ok: boolean; code?: string; message?: string }
       try {
         await nativeBridge.openPath(probePath, probe.signal)
@@ -262,7 +291,7 @@ async function main(): Promise<void> {
       } catch (error) {
         nativeOpenPath = {
           ok: false,
-          code: probe.signal.aborted ? 'probe-aborted' : error instanceof NativeError ? String(error.code) : 'unknown',
+          code: probe.signal.aborted ? 'probe-aborted' : error instanceof NativeError ? error.code : 'unknown',
           message: (error instanceof Error ? error.message : String(error)).slice(0, 512),
         }
       } finally {

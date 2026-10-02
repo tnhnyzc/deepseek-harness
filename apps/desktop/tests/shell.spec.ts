@@ -217,10 +217,10 @@ describe.skipIf(!guiAvailable() || !runtimeBuilt)('desktop runtime smoke', () =>
         const hooks = (globalThis as unknown as {
           __DSH_TRANSPORT__: { fetch: (input: URL, init: RequestInit) => Promise<Response> }
         }).__DSH_TRANSPORT__
-        const response = await hooks.fetch(new URL('/api/session.list', location.origin), {
+        const response = await hooks.fetch(new URL('/api/session/list', location.origin), {
           method: 'POST',
           headers: { 'content-type': 'application/json' },
-          body: JSON.stringify({ type: 'client-request', rpcId: 'smoke-rpc', method: 'session.list', payload: {} }),
+          body: JSON.stringify({ type: 'client-request', rpcId: 'smoke-rpc', method: 'session/list', payload: { args: { _request: {} } } }),
         })
         return { status: response.status, body: await response.text() }
       })

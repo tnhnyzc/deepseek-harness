@@ -8,12 +8,11 @@
  * to the carrier: the graph and the two host-owned script artifacts ride a
  * control message, and the bundle bytes the graph rows name are served on
  * the transport's fetch channel at the same `/plugins` path the web
- * composition serves, resolved through the registry's table (no path logic
- * is duplicated here).
+ * composition serves, through the registry's own authoritative serving face
+ * (`fetchBundle`) so the two carriers share one parser and one validation.
  * @module @deepseek-ai/dsh-desktop-runtime/boot-graph
  */
 
-import { readFile } from 'node:fs/promises'
 import { bootInjections, type WebBootGraph } from '@deepseek-ai/dsh-client-modules'
 
 /** The control message carrying the host's client-boot artifacts to the supervisor. */
@@ -56,58 +55,18 @@ export function bootGraphMessage(source: BootGraphSource): BootGraphMessage {
   }
 }
 
-/** The prefix the web composition serves client bundles under (a carrier path, not a route this module owns). */
-const BUNDLE_PREFIX = '/plugins/'
-const BUNDLE_SUFFIX = '/client.js'
-const SOURCE_MAP_SUFFIX = '/client.js.map'
-
 /**
- * Fetch dispatch serving client bundle bytes the way the registry's own
- * `/plugins` route does: only the ids the registry's table knows, only the
- * bundle and source-map suffixes, `no-cache`, 405 for non-GET/HEAD, 404 for
- * every miss. The id → file resolution is the registry's (`clientPath`);
- * this function owns only the request/response mechanics.
- * @param registry - the client module table the paths resolve through.
+ * Fetch dispatch serving client bundle bytes through the registry's own
+ * authoritative serving face (`fetchBundle`), so the shell/no-Web carrier and
+ * the web composition's HTTP route share one parser and one validation and
+ * cannot disagree about single/combo URLs, advertised revisions, source maps,
+ * method handling, or the prior-generation recomposition race window. This
+ * module owns only the dispatch — no bundle parsing or path logic.
+ * @param registry - the client module registry that owns the response state.
  * @returns a fetch dispatch for the bundle routes.
  */
 export function createClientBundleFetch(
-  registry: { clientPath(id: string): string | undefined },
+  registry: { fetchBundle(request: Request): Promise<Response> },
 ): (request: Request) => Promise<Response> {
-  return async (request: Request): Promise<Response> => {
-    if (request.method !== 'GET' && request.method !== 'HEAD') {
-      return new Response('method not allowed', { status: 405 })
-    }
-    let pathname: string
-    try {
-      pathname = decodeURIComponent(new URL(request.url).pathname)
-    } catch {
-      return notFound()
-    }
-    const isSourceMap = pathname.startsWith(BUNDLE_PREFIX) && pathname.endsWith(SOURCE_MAP_SUFFIX)
-    const suffix = isSourceMap ? SOURCE_MAP_SUFFIX : BUNDLE_SUFFIX
-    const id = pathname.startsWith(BUNDLE_PREFIX) && pathname.endsWith(suffix)
-      ? pathname.slice(BUNDLE_PREFIX.length, -suffix.length)
-      : undefined
-    const clientPath = id === undefined ? undefined : registry.clientPath(id)
-    const path = clientPath === undefined ? undefined : `${clientPath}${isSourceMap ? '.map' : ''}`
-    if (path === undefined) return notFound()
-    try {
-      const body = await readFile(path)
-      return new Response(request.method === 'HEAD' ? null : body, {
-        status: 200,
-        headers: {
-          'content-type': isSourceMap ? 'application/json; charset=utf-8' : 'text/javascript; charset=utf-8',
-          'cache-control': 'no-cache',
-        },
-      })
-    } catch {
-      // Registered but unreadable (bundle not built): a loud 404, like the
-      // registry's own route.
-      return notFound()
-    }
-  }
-}
-
-function notFound(): Response {
-  return new Response('not found', { status: 404 })
+  return request => registry.fetchBundle(request)
 }

@@ -4,7 +4,8 @@
  * registry, carried on the supervisor's fork IPC channel (separate from the
  * stage 3 fetch/stream transport port). It moves OS capability calls —
  * opening a native directory chooser, opening a path with the default
- * application — and nothing else: the method set is closed and
+ * application, or opening a text file with the default editor — and nothing
+ * else: the method set is closed and
  * schema-validated, every operation carries a unique request id, and no
  * message names or constrains any DSH business concept. The renderer never
  * sees this channel: requests originate only from the supervised runtime
@@ -18,7 +19,7 @@
  */
 
 /** The closed native method set: OS capability vocabulary, no DSH semantics. */
-export type NativeMethod = 'directory.pick' | 'path.open'
+export type NativeMethod = 'directory.pick' | 'path.open' | 'path.openText'
 
 /**
  * Structural bound on a path request: the largest path the desktop OS layer
@@ -64,7 +65,15 @@ export interface NativePathOpenRequest {
   path: string
 }
 
-export type NativeRequest = NativeDirectoryPickRequest | NativePathOpenRequest
+/** Open one text file with the OS default text editor. */
+export interface NativePathOpenTextRequest {
+  type: 'native.request'
+  requestId: string
+  method: 'path.openText'
+  path: string
+}
+
+export type NativeRequest = NativeDirectoryPickRequest | NativePathOpenRequest | NativePathOpenTextRequest
 
 /**
  * The success terminal. The chooser's outcome (an absolute path, or null for
@@ -119,7 +128,7 @@ export class NativeProtocolError extends Error {
 }
 
 /** The closed method vocabulary, for diagnostics and validation messages. */
-export const NATIVE_METHODS: readonly NativeMethod[] = ['directory.pick', 'path.open']
+export const NATIVE_METHODS: readonly NativeMethod[] = ['directory.pick', 'path.open', 'path.openText']
 
 /** The closed error-code vocabulary, for diagnostics and validation messages. */
 export const NATIVE_ERROR_CODES: readonly NativeErrorCode[] = [
@@ -138,7 +147,9 @@ function readId(value: unknown, label: string): string {
 }
 
 function readMethod(value: unknown): NativeMethod {
-  return value === 'directory.pick' || value === 'path.open' ? value : fail(`method: expected one of ${NATIVE_METHODS.join(', ')}`)
+  return value === 'directory.pick' || value === 'path.open' || value === 'path.openText'
+    ? value
+    : fail(`method: expected one of ${NATIVE_METHODS.join(', ')}`)
 }
 
 /** The structural path check: a non-empty string without NUL, within the bound. */
@@ -201,7 +212,9 @@ export function parseNativeRequest(value: unknown): NativeRequest {
   const requestId = readId(raw.requestId, 'native.request.requestId')
   const method = readMethod(raw.method)
   if (method === 'directory.pick') return { type: 'native.request', requestId, method }
-  return { type: 'native.request', requestId, method, path: readPath(raw.path) }
+  // Both open methods carry a path; the narrowed method is one of the two.
+  const path = readPath(raw.path)
+  return { type: 'native.request', requestId, method, path }
 }
 
 /**

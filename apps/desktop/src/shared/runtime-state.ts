@@ -12,8 +12,8 @@ export type RuntimeState = 'stopped' | 'starting' | 'ready' | 'stopping' | 'fail
 
 /** The capability facts the runtime reports at readiness. */
 export interface RuntimeCapabilities {
-  /** The API gateway composes standalone (the stage 3 transport's host). */
-  apiProxy: boolean
+  /** The host Connection + Typert gateway compose standalone (the stage 3 transport's host). */
+  connection: boolean
   /** An HTTP server is mounted (must be false: no localhost web server). */
   httpServer: boolean
 }

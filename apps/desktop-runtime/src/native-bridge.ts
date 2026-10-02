@@ -47,6 +47,12 @@ export interface NativeBridge {
    * @param signal - caller lifetime; abort terminates the operation as cancellation.
    */
   openPath(path: string, signal: AbortSignal): Promise<void>
+  /**
+   * Open one text file with the OS default text editor.
+   * @param path - the absolute path the DSH layer resolved and authorized.
+   * @param signal - caller lifetime; abort terminates the operation as cancellation.
+   */
+  openTextFile(path: string, signal: AbortSignal): Promise<void>
   /** Settle every pending operation with the channel-closed failure; idempotent. */
   dispose(): void
 }
@@ -223,7 +229,7 @@ export function createNativeBridge(options: NativeBridgeOptions = {}): NativeBri
       op.sent = true
       send({ type: 'native.request', requestId: id, method, path })
     } else {
-      // Unreachable: openPath always carries its path.
+      // Unreachable: both open methods always carry their path.
       op.terminal = true
       release(id)
       op.reject(new Error('native bridge: path.open requires a path'))
@@ -237,6 +243,7 @@ export function createNativeBridge(options: NativeBridgeOptions = {}): NativeBri
   return {
     pickDirectory: (signal): Promise<string | null> => request('directory.pick', signal) as Promise<string | null>,
     openPath: (path, signal): Promise<void> => request('path.open', signal, path) as Promise<void>,
+    openTextFile: (path, signal): Promise<void> => request('path.openText', signal, path) as Promise<void>,
     dispose,
   }
 }

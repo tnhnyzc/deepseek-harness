@@ -110,7 +110,7 @@ describe('runtime supervisor', () => {
     const view = await waitForState(supervisor, v => v.state === 'ready')
     expect(statesOf(events)).toEqual(['starting', 'ready'])
     expect(view.ready?.runtimeVersion).toBe('fixture')
-    expect(view.ready?.capabilities).toEqual({ apiProxy: true, httpServer: false })
+    expect(view.ready?.capabilities).toEqual({ connection: true, httpServer: false })
     await expect(supervisor.stop()).resolves.toBeUndefined()
     expect(supervisor.view().state).toBe('stopped')
   })

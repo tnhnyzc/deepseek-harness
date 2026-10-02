@@ -24,7 +24,7 @@ interface ReadyPayload {
   type: 'runtime.ready'
   runtimeVersion: string
   dshVersion: string
-  capabilities: { apiProxy: boolean; httpServer: boolean }
+  capabilities: { connection: boolean; httpServer: boolean }
 }
 
 interface BootGraphPayload {
@@ -110,7 +110,7 @@ describe.skipIf(!existsSync(ENTRY))('desktop runtime boot', () => {
     expect(ready.type).toBe('runtime.ready')
     expect(ready.runtimeVersion).toMatch(/^\d+\.\d+\.\d+/)
     expect(ready.dshVersion).toMatch(/^\d+\.\d+\.\d+/)
-    expect(ready.capabilities).toEqual({ apiProxy: true, httpServer: false })
+    expect(ready.capabilities).toEqual({ connection: true, httpServer: false })
   })
 
   it('mounts no localhost web server', async () => {
@@ -134,10 +134,14 @@ describe.skipIf(!existsSync(ENTRY))('desktop runtime boot', () => {
     }
     // The facade script is the queue-mode module-loader global.
     expect(payload.moduleLoaderScript).toContain('__ModuleLoader__')
-    // The parser preload carries the bootstrap module and the runtime object
-    // layer — both must exist before the shell boot can create the system.
-    expect(payload.preloadBundles.some(url => url.includes('@deepseek-ai/dsh-client-modules'))).toBe(true)
-    expect(payload.preloadBundles.some(url => url.includes('@deepseek-ai/dsh-client-runtime'))).toBe(true)
+    // The parser preload is exactly the modules bundle: it owns the
+    // module-system bootstrap face (createClientModuleSystem/apply) that the
+    // deleted client-runtime package used to provide, so the shell boot can
+    // create the system from this one bundle.
+    expect(payload.preloadBundles).toHaveLength(1)
+    expect(payload.preloadBundles[0]).toContain('@deepseek-ai/dsh-client-modules')
+    // The graph must name the same bootstrap entry the preload serves.
+    expect(payload.graph.entries.some(entry => entry.id === '@deepseek-ai/dsh-client-modules')).toBe(true)
   })
 
   it('confines all runtime state to the desktop-managed home', () => {

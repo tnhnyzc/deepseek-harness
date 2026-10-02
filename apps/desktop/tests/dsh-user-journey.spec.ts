@@ -36,12 +36,14 @@ import {
   awaitDurableTitle,
   clickMenu,
   composerEditable,
+  composerSubmit,
   e2eRequired,
   openSidebar,
   rpc,
   skipUnless,
   switchAccessMode,
   waitForShellReady,
+  workspaceFollowBaseline,
   type SessionSummary,
 } from './support/electron-world.ts'
 
@@ -184,8 +186,8 @@ describe.skipIf(skipUnless(guiAvailable(), runtimeBuilt))('desktop canonical use
       return globals.__DSH_BOOT__ !== undefined
     }, undefined, { timeout: 30_000 })
     // Fresh home: the workspace registry is empty — nothing was seeded.
-    const workspaces = await rpc<{ items: { workspaceId: string }[] }>(win, 'workspace.list', {}, 'journey')
-    expect(workspaces.items).toEqual([])
+    const workspaces = await workspaceFollowBaseline(win)
+    expect(workspaces).toEqual([])
     assertCleanConsole()
   }, 60_000)
 
@@ -194,8 +196,8 @@ describe.skipIf(skipUnless(guiAvailable(), runtimeBuilt))('desktop canonical use
     expect(await clickMenu(app, ['File', 'Open Workspace…'])).toBe(true)
     // The picked directory is adopted as a workspace by the real DSH.
     await expect.poll(async () => {
-      const workspaces = await rpc<{ items: { workspaceId: string; path: string; title: string }[] }>(win, 'workspace.list', {}, 'journey')
-      return workspaces.items
+      const workspaces = await workspaceFollowBaseline(win)
+      return workspaces
     }, { timeout: 30_000 }).toEqual(expect.arrayContaining([
       expect.objectContaining({ path: workspaceDir }),
     ]))
@@ -206,9 +208,7 @@ describe.skipIf(skipUnless(guiAvailable(), runtimeBuilt))('desktop canonical use
   }, 90_000)
 
   it('streams an assistant reply incrementally', async () => {
-    const composer = win.locator('[data-composer-card] textarea')
-    await composer.fill('journey stream turn')
-    await composer.press('Enter')
+    await composerSubmit(win, 'journey stream turn')
     // Incremental streaming: the partial text must paint BEFORE the final text.
     await win.waitForFunction(
       () => {
@@ -223,12 +223,17 @@ describe.skipIf(skipUnless(guiAvailable(), runtimeBuilt))('desktop canonical use
   }, 90_000)
 
   it('runs the bash tool and renders it in the conversation and trajectory', async () => {
-    const composer = win.locator('[data-composer-card] textarea')
-    await composer.fill('journey tool turn')
-    await composer.press('Enter')
+    await composerSubmit(win, 'journey tool turn')
     await expect.poll(() => win.evaluate(() => document.body.innerText.includes('TOOL_JOURNEY_DONE')), { timeout: 60_000 }).toBe(true)
+    // Release B groups a turn's tool calls into a turn-process node that is
+    // collapsed by default: its disclosure button (the "N tool call" row)
+    // expands the node to reveal the tool-call row, and opening that row
+    // reveals the command it ran.
+    const toolDisclosure = win.getByRole('button', { name: /tool call|工具调用/ }).first()
+    await toolDisclosure.waitFor({ state: 'visible', timeout: 15_000 })
+    await toolDisclosure.click()
     const toolRow = win.locator('[data-chat-flow-key]').filter({ hasText: 'write the journey file' }).first()
-    await expect.poll(async () => toolRow.count(), { timeout: 15_000 }).toBe(1)
+    await toolRow.waitFor({ state: 'visible', timeout: 15_000 })
     await toolRow.click()
     await expect.poll(() => win.evaluate(() => document.body.innerText.includes('journey-out.txt')), { timeout: 15_000 }).toBe(true)
     // The trajectory view carries the same round.
@@ -242,9 +247,7 @@ describe.skipIf(skipUnless(guiAvailable(), runtimeBuilt))('desktop canonical use
 
   it('asks for approval on a sandbox escalation and runs it after Allow once', async () => {
     await switchAccessMode(win, 'Read Only')
-    const composer = win.locator('[data-composer-card] textarea')
-    await composer.fill('journey approval turn')
-    await composer.press('Enter')
+    await composerSubmit(win, 'journey approval turn')
     const panel = win.locator('[data-approval-key]')
     await panel.waitFor({ timeout: 60_000 })
     await panel.getByRole('button', { name: 'Allow once' }).click()
@@ -256,9 +259,7 @@ describe.skipIf(skipUnless(guiAvailable(), runtimeBuilt))('desktop canonical use
 
   it('answers an ask_user_question through the question composer', async () => {
     await switchAccessMode(win, 'Workspace Write')
-    const composer = win.locator('[data-composer-card] textarea')
-    await composer.fill('journey question turn')
-    await composer.press('Enter')
+    await composerSubmit(win, 'journey question turn')
     const question = win.locator('[data-question-key]')
     await question.waitFor({ timeout: 60_000 })
     await expect.poll(() => question.getByText('Pick a color for the journey.').count(), { timeout: 10_000 }).toBeGreaterThan(0)
@@ -270,15 +271,13 @@ describe.skipIf(skipUnless(guiAvailable(), runtimeBuilt))('desktop canonical use
   }, 180_000)
 
   it('cancels a running turn with Stop generating', async () => {
-    const composer = win.locator('[data-composer-card] textarea')
-    await composer.fill('journey cancel turn')
-    await composer.press('Enter')
+    await composerSubmit(win, 'journey cancel turn')
     await expect.poll(() => win.evaluate(() => document.body.innerText.includes('CANCEL_1')), { timeout: 30_000 }).toBe(true)
     const stop = win.getByRole('button', { name: 'Stop generating' })
     await stop.click({ timeout: 10_000 })
     await expect.poll(async () => stop.count(), { timeout: 30_000 }).toBe(0)
     await expect.poll(() => composerEditable(win), { timeout: 30_000 }).toBe(true)
-    const sessions = await rpc<{ items: SessionSummary[] }>(win, 'session.list', {}, 'journey')
+    const sessions = await rpc<{ items: SessionSummary[] }>(win, 'session/list', { _request: {} }, 'journey')
     expect(sessions.items.every(item => !item.running)).toBe(true)
     assertCleanConsole()
   }, 120_000)
@@ -323,7 +322,7 @@ describe.skipIf(skipUnless(guiAvailable(), runtimeBuilt))('desktop canonical use
     expect(await win.getByRole('button', { name: 'Continue' }).count()).toBe(0)
     // Auto-selection restores the workspace and reopens its session.
     await expect.poll(() => composerEditable(win), { timeout: 60_000 }).toBe(true)
-    const sessions = await rpc<{ items: SessionSummary[] }>(win, 'session.list', {}, 'journey')
+    const sessions = await rpc<{ items: SessionSummary[] }>(win, 'session/list', { _request: {} }, 'journey')
     expect(sessions.items.length).toBeGreaterThanOrEqual(1)
     expect(sessions.items.every(item => !item.running)).toBe(true)
     // The durable rename shows on the cold list (the projection cache

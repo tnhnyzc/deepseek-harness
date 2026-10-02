@@ -153,7 +153,9 @@ function screenMessage(value: unknown): ScreenResult {
   if (parsed.type === 'fetch.request.chunk' || parsed.type === 'fetch.response.chunk') {
     return { kind: 'reply', reply: { type: 'fetch.error', requestId: parsed.requestId, code: TransportErrorCode.frameTooLarge, message: detail } }
   }
-  // Unreachable: only the three data-bearing types carry bytes.
+  // Unreachable: the frame-bounded initial body on stream.open never crosses
+  // the frame bound (the parser refuses it), so only the chunked data types
+  // reach here over-bound.
   return { kind: 'drop' }
 }
 

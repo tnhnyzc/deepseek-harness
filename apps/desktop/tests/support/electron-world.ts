@@ -89,23 +89,117 @@ interface RpcEnvelope<T> {
 }
 
 /**
- * Drive one host-plane RPC through the renderer's own transport carrier —
- * the exact path the shipped client uses. Resolves the envelope value or
- * throws with the host error.
+ * One release's desktop test-driving contract. The re-pin (release A rc.2 ->
+ * release B alpha.1) changed the host-plane RPC wire form AND the composer
+ * DOM. These drivers encode each release's ACTUAL contract so the suites never
+ * guess between protocols:
+ *
+ *   release A (legacy):  endpoint `session.list` (dot), payload is the bare
+ *                        request object, composer is a `<textarea>`.
+ *   release B (current): endpoint `session/list` (slash), payload is
+ *                        `{ args: { ...named arguments... } }`, composer is a
+ *                        Lexical `contenteditable` (`[data-composer-input]`).
+ *
+ * The current driver is the default for every ordinary post-repin Desktop
+ * suite; the legacy driver exists only where a historical-A test (the release
+ * A half of the A->B migration) genuinely needs it.
  */
-export async function rpc<T>(win: Page, method: string, payload: unknown, tag: string): Promise<T> {
+export interface DesktopDriver {
+  /**
+   * Drive one host-plane RPC through the renderer's own transport carrier —
+   * the exact path the shipped client uses. Resolves the envelope value or
+   * throws with the host error.
+   * @param win - the app window.
+   * @param endpoint - the Remote endpoint in this release's wire form.
+   * @param payload - this release's request payload (legacy: the bare request
+   *   object; current: the named-args object, which the driver wraps in `args`).
+   * @param tag - correlation tag for the rpcId.
+   * @param signal - optional caller cancellation.
+   */
+  rpc: <T>(win: Page, endpoint: string, payload: unknown, tag: string, signal?: AbortSignal) => Promise<T>
+  /** The conversation composer's input surface is editable. */
+  composerEditable: (win: Page) => Promise<boolean>
+  /** Focus the composer, type the text as a user would, and submit with Enter. */
+  composerSubmit: (win: Page, text: string) => Promise<void>
+}
+
+function unwrapEnvelope<T>(envelope: RpcEnvelope<T>, endpoint: string): T {
+  if (!envelope.result.ok) throw new Error(`${endpoint} failed: ${envelope.result.error?.code}: ${envelope.result.error?.message}`)
+  return envelope.result.value
+}
+
+/**
+ * Post one client-request envelope through the transport carrier. The two
+ * drivers differ only in how they frame the endpoint and payload; the
+ * transport, envelope, and correlation are identical.
+ */
+function postRpc<T>(
+  win: Page,
+  endpoint: string,
+  framed: unknown,
+  tag: string,
+  signal?: AbortSignal,
+): Promise<T> {
+  if (signal !== undefined && signal.aborted === true) {
+    return Promise.reject(new Error(`${endpoint} aborted before dispatch`))
+  }
   return win.evaluate(async ({ m, p, t }: { m: string; p: unknown; t: string }) => {
     const transport = globalThis as unknown as { __DSH_TRANSPORT__: { fetch: (input: URL, init: RequestInit) => Promise<Response> } }
+    const controller = new AbortController()
     const response = await transport.__DSH_TRANSPORT__.fetch(new URL(`/api/${m}`, location.origin), {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ type: 'client-request', rpcId: `${t}-${m}`, method: m, payload: p }),
+      signal: controller.signal,
     })
     return JSON.parse(await response.text()) as RpcEnvelope<T>
-  }, { m: method, p: payload, t: tag }).then((envelope) => {
-    if (!envelope.result.ok) throw new Error(`${method} failed: ${envelope.result.error?.code}: ${envelope.result.error?.message}`)
-    return envelope.result.value
-  })
+  }, { m: endpoint, p: framed, t: tag }).then(envelope => unwrapEnvelope<T>(envelope, endpoint))
+}
+
+/** Release A (rc.2): dot endpoint, bare payload, `<textarea>` composer. */
+export const legacyDriver: DesktopDriver = {
+  rpc: (win, endpoint, payload, tag, signal) => postRpc(win, endpoint, payload, tag, signal),
+  composerEditable: win =>
+    win.evaluate(() => {
+      const el = document.querySelector('[data-composer-card] textarea') as HTMLTextAreaElement | null
+      return el !== null && !el.readOnly
+    }),
+  composerSubmit: async (win, text) => {
+    const composer = win.locator('[data-composer-card] textarea')
+    await composer.fill(text)
+    await composer.press('Enter')
+  },
+}
+
+/** Release B (alpha.1, the frozen candidate): slash endpoint, `{ args }` payload, Lexical `contenteditable` composer. */
+export const currentDriver: DesktopDriver = {
+  rpc: (win, endpoint, payload, tag, signal) => postRpc(win, endpoint, { args: payload }, tag, signal),
+  composerEditable: win =>
+    win.evaluate(() => {
+      const el = document.querySelector('[data-composer-input]') as HTMLElement | null
+      return el !== null && el.isContentEditable === true
+    }),
+  composerSubmit: async (win, text) => {
+    const input = win.locator('[data-composer-input]')
+    await input.waitFor({ state: 'visible' })
+    await input.click()
+    await input.pressSequentially(text)
+    await input.press('Enter')
+  },
+}
+
+/**
+ * Drive one host-plane RPC through the renderer's own transport carrier using
+ * the current (release B) wire form. The default for ordinary post-repin
+ * suites; release-A historical tests use {@link legacyRpc}.
+ */
+export function rpc<T>(win: Page, endpoint: string, args: unknown, tag: string, signal?: AbortSignal): Promise<T> {
+  return currentDriver.rpc<T>(win, endpoint, args, tag, signal)
+}
+
+/** Drive one host-plane RPC using the release A (legacy) wire form. */
+export function legacyRpc<T>(win: Page, endpoint: string, payload: unknown, tag: string, signal?: AbortSignal): Promise<T> {
+  return legacyDriver.rpc<T>(win, endpoint, payload, tag, signal)
 }
 
 export interface SessionSummary {
@@ -117,12 +211,76 @@ export interface SessionSummary {
   projections?: { asOfSeq: number; values: Record<string, unknown> }
 }
 
-/** The conversation composer is live when its textarea is writable. */
+/**
+ * The conversation composer is live when its input surface is editable. The
+ * current (release B) composer is the Lexical `contenteditable`
+ * (`[data-composer-input]`); release-A historical tests use
+ * {@link legacyComposerEditable}.
+ */
 export function composerEditable(win: Page): Promise<boolean> {
-  return win.evaluate(() => {
-    const el = document.querySelector('[data-composer-card] textarea') as HTMLTextAreaElement | null
-    return el !== null && !el.readOnly
-  })
+  return currentDriver.composerEditable(win)
+}
+
+/** The release A (legacy) composer is live when its `<textarea>` is writable. */
+export function legacyComposerEditable(win: Page): Promise<boolean> {
+  return legacyDriver.composerEditable(win)
+}
+
+/** Focus the current composer, type the text as a user would, and submit with Enter. */
+export function composerSubmit(win: Page, text: string): Promise<void> {
+  return currentDriver.composerSubmit(win, text)
+}
+
+/** Focus the release A (legacy) composer, fill its `<textarea>`, and submit with Enter. */
+export function legacyComposerSubmit(win: Page, text: string): Promise<void> {
+  return legacyDriver.composerSubmit(win, text)
+}
+
+/** One workspace row as materialized from the release-B follow baseline. */
+export interface WorkspaceFollowRow {
+  workspaceId: string
+  /** Canonical host directory path. */
+  path: string
+  /** User-visible title. */
+  title: string
+  /** Sessions accounted to the workspace in manual order. */
+  sessionIds: string[]
+}
+
+/**
+ * Open the real release-B `workspace/follow` stream through the page transport,
+ * wait for the initial complete baseline, materialize the workspace rows, and
+ * abort the subscription cleanly. This is the canonical release-B seam that
+ * replaces the removed unary `workspace/list` for general integration
+ * assertions; persistence/migration tests may still inspect the registry
+ * directly.
+ * @param win - the app window.
+ * @param timeoutMs - bound on waiting for the baseline frame.
+ */
+export async function workspaceFollowBaseline(win: Page, timeoutMs = 30_000): Promise<WorkspaceFollowRow[]> {
+  return win.evaluate(async (boundMs: number) => {
+    const transport = globalThis as unknown as {
+      __DSH_TRANSPORT__?: { openStream?: (endpoint: string, payload: unknown, signal: AbortSignal) => AsyncIterable<unknown> }
+    }
+    const open = transport.__DSH_TRANSPORT__?.openStream
+    if (open === undefined) throw new Error('workspace/follow helper: the page transport exposes no openStream hook')
+    const controller = new AbortController()
+    const readBaseline = async (): Promise<WorkspaceFollowRow[]> => {
+      for await (const frame of open('workspace/follow', { args: {} }, controller.signal)) {
+        const value = frame as { type?: unknown; value?: { items?: WorkspaceFollowRow[] } }
+        if (value?.type === 'baseline' && Array.isArray(value.value?.items)) return value.value!.items
+      }
+      throw new Error('workspace/follow stream closed before its baseline frame')
+    }
+    const timeout = new Promise<never>((_, reject) => {
+      setTimeout(() => reject(new Error(`workspace/follow baseline did not arrive within ${boundMs}ms`)), boundMs)
+    })
+    try {
+      return await Promise.race([readBaseline(), timeout])
+    } finally {
+      controller.abort()
+    }
+  }, timeoutMs)
 }
 
 /**
@@ -256,7 +414,7 @@ export function sessionLogTitles(home: string): Record<string, { seq: number; ti
     for (const entry of readdirSync(dir, { withFileTypes: true })) {
       const path = join(dir, entry.name)
       if (entry.isDirectory()) walk(path)
-      else if (entry.name === 'session.jsonl' || entry.name === 'session.jsonl.zstd') logs.push(path)
+      else if (/^session(\.v\d+)?\.jsonl(\.zstd)?$/.test(entry.name)) logs.push(path)
     }
   }
   walk(home)

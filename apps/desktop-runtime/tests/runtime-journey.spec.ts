@@ -4,8 +4,8 @@
  * over the same fork-IPC transport the desktop broker uses.
  *
  * This tier owns the DSH-side behaviour in isolation from the carrier:
- * boot → ready → session.create → prompt → stream (the live event mux) →
- * cancel → session.history → shutdown. DSH is never mocked; the only scripted
+ * boot → ready → session/create → session/prompt → the session/follow stream →
+ * session/cancel → session/page → shutdown. DSH is never mocked; the only scripted
  * element is the deterministic loopback model the pinned DeepSeek provider
  * reaches through `DEEPSEEK_BASE_URL`. If the agent loop, the event log, the
  * stream carrier, or the persistence breaks, this suite fails — without an
@@ -21,6 +21,7 @@ import { join, resolve } from 'node:path'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import { createScriptedProvider, type ScriptedProvider } from '../../desktop/tests/support/deterministic-provider.ts'
 import { e2eRequired, skipUnless } from '../../desktop/tests/support/electron-world.ts'
+import { encodeRemotePayload, RemoteItemReader } from '../src/remote-codec.ts'
 import { fromOpaqueTransportWire, toOpaqueTransportWire } from '../src/transport.ts'
 
 const ENTRY = resolve(import.meta.dirname, '..', 'dist', 'index.js')
@@ -36,7 +37,7 @@ interface ReadyPayload {
   type: 'runtime.ready'
   runtimeVersion: string
   dshVersion: string
-  capabilities: { apiProxy: boolean; httpServer: boolean }
+  capabilities: { connection: boolean; httpServer: boolean }
 }
 
 interface WireMessage {
@@ -154,20 +155,59 @@ async function rpc<T>(link: RuntimeLink, rpcId: string, method: string, payload:
   return envelope.result.value
 }
 
-/** The SSE bytes of the opened event mux, reassembled from the stream frames. */
-class EventMux {
-  buffer = ''
-  framesSeen = 0
+/**
+ * Read the settled history page at the follow stream's durable cursor, polling
+ * until the page's records contain the probe (bounded) so a cold durable read
+ * that lags the live stream settles instead of racing.
+ */
+async function pageUntilContains(
+  link: RuntimeLink,
+  rpcId: string,
+  sessionId: string,
+  probe: string,
+  follow: SessionFollow,
+  timeoutMs: number,
+): Promise<{ records: Array<{ type: string }> }> {
+  const deadline = Date.now() + timeoutMs
+  for (;;) {
+    const page = await rpc<{ records: Array<{ type: string }> }>(link, rpcId, 'session/page', {
+      args: { request: { address: { kind: 'session', sessionId }, throughSeq: follow.durableCursor(), maxMessages: 200 } },
+    })
+    if (JSON.stringify(page.records).includes(probe)) return page
+    if (Date.now() >= deadline) throw new Error(`session/page never carried ${JSON.stringify(probe)} within ${String(timeoutMs)} ms (records ${String(page.records.length)})`)
+    await new Promise(resolveWait => setTimeout(resolveWait, 200))
+  }
+}
+
+/**
+ * One opened session/follow stream. The carrier frames each decoded stream
+ * item as a 4-byte length prefix plus its canonical JSON bytes, so the frames
+ * reassemble through the codec's incremental item reader into the session's
+ * snapshot and durable event frames.
+ */
+class SessionFollow {
+  frames: unknown[] = []
+  private readonly reader = new RemoteItemReader()
   private readonly notify = new Set<() => void>()
 
   constructor(private readonly link: RuntimeLink, private readonly streamId: string) {}
 
-  /** Register the sink and open the mux; the ack is the caller's to await. */
-  open(): void {
+  /** Register the sink and open the follow for the addressed session; the ack is the caller's to await. */
+  open(sessionId: string): void {
     this.link.setStreamSink((message) => {
-      this.onStream(message)
+      if (message.streamId !== this.streamId) return
+      if (message.type !== 'stream.frame') return
+      const items = this.reader.push(message.data as Uint8Array)
+      if (items.length === 0) return
+      this.frames.push(...items)
+      for (const wake of this.notify) wake()
     })
-    this.link.send({ type: 'stream.open', streamId: this.streamId, url: 'http://dsh.local/api/events.mux' })
+    this.link.send({
+      type: 'stream.open',
+      streamId: this.streamId,
+      url: 'http://dsh.local/api/session/follow',
+      data: encodeRemotePayload({ args: { request: { address: { kind: 'session', sessionId }, assistantStream: true } } }),
+    })
   }
 
   async awaitAck(): Promise<void> {
@@ -176,19 +216,33 @@ class EventMux {
     expect(ack.ok).toBe(true)
   }
 
-  private onStream(message: WireMessage): void {
-    if (message.streamId !== this.streamId) return
-    if (message.type !== 'stream.frame') return
-    this.buffer += Buffer.from(message.data as Uint8Array).toString('utf8')
-    this.framesSeen += 1
-    for (const wake of this.notify) wake()
+  /** The highest durable seq observed (the snapshot cut or an appended event) — the page cursor a cold read accepts. */
+  durableCursor(): number {
+    let cursor = -1
+    for (const frame of this.frames) {
+      const value = frame as { type?: unknown; cursor?: unknown; event?: { seq?: unknown } }
+      if (value.type === 'snapshot' && typeof value.cursor === 'number' && value.cursor > cursor) cursor = value.cursor
+      if (value.type === 'event' && typeof value.event?.seq === 'number' && value.event.seq > cursor) cursor = value.event.seq
+    }
+    return cursor
   }
 
-  /** Wait until the reassembled SSE bytes contain the probe (bounded). */
+  /** Wait until a durable event frame (not a process-local presentation frame) contains the probe (bounded). */
+  async awaitDurableContains(probe: string, timeoutMs: number): Promise<void> {
+    await this.waitUntil(`carry a durable event with ${JSON.stringify(probe)}`, timeoutMs, () =>
+      this.frames.some(frame => (frame as { type?: unknown }).type === 'event' && JSON.stringify(frame).includes(probe)),
+    )
+  }
+
+  /** Wait until the reassembled frames contain the probe (bounded). */
   async awaitContains(probe: string, timeoutMs: number): Promise<void> {
+    await this.waitUntil(`carry ${JSON.stringify(probe)}`, timeoutMs, () => JSON.stringify(this.frames).includes(probe))
+  }
+
+  private async waitUntil(description: string, timeoutMs: number, predicate: () => boolean): Promise<void> {
     const deadline = Date.now() + timeoutMs
     for (;;) {
-      if (this.buffer.includes(probe)) return
+      if (predicate()) return
       if (Date.now() >= deadline) break
       await new Promise<void>((resolveWait) => {
         let settled = false
@@ -203,7 +257,7 @@ class EventMux {
         this.notify.add(onWake)
       })
     }
-    throw new Error(`the event mux never carried ${JSON.stringify(probe)} within ${String(timeoutMs)} ms (frames ${String(this.framesSeen)}; tail: ${JSON.stringify(this.buffer.slice(-400))})`)
+    throw new Error(`the follow stream never ${description} within ${String(timeoutMs)} ms (frames ${String(this.frames.length)}; tail: ${JSON.stringify(this.frames.slice(-3)).slice(0, 400)})`)
   }
 }
 
@@ -240,7 +294,7 @@ describe.skipIf(skipUnless(existsSync(ENTRY)))('desktop runtime journey (real DS
   let child: ChildProcess
   let link: RuntimeLink
   let ready: ReadyPayload
-  let mux: EventMux
+  let mux: SessionFollow
   let sessionId: string
 
   beforeAll(async () => {
@@ -269,9 +323,9 @@ describe.skipIf(skipUnless(existsSync(ENTRY)))('desktop runtime journey (real DS
     child = forkRuntime(home, provider.url)
     link = new RuntimeLink(child)
     ready = await link.ready
-    mux = new EventMux(link, 'journey-mux')
-    mux.open()
-    await mux.awaitAck()
+    // The follow stream addresses a Session, so it opens after the session
+    // exists; readiness is the only fact settled at boot.
+    mux = new SessionFollow(link, 'journey-follow')
   }, READY_TIMEOUT_MS + 10_000)
 
   afterAll(async () => {
@@ -285,61 +339,60 @@ describe.skipIf(skipUnless(existsSync(ENTRY)))('desktop runtime journey (real DS
   it('boots the real pinned DSH to ready with the host plane and no web server', async () => {
     expect(ready.type).toBe('runtime.ready')
     expect(ready.dshVersion).toMatch(/^\d+\.\d+\.\d+/)
-    expect(ready.capabilities).toEqual({ apiProxy: true, httpServer: false })
+    expect(ready.capabilities).toEqual({ connection: true, httpServer: false })
     await expect(portIsListening(WEB_FALLBACK_PORT)).resolves.toBe(false)
   }, 30_000)
 
   it('creates a session at a fresh cwd through the real host plane', async () => {
-    const created = await rpc<{ sessionId: string }>(link, 'journey-create', 'session.create', { cwd })
+    const created = await rpc<{ sessionId: string }>(link, 'journey-create', 'session/create', { args: { request: { cwd } } })
     expect(created.sessionId).toEqual(expect.any(String))
     sessionId = created.sessionId
-    const listed = await rpc<{ items: { sessionId: string; running: boolean; cwd?: string }[] }>(link, 'journey-list-1', 'session.list', {})
+    // The live follow opens on the session the rest of the journey addresses.
+    mux.open(sessionId)
+    await mux.awaitAck()
+    const listed = await rpc<{ items: { sessionId: string; running: boolean; cwd?: string }[] }>(link, 'journey-list-1', 'session/list', { args: { _request: {} } })
     expect(listed.items.some(item => item.sessionId === sessionId)).toBe(true)
     expect(listed.items.find(item => item.sessionId === sessionId)?.running).toBe(false)
   }, 60_000)
 
-  it('streams a prompt through the real agent loop onto the live event mux', async () => {
-    const accepted = await rpc<{ accepted: boolean }>(link, 'journey-prompt-1', 'session.prompt', {
-      sessionId,
-      mode: 'queue',
-      content: [{ type: 'text', text: 'journey stream turn' }],
+  it('streams a prompt through the real agent loop onto the live follow stream', async () => {
+    const accepted = await rpc<{ accepted: boolean }>(link, 'journey-prompt-1', 'session/prompt', {
+      args: { request: { requestId: 'journey-prompt-1', sessionId, mode: 'queue', content: [{ type: 'text', text: 'journey stream turn' }] } },
     })
     expect(accepted.accepted).toBe(true)
-    // The real event log carries the model content over the stream.
-    await mux.awaitContains('LAYER_B_DONE', 60_000)
-    // And the settled turn is durably readable from the session history.
-    const history = await rpc<{ events: Array<{ type: string; data?: Record<string, unknown> }> }>(link, 'journey-history-1', 'session.history', { sessionId })
-    expect(JSON.stringify(history.events)).toContain('LAYER_B_DONE')
+    // The real event log carries the model content over the stream, and the
+    // durable event frame proves the turn committed before the cold page read.
+    await mux.awaitDurableContains('LAYER_B_DONE', 60_000)
+    const page = await pageUntilContains(link, 'journey-page-1', sessionId, 'LAYER_B_DONE', mux, 30_000)
+    expect(JSON.stringify(page.records)).toContain('LAYER_B_DONE')
   }, 120_000)
 
   it('cancels an active turn without a synthetic completion', async () => {
-    const accepted = await rpc<{ accepted: boolean }>(link, 'journey-prompt-2', 'session.prompt', {
-      sessionId,
-      mode: 'queue',
-      content: [{ type: 'text', text: 'journey cancel turn' }],
+    const accepted = await rpc<{ accepted: boolean }>(link, 'journey-prompt-2', 'session/prompt', {
+      args: { request: { requestId: 'journey-prompt-2', sessionId, mode: 'queue', content: [{ type: 'text', text: 'journey cancel turn' }] } },
     })
     expect(accepted.accepted).toBe(true)
     // Let the stream start, then cancel through the host plane.
     await mux.awaitContains('CANCEL_2', 30_000)
-    const cancelled = await rpc<{ accepted: boolean }>(link, 'journey-cancel', 'session.cancel', { sessionId })
+    const cancelled = await rpc<{ accepted: boolean }>(link, 'journey-cancel', 'session/cancel', { args: { request: { sessionId } } })
     expect(cancelled.accepted).toBe(true)
     // The turn settles (not running) ...
     const deadline = Date.now() + 60_000
     for (;;) {
-      const listed = await rpc<{ items: { sessionId: string; running: boolean }[] }>(link, 'journey-list-2', 'session.list', {})
+      const listed = await rpc<{ items: { sessionId: string; running: boolean }[] }>(link, 'journey-list-2', 'session/list', { args: { _request: {} } })
       if (listed.items.find(item => item.sessionId === sessionId)?.running === false) break
       if (Date.now() > deadline) throw new Error('the cancelled turn never stopped running')
       await new Promise(resolveWait => setTimeout(resolveWait, 200))
     }
-    // ... and the stream was cut short: the final chunk never reached the mux.
+    // ... and the stream was cut short: the final chunk never reached the follow.
     await new Promise(resolveWait => setTimeout(resolveWait, 1_000))
-    expect(mux.buffer).not.toContain('CANCEL_FINAL')
+    expect(JSON.stringify(mux.frames)).not.toContain('CANCEL_FINAL')
   }, 120_000)
 
   it('replays the settled history with the streamed content intact', async () => {
-    const history = await rpc<{ events: Array<{ type: string }> }>(link, 'journey-history-2', 'session.history', { sessionId })
-    expect(history.events.length).toBeGreaterThan(0)
-    expect(JSON.stringify(history.events)).toContain('LAYER_B_DONE')
+    const page = await pageUntilContains(link, 'journey-page-2', sessionId, 'LAYER_B_DONE', mux, 30_000)
+    expect(page.records.length).toBeGreaterThan(0)
+    expect(JSON.stringify(page.records)).toContain('LAYER_B_DONE')
   }, 60_000)
 
   it('shuts the whole tree down cleanly on runtime.shutdown', async () => {

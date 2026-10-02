@@ -32,7 +32,7 @@ function sendReady() {
       type: 'runtime.ready',
       runtimeVersion: 'fixture',
       dshVersion: 'fixture',
-      capabilities: { apiProxy: true, httpServer: false },
+      capabilities: { connection: true, httpServer: false },
     })
   }
 }

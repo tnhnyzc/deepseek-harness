@@ -26,10 +26,12 @@ import {
   acknowledgeFirstRun,
   awaitDurableTitle,
   composerEditable,
+  composerSubmit,
   openSidebar,
   rpc,
   seedWorkspaceRegistry,
   waitForShellReady,
+  workspaceFollowBaseline,
   type SessionSummary,
 } from './electron-world.ts'
 import type { ScriptedProvider } from './deterministic-provider.ts'
@@ -94,12 +96,9 @@ export async function createMigrationFixture(provider: ScriptedProvider, work: s
     await waitForShellReady(win)
     await acknowledgeFirstRun(win)
     await pollUntil(() => composerEditable(win), 60_000, 'the composer to become editable')
-    const composer = win.locator('[data-composer-card] textarea')
-    await composer.fill('migration stream turn')
-    await composer.press('Enter')
+    await composerSubmit(win, 'migration stream turn')
     await pollUntil(async () => win.evaluate(() => document.body.innerText.includes('MIGRATION_STREAM_DONE')), 60_000, 'the streamed turn to render')
-    await composer.fill('migration tool turn')
-    await composer.press('Enter')
+    await composerSubmit(win, 'migration tool turn')
     await pollUntil(async () => win.evaluate(() => document.body.innerText.includes('MIGRATION_TOOL_DONE')), 60_000, 'the tool turn to render')
     // Rename the session: the durable title a migration must carry.
     await renameSession(win, autoTitle, 'Migrated final title')
@@ -163,10 +162,10 @@ export async function verifyMigratedData(userData: string, fixture: Pick<Migrati
     // profile would show the welcome notice; an upgraded one must not).
     const firstRunCount = await win.getByRole('button', { name: 'Continue' }).count()
     await pollUntil(() => composerEditable(win), 60_000, 'the composer to become editable on the upgraded profile')
-    const listed = await rpc<{ items: SessionSummary[] }>(win, 'session.list', {}, 'migration-verify')
+    const listed = await rpc<{ items: SessionSummary[] }>(win, 'session/list', { _request: {} }, 'migration-verify')
     const sessions = listed.items
-    const workspaces = await rpc<{ items: Array<{ title?: string }> }>(win, 'workspace.list', {}, 'migration-verify-ws')
-    const workspaceListed = workspaces.items.some(item => item.title === fixture.workspaceTitle)
+    const workspaces = await workspaceFollowBaseline(win)
+    const workspaceListed = workspaces.some(item => item.title === fixture.workspaceTitle)
     const titleOnColdList = sessions.some(item => item.projections?.values.title === fixture.durableTitle)
     // Reopen the session: its recorded content replays.
     await openSidebar(win)

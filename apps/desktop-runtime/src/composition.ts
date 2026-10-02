@@ -103,10 +103,10 @@ export const PROFILE_ROOT_FILENAME = 'cordis.yml'
  * @param home - the desktop-managed Harness home (`$DSH_HOME`).
  * @returns the loaded profile.
  */
-export function prepareDesktopProfile(installAnchor: string, home: string): Profile {
-  healProfilesModuleFallback(installAnchor, home)
+export async function prepareDesktopProfile(installAnchor: string, home: string): Promise<Profile> {
   const profile = loadProfile('dsh-desktop-runtime', DESKTOP_PROFILE_NAME, installAnchor, home)
   writeFileSync(join(profile.dir, PROFILE_ROOT_FILENAME), PROFILE_ROOT_CONFIG)
+  await healProfilesModuleFallback({ installAnchor, home, profile })
   return profile
 }
 

@@ -61,7 +61,7 @@ function importSpecifiers(source: string): string[] {
   return specifiers
 }
 
-const DSH_PRODUCT_PACKAGE = /^@deepseek-ai\/dsh-(?!desktop-runtime\/transport$)/
+const DSH_PRODUCT_PACKAGE = /^@deepseek-ai\/dsh-(?!desktop-runtime\/(transport|remote-codec)$)/
 const ELECTRON_SPECIFIER = /^electron(\/|$)/
 const NODE_BUILTIN = /^node:/
 
@@ -74,11 +74,6 @@ const NODE_BUILTIN = /^node:/
 const RENDERER_ALLOWED_DSH: ReadonlySet<string> = new Set([
   '@deepseek-ai/dsh-client-web',
   '@deepseek-ai/dsh-client-connection/client',
-  // The event-path constants: imported through the package's declared
-  // `./src/*` subpath because the built `/client` entry is the CJS module
-  // factory, whose named exports the renderer bundler cannot read.
-  '@deepseek-ai/dsh-client-connection/src/api-path.ts',
-  '@deepseek-ai/dsh-host-apiproxy/client',
 ])
 
 /**

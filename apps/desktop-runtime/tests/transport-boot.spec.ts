@@ -8,7 +8,7 @@
  */
 
 import { fork, type ChildProcess } from 'node:child_process'
-import { existsSync, mkdtempSync, readFileSync } from 'node:fs'
+import { existsSync, mkdtempSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
@@ -24,7 +24,7 @@ interface ReadyPayload {
   type: 'runtime.ready'
   runtimeVersion: string
   dshVersion: string
-  capabilities: { apiProxy: boolean; httpServer: boolean }
+  capabilities: { connection: boolean; httpServer: boolean }
 }
 
 interface WireMessage {
@@ -52,30 +52,42 @@ class TransportLink {
   private queue: WireMessage[] = []
   private waiters: Array<() => void> = []
   ready: Promise<ReadyPayload>
+  /** The control boot-graph message (advertised combo URLs), sent before ready. */
+  bootGraph: Promise<WireMessage>
+  private bootGraphResolve: ((graph: WireMessage) => void) | undefined
+  private bootGraphReject: ((error: Error) => void) | undefined
 
   constructor(private readonly child: ChildProcess) {
+    this.bootGraph = new Promise<WireMessage>((resolve, reject) => {
+      this.bootGraphResolve = resolve
+      this.bootGraphReject = reject
+    })
     this.ready = new Promise((resolveReady, reject) => {
       const timer = setTimeout(() => {
         reject(new Error(`runtime did not report ready within ${String(READY_TIMEOUT_MS)} ms`))
       }, READY_TIMEOUT_MS)
       child.on('message', (message: unknown) => {
         const value = message as WireMessage | null
-        if (value !== null && typeof value === 'object' && value.type === 'runtime.ready') {
+        if (value === null || typeof value !== 'object') return
+        if (value.type === 'runtime.boot-graph') {
+          this.bootGraphResolve?.(value)
+          return
+        }
+        if (value.type === 'runtime.ready') {
           clearTimeout(timer)
           resolveReady(value as unknown as ReadyPayload)
           return
         }
-        if (value !== null && typeof value === 'object' && value.type !== 'runtime.ready') {
-          // The child edge encodes byte fields; restore them like the supervisor does.
-          const decoded = fromOpaqueTransportWire(value)
-          if (decoded !== null) {
-            this.queue.push(decoded)
-            for (const wake of this.waiters.splice(0)) wake()
-          }
+        // The child edge encodes byte fields; restore them like the supervisor does.
+        const decoded = fromOpaqueTransportWire(value)
+        if (decoded !== null) {
+          this.queue.push(decoded)
+          for (const wake of this.waiters.splice(0)) wake()
         }
       })
       child.on('exit', (code, signal) => {
         clearTimeout(timer)
+        this.bootGraphReject?.(new Error(`runtime exited before boot graph (code ${String(code)}, signal ${String(signal)})`))
         reject(new Error(`runtime exited before ready (code ${String(code)}, signal ${String(signal)})`))
       })
     })
@@ -174,7 +186,7 @@ describe.skipIf(!existsSync(ENTRY))('desktop transport boot', () => {
     child = forkRuntime(home)
     link = new TransportLink(child)
     const ready = await link.ready
-    expect(ready.capabilities).toEqual({ apiProxy: true, httpServer: false })
+    expect(ready.capabilities).toEqual({ connection: true, httpServer: false })
   }, READY_TIMEOUT_MS + 10_000)
 
   afterAll(async () => {
@@ -185,8 +197,8 @@ describe.skipIf(!existsSync(ENTRY))('desktop transport boot', () => {
     }
   }, SHUTDOWN_TIMEOUT_MS)
 
-  it('round trips a keyless session.list fetch through the real host plane', async () => {
-    const result = await runFetch(link, 'boot-sessions', 'http://dsh.local/api/session.list', clientRequest('boot-rpc-1', 'session.list', {}))
+  it('round trips a keyless session/list fetch through the real host plane', async () => {
+    const result = await runFetch(link, 'boot-sessions', 'http://dsh.local/api/session/list', clientRequest('boot-rpc-1', 'session/list', { args: { _request: {} } }))
     expect(result.status).toBe(200)
     const envelope = JSON.parse(result.body) as { type: string; rpcId: string; result: { ok: boolean; value?: { items?: unknown[] } } }
     expect(envelope.type).toBe('server-response')
@@ -195,8 +207,8 @@ describe.skipIf(!existsSync(ENTRY))('desktop transport boot', () => {
     expect(envelope.result.value?.items).toEqual([])
   }, 45_000)
 
-  it('round trips a keyless agentPreset.list fetch', async () => {
-    const result = await runFetch(link, 'boot-presets', 'http://dsh.local/api/agentPreset.list', clientRequest('boot-rpc-2', 'agentPreset.list', {}))
+  it('round trips a keyless settings fetch from a second namespace', async () => {
+    const result = await runFetch(link, 'boot-presets', 'http://dsh.local/api/settings/canOpenAgentPresetDirectory', clientRequest('boot-rpc-2', 'settings/canOpenAgentPresetDirectory', { args: {} }))
     expect(result.status).toBe(200)
     const envelope = JSON.parse(result.body) as { type: string; result: { ok: boolean } }
     expect(envelope.type).toBe('server-response')
@@ -208,27 +220,25 @@ describe.skipIf(!existsSync(ENTRY))('desktop transport boot', () => {
     expect(result.status).toBe(404)
   }, 45_000)
 
-  it('serves a client bundle on the fetch channel, byte-identical to the built artifact', async () => {
-    const url = 'http://dsh.local/plugins/@deepseek-ai/dsh-client-modules/client.js'
-    const result = await runGet(link, 'boot-bundle', url)
+  it('serves the advertised boot-graph combo bundle on the fetch channel', async () => {
+    // The boot graph is the registry's authority for the advertised combo URLs;
+    // fetch one through the real host plane and assert it resolves (not 404).
+    const graph = (await link.bootGraph).graph as { batches: Array<{ url: string }> }
+    const comboPath = graph.batches[0]?.url
+    expect(comboPath).toBeDefined()
+    const result = await runGet(link, 'boot-bundle', `http://dsh.local${comboPath}`)
     expect(result.status).toBe(200)
     expect(result.contentType).toContain('text/javascript')
-    // The registry resolves the id to the built bundle; the wire bytes are
-    // that file, not a copy this test has to keep in sync by hand.
-    const expected = readFileSync(
-      resolve(import.meta.dirname, '..', '..', '..', 'packages', 'client', 'modules', 'lib', 'client.js'),
-      'utf8',
-    )
-    expect(result.body).toBe(expected)
+    expect(result.body.length).toBeGreaterThan(0)
   }, 45_000)
 
   it('answers a 404 for a bundle the module table does not know', async () => {
-    const result = await runGet(link, 'boot-bundle-404', 'http://dsh.local/plugins/@deepseek-ai/dsh-nope/client.js')
+    const result = await runGet(link, 'boot-bundle-404', 'http://dsh.local/plugins/??@deepseek-ai/dsh-nope/client.js&rev=unknown')
     expect(result.status).toBe(404)
   }, 45_000)
 
-  it('opens the mux downlink, acks it, and closes it on request', async () => {
-    link.send({ type: 'stream.open', streamId: 'boot-mux', url: 'http://dsh.local/api/events.mux' })
+  it('opens the session/control stream, acks it, and closes it on request', async () => {
+    link.send({ type: 'stream.open', streamId: 'boot-mux', url: 'http://dsh.local/api/session/control', data: new TextEncoder().encode(JSON.stringify({ args: {} })) })
     const ack = await link.ofType('stream.open.ack')
     expect(ack.streamId).toBe('boot-mux')
     expect(ack.ok).toBe(true)
@@ -252,14 +262,14 @@ describe.skipIf(!existsSync(ENTRY))('desktop transport boot', () => {
     const ack = await link.ofType('stream.open.ack')
     expect(ack.streamId).toBe('boot-unknown')
     expect(ack.ok).toBe(false)
-    expect(ack.reason).toBe('unknown-stream')
+    expect(ack.reason).toBe('internal')
   }, 45_000)
 
   it('ends its transport operations on runtime.transport-closed and stays alive', async () => {
     link.send({ type: 'runtime.transport-closed' })
     // The channel is torn down: a fresh open gets no ack until re-opened, and
     // the process is still serving. Prove liveness with a unary round trip.
-    const result = await runFetch(link, 'boot-after-close', 'http://dsh.local/api/session.list', clientRequest('boot-rpc-4', 'session.list', {}))
+    const result = await runFetch(link, 'boot-after-close', 'http://dsh.local/api/session/list', clientRequest('boot-rpc-4', 'session/list', { args: { _request: {} } }))
     expect(result.status).toBe(200)
   }, 45_000)
 

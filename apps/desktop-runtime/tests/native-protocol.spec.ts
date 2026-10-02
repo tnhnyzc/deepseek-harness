@@ -24,7 +24,7 @@ import {
 
 describe('native protocol vocabulary', () => {
   it('closes the method set to the OS capability names', () => {
-    expect(NATIVE_METHODS).toEqual(['directory.pick', 'path.open'])
+    expect(NATIVE_METHODS).toEqual(['directory.pick', 'path.open', 'path.openText'])
   })
 
   it('closes the error-code set', () => {
@@ -63,6 +63,11 @@ describe('parseNativeRequest', () => {
       .toEqual({ type: 'native.request', requestId: 'b', method: 'path.open', path: '/tmp/x' })
   })
 
+  it('parses a path.openText request with its path', () => {
+    expect(parseNativeRequest({ type: 'native.request', requestId: 'c', method: 'path.openText', path: '/tmp/doc.yml' }))
+      .toEqual({ type: 'native.request', requestId: 'c', method: 'path.openText', path: '/tmp/doc.yml' })
+  })
+
   it.each([
     ['a non-object', 'native.request'],
     ['the wrong type tag', { type: 'native.response', requestId: 'a', method: 'path.open' }],
@@ -71,6 +76,7 @@ describe('parseNativeRequest', () => {
     ['a non-string request id', { type: 'native.request', requestId: 1, method: 'path.open', path: '/tmp/x' }],
     ['an unknown method', { type: 'native.request', requestId: 'a', method: 'session.create' }],
     ['a missing path', { type: 'native.request', requestId: 'a', method: 'path.open' }],
+    ['a path.openText missing its path', { type: 'native.request', requestId: 'a', method: 'path.openText' }],
     ['an empty path', { type: 'native.request', requestId: 'a', method: 'path.open', path: '' }],
     ['a NUL-bearing path', { type: 'native.request', requestId: 'a', method: 'path.open', path: '/tmp/a\0b' }],
     ['an oversized path', { type: 'native.request', requestId: 'a', method: 'path.open', path: 'x'.repeat(NATIVE_MAX_PATH_LENGTH + 1) }],

@@ -60,6 +60,7 @@ function makeFakePorts(): {
   openCalls: PendingCall<string>[]
   showOpenDialog: () => Promise<DialogOutcome>
   openPath: () => Promise<string>
+  openTextFile: () => Promise<string>
 } {
   const pickCalls: PendingCall<DialogOutcome>[] = []
   const openCalls: PendingCall<string>[] = []
@@ -68,6 +69,7 @@ function makeFakePorts(): {
     openCalls,
     showOpenDialog: () => { const call = controlled<DialogOutcome>(); pickCalls.push(call); return call.promise },
     openPath: () => { const call = controlled<string>(); openCalls.push(call); return call.promise },
+    openTextFile: () => Promise.resolve(''),
   }
 }
 
@@ -222,6 +224,7 @@ describe.skipIf(!existsSync(ENTRY))('desktop native channel integration', () => 
       capabilities: createNativeCapabilities({
         showOpenDialog: () => ports.showOpenDialog(),
         openPath: () => ports.openPath(),
+        openTextFile: () => ports.openTextFile(),
       }),
       send: (message) => { link?.send(message) },
       getWindow: () => undefined,
@@ -239,13 +242,13 @@ describe.skipIf(!existsSync(ENTRY))('desktop native channel integration', () => 
   }, SHUTDOWN_TIMEOUT_MS)
 
   it('settles a pick through the real channel and the real bridge', async () => {
-    openFetch(link, 'it-pick', 'it-rpc-1', 'host.pickDirectory', {})
+    openFetch(link, 'it-pick', 'it-rpc-1', 'directoryPicker/pick', { args: {} })
     // The channel dispatched to the OS port: the dialog is open.
     await vi.waitFor(() => { expect(ports.pickCalls).toHaveLength(1) })
     callAt(ports.pickCalls, 0).resolve({ canceled: false, filePaths: [CHOSEN_DIRECTORY] })
     const result = await readFetch(link, 'it-pick')
     const envelope = JSON.parse(result.body) as Envelope
-    expect(envelope.result).toEqual({ ok: true, value: { path: CHOSEN_DIRECTORY } })
+    expect(envelope.result).toEqual({ ok: true, value: CHOSEN_DIRECTORY })
     expect(link.nativeOutbound()).toHaveLength(1)
     expect(link.nativeOutbound()[0]).toMatchObject({ type: 'native.response', ok: true, path: CHOSEN_DIRECTORY })
     expect(channel.pendingIds()).toEqual([])
@@ -253,7 +256,7 @@ describe.skipIf(!existsSync(ENTRY))('desktop native channel integration', () => 
 
   it('ends the main-side request on caller abort and drops the late dialog completion', async () => {
     const sentBefore = link.nativeOutbound().length
-    openFetch(link, 'it-pick-abort', 'it-rpc-2', 'host.pickDirectory', {})
+    openFetch(link, 'it-pick-abort', 'it-rpc-2', 'directoryPicker/pick', { args: {} })
     // The channel dispatched to the OS port; the request is pending there
     // while the dialog stays open.
     await vi.waitFor(() => { expect(ports.pickCalls).toHaveLength(2) })
@@ -271,12 +274,12 @@ describe.skipIf(!existsSync(ENTRY))('desktop native channel integration', () => 
     expect(link.nativeOutbound()).toHaveLength(sentBefore)
     expect(channel.pendingIds()).toEqual([])
     // The channel stays healthy for the next request.
-    openFetch(link, 'it-pick-after', 'it-rpc-3', 'host.pickDirectory', {})
+    openFetch(link, 'it-pick-after', 'it-rpc-3', 'directoryPicker/pick', { args: {} })
     await vi.waitFor(() => { expect(ports.pickCalls).toHaveLength(3) })
     callAt(ports.pickCalls, 2).resolve({ canceled: true, filePaths: [] })
     const result = await readFetch(link, 'it-pick-after')
     const envelope = JSON.parse(result.body) as Envelope
-    expect(envelope.result).toEqual({ ok: true, value: { path: null } })
+    expect(envelope.result).toEqual({ ok: true, value: null })
   }, 45_000)
 
   it('still disposes the whole tree on runtime.shutdown and exits 0', async () => {

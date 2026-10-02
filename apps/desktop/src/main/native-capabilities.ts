@@ -1,11 +1,11 @@
 /**
- * The Electron main process's OS capability registry: the two closed
+ * The Electron main process's OS capability registry: the three closed
  * capabilities the desktop native protocol can request — the OS directory
- * chooser and the default-application path opener. Only OS capability
- * vocabulary lives here: no DSH business concept, no request routing (the
- * native channel owns that), and the Electron API surface itself is an
- * injectable port so the capability behavior is testable without an
- * Electron runtime.
+ * chooser, the default-application path opener, and the text-document opener.
+ * Only OS capability vocabulary lives here: no DSH business concept, no
+ * request routing (the native channel owns that), and the Electron API
+ * surface itself is an injectable port so the capability behavior is testable
+ * without an Electron runtime.
  * @module @deepseek-ai/dsh-desktop/src/main/native-capabilities
  */
 
@@ -38,6 +38,12 @@ export interface NativeCapabilityPorts {
    * @returns the failure description; the empty string means success.
    */
   openPath: (path: string) => Promise<string>
+  /**
+   * Open one text document with the default editor.
+   * @param path - the absolute text-document path to open.
+   * @returns the failure description; the empty string means success.
+   */
+  openTextFile: (path: string) => Promise<string>
 }
 
 /** The registry surface the native channel dispatches onto. */
@@ -53,6 +59,11 @@ export interface NativeCapabilities {
    * @param path - the absolute path the DSH layer resolved and authorized.
    */
   openPath(path: string): Promise<void>
+  /**
+   * Open one text document with the default editor.
+   * @param path - the absolute text-document path the DSH layer resolved and authorized.
+   */
+  openTextFile(path: string): Promise<void>
 }
 
 /**
@@ -68,6 +79,9 @@ function electronPorts(): NativeCapabilityPorts {
         : dialog.showOpenDialog(window, { properties: ['openDirectory'] })
     },
     openPath: (path): Promise<string> => shell.openPath(path),
+    // The Electron shell names no separate text-editor open, so the text
+    // document goes through the default application like any other path.
+    openTextFile: (path): Promise<string> => shell.openPath(path),
   }
 }
 
@@ -77,6 +91,19 @@ function electronPorts(): NativeCapabilityPorts {
  * @returns the two closed capabilities.
  */
 export function createNativeCapabilities(ports: NativeCapabilityPorts = electronPorts()): NativeCapabilities {
+  // Both open intents share the port call and failure mapping; only the port
+  // and the fallback diagnostic differ.
+  const open = async (port: (path: string) => Promise<string>, fallback: string, path: string): Promise<void> => {
+    let failure: string
+    try {
+      failure = await port(path)
+    } catch (error) {
+      throw new NativeCapabilityError('open-failed', boundedMessage(error, fallback))
+    }
+    if (failure !== '') {
+      throw new NativeCapabilityError('open-failed', failure.slice(0, MAX_DIAGNOSTIC_CHARS))
+    }
+  }
   return {
     pickDirectory: async (window): Promise<string | null> => {
       let outcome: { canceled: boolean; filePaths: string[] }
@@ -89,17 +116,8 @@ export function createNativeCapabilities(ports: NativeCapabilityPorts = electron
       const path = outcome.filePaths[0]
       return path === undefined || path === '' ? null : path
     },
-    openPath: async (path): Promise<void> => {
-      let failure: string
-      try {
-        failure = await ports.openPath(path)
-      } catch (error) {
-        throw new NativeCapabilityError('open-failed', boundedMessage(error, 'the path could not be opened'))
-      }
-      if (failure !== '') {
-        throw new NativeCapabilityError('open-failed', failure.slice(0, MAX_DIAGNOSTIC_CHARS))
-      }
-    },
+    openPath: (path): Promise<void> => open(ports.openPath, 'the path could not be opened', path),
+    openTextFile: (path): Promise<void> => open(ports.openTextFile, 'the text document could not be opened', path),
   }
 }
 

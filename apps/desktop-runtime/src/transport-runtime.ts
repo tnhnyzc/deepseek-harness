@@ -1,21 +1,20 @@
 /**
  * The desktop runtime side of the transport: it consumes the wire protocol on
- * a MessagePort and serves both primitives through the one existing upstream
- * mechanism — the in-process fetch carrier (no HTTP). The fetch channel runs
- * an injected dispatch the production wiring composes from the host's own
- * handlers (the RPC channel with its in-process interceptors, the
- * client-bundle byte route); a stream open is a GET on the bare API proxy
- * carrier whose response body is pumped as ordered, credit-gated frames, so
- * every downlink the carrier serves — the pinned event streams, plain
- * downloads, and any stream a future revision adds — is carried with zero
- * desktop changes. The adapter names no endpoint, frame schema, or envelope;
- * it only chunks, sequences, and credits bytes. In-flight operations are
- * capped at the protocol's concurrent-operation bound: a peer over it has
- * its new opens refused, while its live operations run to their terminals.
+ * a MessagePort and serves both primitives through injected dispatches the
+ * production wiring composes from the host's own carrier. The fetch channel
+ * runs an injected dispatch (the RPC channel with its in-process interceptors,
+ * the client-bundle byte route); a stream open calls an injected opener that
+ * yields the downlink as an ordered byte iterable, and the adapter pumps those
+ * bytes as credit-gated frames, so every downlink the opener serves — the
+ * pinned event streams, any stream a future revision adds — is carried with
+ * zero changes to this edge or to the shared wire. The adapter names no
+ * endpoint, frame schema, or envelope; it only chunks, sequences, and credits
+ * bytes. In-flight operations are capped at the protocol's
+ * concurrent-operation bound: a peer over it has its new opens refused, while
+ * its live operations run to their terminals.
  * @module @deepseek-ai/dsh-desktop-runtime/transport-runtime
  */
 
-import { toFetchHandler, type ApiProxy } from '@deepseek-ai/dsh-host-apiproxy'
 import {
   TRANSPORT_MAX_CONCURRENT_OPERATIONS,
   TRANSPORT_MAX_FRAME_BYTES,
@@ -51,36 +50,60 @@ interface StreamState {
 /** One request of the fetch channel, answered by an injected dispatch. */
 export type FetchDispatch = (request: Request) => Promise<Response>
 
+/**
+ * One stream open on the host carrier, answered by an injected opener that
+ * yields the downlink as an ordered byte iterable. The production wiring
+ * composes the host's own stream opener here (mapping the route to the RPC
+ * endpoint and encoding the items as opaque bytes), so the adapter names no
+ * endpoint, frame schema, or envelope — it only chunks, sequences, and
+ * credits the bytes the opener yields.
+ * @param route - the opaque stream route the opener names the downlink by.
+ * @param initialBody - the opaque initial request body the opener sends with
+ * the open, present when the opener takes one.
+ * @param signal - the open's cancellation for its whole lifetime.
+ * @returns an iterable of the downlink's ordered byte frames.
+ */
+export type StreamOpenDispatch = (
+  route: string,
+  initialBody: Uint8Array | undefined,
+  signal: AbortSignal,
+) => Promise<AsyncIterable<Uint8Array>>
+
 /** Adapter options. */
 export interface TransportRuntimeOptions {
+  /**
+   * The fetch channel's request dispatch. The production wiring composes the
+   * host's own handlers here — the RPC channel with its in-process
+   * interceptors and the client-bundle byte route — so the adapter names no
+   * endpoint and stays the same chunking, sequencing, and crediting edge for
+   * whatever the host serves.
+   */
+  readonly fetchDispatch: FetchDispatch
+  /**
+   * The stream channel's opener. The production wiring composes the host's
+   * own stream carrier here (the route→endpoint map and the item→bytes
+   * codec), so the adapter names no endpoint or frame schema.
+   */
+  readonly streamOpenDispatch: StreamOpenDispatch
   /**
    * The semantic total-request limit for this adapter (defaults to
    * {@link TRANSPORT_MAX_REQUEST_BYTES}); the production wiring always uses
    * the default, tests exercise the bound accounting at smaller totals.
    */
   maxRequestBytes?: number
-  /**
-   * The fetch channel's request dispatch (defaults to the bare API proxy
-   * handler). The production wiring composes the host's own handlers here —
-   * the RPC channel with its in-process interceptors and the client-bundle
-   * byte route — so the adapter names no endpoint and stays the same
-   * chunking, sequencing, and crediting edge for whatever the host serves.
-   */
-  fetchDispatch?: FetchDispatch
 }
 
 /**
  * Attach the transport to the booted host plane on the given port.
  * @param port - the port the dumb broker relays to this runtime (a
  * `MessagePort` in tests; the child IPC adapter in the runtime entry).
- * @param api - the host communication plane (`ctx.apiProxy`).
- * @param options - adapter options (the total-request limit).
+ * @param options - the injected fetch and stream dispatches and the
+ * total-request limit.
  * @returns the disposer: aborts every in-flight operation and detaches.
  */
-export function attachTransportRuntime(port: TransportPort, api: ApiProxy, options?: TransportRuntimeOptions): () => void {
-  const handler = toFetchHandler(api)
-  const fetchDispatch = options?.fetchDispatch ?? handler.fetch
-  const maxRequestBytes = options?.maxRequestBytes ?? TRANSPORT_MAX_REQUEST_BYTES
+export function attachTransportRuntime(port: TransportPort, options: TransportRuntimeOptions): () => void {
+  const { fetchDispatch, streamOpenDispatch } = options
+  const maxRequestBytes = options.maxRequestBytes ?? TRANSPORT_MAX_REQUEST_BYTES
   const fetches = new Map<string, FetchState>()
   const streams = new Map<string, StreamState>()
   let disposed = false
@@ -197,17 +220,17 @@ export function attachTransportRuntime(port: TransportPort, api: ApiProxy, optio
   }
 
   /**
-   * Open one stream as a GET on the carrier and pump the response body into
-   * ordered, credit-gated frames. The carrier decides what the url serves
-   * (a pinned event downlink, a download, or a refusal); the adapter only
-   * chunks, sequences, and credits bytes.
+   * Open one stream through the injected opener and pump its byte iterable
+   * into ordered, credit-gated frames. The opener decides what the route
+   * serves (a downlink or a refusal); the adapter only chunks, sequences, and
+   * credits bytes.
    */
-  const openStream = async (streamId: string, state: StreamState, url: string): Promise<void> => {
-    let response: Response
+  const openStream = async (streamId: string, state: StreamState, route: string, initialBody: Uint8Array | undefined): Promise<void> => {
+    let frames: AsyncIterable<Uint8Array>
     try {
-      response = await handler.fetch(new Request(url, { method: 'GET', signal: state.controller.signal }))
+      frames = await streamOpenDispatch(route, initialBody, state.controller.signal)
     } catch {
-      // A failed open (an unparseable url, a seam reject) is refused below;
+      // A failed open (an unknown route, an opener reject) is refused below;
       // the underlying error name is not transport vocabulary.
       if (streams.get(streamId) === state) {
         refuseStream(streamId, TransportErrorCode.internal, state)
@@ -215,41 +238,23 @@ export function attachTransportRuntime(port: TransportPort, api: ApiProxy, optio
       return
     }
     if (streams.get(streamId) !== state) {
-      // The channel was torn down mid-open: nothing left to tell.
-      await cancelResponseBody(response)
+      // The channel was torn down mid-open: nothing left to tell. The opener
+      // is still cancelled through its signal by the state's abort.
+      state.controller.abort()
       return
     }
-    if (!response.ok || response.body === null) {
-      await cancelResponseBody(response)
-      refuseStream(
-        streamId,
-        response.status === 404 ? TransportErrorCode.unknownStream : `carrier-status-${response.status}`,
-        state,
-      )
-      return
-    }
-    // Headers are in and the body is readable: the stream is established.
+    // The opener accepted: the stream is established.
     post({ type: 'stream.open.ack', streamId, ok: true })
-    await pumpStream(streamId, state, response.body)
+    await pumpFrames(streamId, state, frames)
   }
 
-  /** Cancel a response body so the carrier's work ends; swallow the race with close. */
-  const cancelResponseBody = async (response: Response): Promise<void> => {
-    const body = response.body
-    if (body === null) return
-    await body.cancel().catch(() => undefined)
-  }
-
-  /** Pump one opened stream's body into ordered, credit-gated frames. */
-  const pumpStream = async (streamId: string, state: StreamState, body: ReadableStream<Uint8Array>): Promise<void> => {
-    const reader = body.getReader()
+  /** Pump one opened stream's byte iterable into ordered, credit-gated frames. */
+  const pumpFrames = async (streamId: string, state: StreamState, frames: AsyncIterable<Uint8Array>): Promise<void> => {
     try {
-      for (;;) {
-        const { done, value } = await reader.read()
-        if (done) break
+      for await (const frame of frames) {
         if (streams.get(streamId) !== state) return
-        for (let offset = 0; offset < value.byteLength;) {
-          const slice = value.subarray(offset, offset + TRANSPORT_MAX_FRAME_BYTES)
+        for (let offset = 0; offset < frame.byteLength;) {
+          const slice = frame.subarray(offset, offset + TRANSPORT_MAX_FRAME_BYTES)
           offset += slice.byteLength
           await state.window.reserve(slice.byteLength, state.controller.signal)
           if (streams.get(streamId) !== state) return
@@ -258,18 +263,9 @@ export function attachTransportRuntime(port: TransportPort, api: ApiProxy, optio
       }
       endStream(streamId, 'ended')
     } catch (error) {
-      // Mid-stream read failure → one stream.error: the peer must see the
+      // Mid-stream opener failure → one stream.error: the peer must see the
       // failure instead of a silent end (which reads as a normal disconnect).
       failStream(streamId, TransportErrorCode.internal, error instanceof Error ? error.message : String(error))
-    } finally {
-      try {
-        reader.releaseLock()
-      } catch {
-        // The stream closed under the reader; the lock is gone with it.
-      }
-      // Early exit (abort, channel teardown): stop the carrier's work now
-      // instead of waiting for the source to notice.
-      await body.cancel().catch(() => undefined)
     }
   }
 
@@ -377,7 +373,7 @@ export function attachTransportRuntime(port: TransportPort, api: ApiProxy, optio
           window: new TransportSendWindow(),
         }
         streams.set(message.streamId, state)
-        void openStream(message.streamId, state, message.url)
+        void openStream(message.streamId, state, message.url, message.data)
         return
       }
       case 'stream.frame': {

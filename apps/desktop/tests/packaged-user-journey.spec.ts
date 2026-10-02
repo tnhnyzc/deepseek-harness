@@ -37,6 +37,7 @@ import { createScriptedProvider, type ScriptedProvider } from './support/determi
 import {
   acknowledgeFirstRun,
   composerEditable,
+  composerSubmit,
   e2eRequired,
   rpc,
   seedWorkspaceRegistry,
@@ -289,14 +290,11 @@ describe.skipIf(skipUnless(guiAvailable(), hasArtifact))('packaged user journey 
   it('runs a basic session workflow on the packaged app', async () => {
     const page = app?.page
     if (page === undefined) throw new Error('no packaged app under test')
-    const composer = page.locator('[data-composer-card] textarea')
-    await composer.fill('pkg stream turn')
-    await composer.press('Enter')
+    await composerSubmit(page, 'pkg stream turn')
     // Incremental streaming, then the final text.
     await page.waitForFunction(() => document.body.innerText.includes('PKG_PARTIAL_') && !document.body.innerText.includes('PKG_STREAM_DONE'), undefined, { timeout: 30_000, polling: 50 })
     await expect.poll(() => page.evaluate(() => document.body.innerText.includes('PKG_STREAM_DONE')), { timeout: 30_000 }).toBe(true)
-    await composer.fill('pkg tool turn')
-    await composer.press('Enter')
+    await composerSubmit(page, 'pkg tool turn')
     await expect.poll(() => page.evaluate(() => document.body.innerText.includes('PKG_TOOL_DONE')), { timeout: 60_000 }).toBe(true)
     // World state: the tool really ran in the packaged workspace.
     expect(existsSync(join(workspaceDir, 'pkg-out.txt'))).toBe(true)
@@ -312,7 +310,7 @@ describe.skipIf(skipUnless(guiAvailable(), hasArtifact))('packaged user journey 
     const page = reopened.page
     await waitForShellReady(page)
     await expect.poll(() => composerEditable(page), { timeout: 60_000 }).toBe(true)
-    const sessions = await rpc<{ items: SessionSummary[] }>(page, 'session.list', {}, 'pkg')
+    const sessions = await rpc<{ items: SessionSummary[] }>(page, 'session/list', { _request: {} }, 'pkg')
     expect(sessions.items.length).toBeGreaterThanOrEqual(1)
     expect(sessions.items.every(item => !item.running)).toBe(true)
     // The reopened conversation still carries the streamed reply.

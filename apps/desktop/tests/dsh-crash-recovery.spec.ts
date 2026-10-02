@@ -26,6 +26,7 @@ import type { AddressInfo } from 'node:net'
 import type { ElectronApplication, Page } from 'playwright'
 import { _electron as electron } from 'playwright'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
+import { composerEditable, composerSubmit, rpc } from './support/electron-world.js'
 
 const appDir = join(import.meta.dirname, '..')
 const mainEntry = join(appDir, 'dist', 'main', 'index.js')
@@ -245,26 +246,6 @@ let app: ElectronApplication
 let win: Page
 const pageErrors: string[] = []
 
-interface RpcEnvelope<T> {
-  type: string
-  result: { ok: boolean; value: T; error?: { code?: string; message?: string } }
-}
-
-function rpc<T>(method: string, payload: unknown): Promise<T> {
-  return win.evaluate(async ({ m, p }: { m: string; p: unknown }) => {
-    const transport = globalThis as unknown as { __DSH_TRANSPORT__: { fetch: (input: URL, init: RequestInit) => Promise<Response> } }
-    const response = await transport.__DSH_TRANSPORT__.fetch(new URL(`/api/${m}`, location.origin), {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ type: 'client-request', rpcId: `crash-${m}`, method: m, payload: p }),
-    })
-    return JSON.parse(await response.text()) as RpcEnvelope<T>
-  }, { m: method, p: payload }).then((envelope) => {
-    if (!envelope.result.ok) throw new Error(`${method} failed: ${envelope.result.error?.code}: ${envelope.result.error?.message}`)
-    return envelope.result.value
-  })
-}
-
 interface SessionSummary {
   sessionId: string
   blank: boolean
@@ -359,7 +340,7 @@ function sessionLogs(): SessionLog[] {
     for (const entry of readdirSync(dir, { withFileTypes: true })) {
       const path = join(dir, entry.name)
       if (entry.isDirectory()) walk(path)
-      else if (entry.name === 'session.jsonl' || entry.name === 'session.jsonl.zstd') logs.push({ file: path, records: parseLogRecords(path) })
+      else if (/^session(\.v\d+)?\.jsonl(\.zstd)?$/.test(entry.name)) logs.push({ file: path, records: parseLogRecords(path) })
     }
   }
   walk(home)
@@ -580,14 +561,6 @@ async function crashAndRestart(): Promise<void> {
   await awaitClientLive()
 }
 
-/** The conversation composer is live when its textarea is writable. */
-function composerEditable(): Promise<boolean> {
-  return win.evaluate(() => {
-    const el = document.querySelector('[data-composer-card] textarea') as HTMLTextAreaElement | null
-    return el !== null && !el.readOnly
-  })
-}
-
 /**
  * Wait for the pinned client tree to be live on (a rebooted) window. After a
  * restart the boot globals survive from the first generation, so the
@@ -602,7 +575,7 @@ async function awaitClientLive(): Promise<void> {
   expect(await rootState()).toBe('ready')
   const deadline = Date.now() + 90_000
   for (;;) {
-    if (await composerEditable()) return
+    if (await composerEditable(win)) return
     if (Date.now() > deadline) throw new Error('the composer never became editable after boot/restart')
     await new Promise((resolve) => { setTimeout(resolve, 250) })
   }
@@ -632,9 +605,7 @@ async function openTurnSession(): Promise<void> {
 
 /** Send one prompt into the composer. */
 async function sendPrompt(text: string): Promise<void> {
-  const composer = win.locator('[data-composer-card] textarea')
-  await composer.fill(text)
-  await composer.press('Enter')
+  await composerSubmit(win, text)
 }
 
 /** Switch the session sandbox access mode through the composer seat. */
@@ -655,7 +626,7 @@ function assertNoPageErrors(): void {
 
 /** No session reports a live run on the recovered runtime. */
 async function assertNothingRunning(): Promise<void> {
-  const sessions = await rpc<{ items: SessionSummary[] }>('session.list', {})
+  const sessions = await rpc<{ items: SessionSummary[] }>(win, 'session/list', { _request: {} }, 'crash-none')
   expect(sessions.items.every(item => !item.running)).toBe(true)
 }
 
@@ -703,7 +674,7 @@ describe.skipIf(!guiAvailable() || !runtimeBuilt)('desktop DSH crash recovery (s
       return win.evaluate(async () => {
         const hooks = (globalThis as unknown as { __DSH_TRANSPORT__: { fetch: (input: URL, init?: RequestInit) => Promise<Response> } })
         try {
-          await hooks.__DSH_TRANSPORT__.fetch(new URL('/api/session.list', location.origin), { method: 'POST', body: '{}' })
+          await hooks.__DSH_TRANSPORT__.fetch(new URL('/api/session/list', location.origin), { method: 'POST', body: '{}' })
           return false
         } catch {
           return true
@@ -725,7 +696,7 @@ describe.skipIf(!guiAvailable() || !runtimeBuilt)('desktop DSH crash recovery (s
     await awaitState('ready')
     await awaitClientLive()
     // The recovered generation serves the persisted-state surface.
-    const sessions = await rpc<{ items: SessionSummary[] }>('session.list', {})
+    const sessions = await rpc<{ items: SessionSummary[] }>(win, 'session/list', { _request: {} }, 'crash-recovered')
     expect(Array.isArray(sessions.items)).toBe(true)
     assertNoPageErrors()
   }, 240_000)
@@ -935,7 +906,7 @@ describe.skipIf(!guiAvailable() || !runtimeBuilt)('desktop DSH crash recovery (s
     expect(records.some(r => r.type === 'assistant/chunk' && JSON.stringify(r.data).includes('CRASHX_1'))).toBe(true)
     expect(records.some(r => JSON.stringify(r).includes('CRASHX_FINAL'))).toBe(false)
     expect([...turnEndReasons().values()]).toContain('interrupted')
-    const sessions = await rpc<{ items: SessionSummary[] }>('session.list', {})
+    const sessions = await rpc<{ items: SessionSummary[] }>(win, 'session/list', { _request: {} }, 'crash-turn')
     expect(sessions.items.some(item => !item.blank)).toBe(true)
     await assertNothingRunning()
     assertNoPageErrors()

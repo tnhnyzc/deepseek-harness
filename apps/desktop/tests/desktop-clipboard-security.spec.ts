@@ -24,6 +24,7 @@ import type { AddressInfo } from 'node:net'
 import type { ElectronApplication, Page } from 'playwright'
 import { _electron as electron } from 'playwright'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
+import { composerEditable, composerSubmit } from './support/electron-world.js'
 
 const appDir = join(import.meta.dirname, '..')
 const mainEntry = join(appDir, 'dist', 'main', 'index.js')
@@ -113,11 +114,7 @@ async function awaitClientLive(): Promise<void> {
   expect(await win.evaluate(() => document.getElementById('root')?.dataset.state)).toBe('ready')
   const deadline = Date.now() + 60_000
   for (;;) {
-    const editable = await win.evaluate(() => {
-      const el = document.querySelector('[data-composer-card] textarea') as HTMLTextAreaElement | null
-      return el !== null && !el.readOnly
-    })
-    if (editable) return
+    if (await composerEditable(win)) return
     if (Date.now() > deadline) throw new Error('the composer never became editable after boot')
     await new Promise((resolve) => { setTimeout(resolve, 250) })
   }
@@ -190,9 +187,7 @@ describe.skipIf(!guiAvailable() || !runtimeBuilt || !pasteboardAvailable)('deskt
   it('copies a code block through the real DSH helper onto the macOS pasteboard', async () => {
     // 1. One scripted turn whose assistant reply carries the canary in a
     // code fence — the real assistant-message rendering path.
-    const composer = win.locator('[data-composer-card] textarea')
-    await composer.fill('clipboard canary copy')
-    await composer.press('Enter')
+    await composerSubmit(win, 'clipboard canary copy')
     const block = win.locator('.md-code-block').filter({ hasText: CANARY }).first()
     await block.waitFor({ timeout: 90_000 })
 

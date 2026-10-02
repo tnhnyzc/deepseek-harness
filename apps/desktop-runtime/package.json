@@ -15,6 +15,10 @@
       "types": "./lib/types/transport.d.ts",
       "default": "./dist/transport.js"
     },
+    "./remote-codec": {
+      "types": "./lib/types/remote-codec.d.ts",
+      "default": "./dist/remote-codec.js"
+    },
     "./native": {
       "types": "./lib/types/native.d.ts",
       "default": "./dist/native.js"
@@ -43,7 +47,6 @@
     "@deepseek-ai/dsh-client-ui-directory-picker-native": "workspace:^",
     "@deepseek-ai/dsh-cmdline": "workspace:^",
     "@deepseek-ai/dsh-home-paths": "workspace:^",
-    "@deepseek-ai/dsh-host-apiproxy": "workspace:^",
     "@deepseek-ai/dsh-host-directory-picker": "workspace:^",
     "@deepseek-ai/dsh-launch-environment": "workspace:^",
     "@deepseek-ai/dsh-persona": "workspace:^",
