@@ -58,6 +58,16 @@ function splitNameVersion(label: string): { name: string; version: string } {
   return { name: label.slice(0, at), version: label.slice(at + 1) }
 }
 
+/** The manifest version of a staged package directory, or undefined when unreadable. */
+function manifestVersionAt(dir: string): string | undefined {
+  try {
+    const manifest = JSON.parse(readFileSync(join(dir, 'package.json'), 'utf8')) as { version?: unknown }
+    return typeof manifest.version === 'string' ? manifest.version : undefined
+  } catch {
+    return undefined
+  }
+}
+
 /** The artifact's paths, per platform. */
 function artifactPaths(artifact: string, platform: NodeJS.Platform): { runtimeDir: string; node: string; audit: string; manifest: string } {
   const resources = platform === 'darwin'
@@ -131,26 +141,29 @@ function buildProbes(report: ResolutionReport, runtimeDir: string): { probes: Re
   const probes: ResolutionProbe[] = []
   const seen = new Set<string>()
   const rootName = splitNameVersion(report.root).name
-  // A consumer's resolution is the same from every one of its staged copies
-  // (one instance, one manifest), so each consumer is located once and any
-  // of its copies serves as the probe anchor.
+  // A colliding consumer is staged once per instance, and the instances
+  // resolve differently, so each probe anchors on the copies whose manifest
+  // matches the edge's consumer version; same-version copies are
+  // interchangeable (one instance, one manifest).
   const consumerDirs = new Map<string, string[]>()
   for (const edge of [...collisionEdges, ...ordinaryEdges]) {
     const consumer = splitNameVersion(edge.consumer)
     const dep = splitNameVersion(edge.dep)
-    const key = `${consumer.name} -> ${dep.name}`
+    const key = `${consumer.name}@${consumer.version} -> ${dep.name}`
     if (seen.has(key)) continue
     seen.add(key)
-    let dirs = consumerDirs.get(consumer.name)
+    const dirKey = `${consumer.name}@${consumer.version}`
+    let dirs = consumerDirs.get(dirKey)
     if (dirs === undefined) {
-      dirs = consumer.name === rootName
+      const candidates = consumer.name === rootName
         ? [runtimeDir]
         : findStagedPackageDirs(runtimeDir, consumer.name)
-      consumerDirs.set(consumer.name, dirs)
+      dirs = candidates.filter(dir => manifestVersionAt(dir) === consumer.version)
+      consumerDirs.set(dirKey, dirs)
     }
     const consumerDir = dirs[0]
     if (consumerDir === undefined) {
-      return { probes, error: `consumer ${consumer.name} is not staged in the artifact` }
+      return { probes, error: `consumer ${consumer.name}@${consumer.version} is not staged in the artifact` }
     }
     probes.push({ consumer: edge.consumer, consumerDir, dep: dep.name, expectedVersion: dep.version })
   }

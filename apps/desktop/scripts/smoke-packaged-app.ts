@@ -739,15 +739,19 @@ export async function runPackagedAppSmoke(artifact: string, platform: NodeJS.Pla
 
     // ── a bounded real carrier round trip ─────────────────────────────────
     // The release-B composer is a Lexical contenteditable: focus it, insert
-    // the text via the native input command, and submit with an Enter keydown.
-    await boundedEvaluate(page, `(() => {
+    // the text through the browser input pipeline (CDP Input.insertText
+    // delivers the beforeinput the editor consumes; a synthetic DOM mutation
+    // would be reconciled away), and submit with a trusted Enter keydown.
+    const focused = await boundedEvaluate(page, `(() => {
       const el = document.querySelector('[data-composer-input]')
       if (el === null) throw new Error('the composer input is gone')
       el.focus()
-      document.execCommand('insertText', false, 'packaged carrier turn')
-      el.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true, cancelable: true }))
-      return true
+      return document.activeElement === el
     })()`)
+    if (focused !== true) throw new Error('the composer input refused focus')
+    await page.send('Input.insertText', { text: 'packaged carrier turn' })
+    await page.send('Input.dispatchKeyEvent', { type: 'keyDown', key: 'Enter', code: 'Enter', windowsVirtualKeyCode: 13, nativeVirtualKeyCode: 13, modifiers: 0 })
+    await page.send('Input.dispatchKeyEvent', { type: 'keyUp', key: 'Enter', code: 'Enter', windowsVirtualKeyCode: 13, nativeVirtualKeyCode: 13, modifiers: 0 })
     await waitForPage(
       page,
       `document.body.innerText.includes(${JSON.stringify(CARRIER_CANARY)})`,
