@@ -12,8 +12,10 @@
  * @module @deepseek-ai/dsh-desktop/scripts/packaging/staging
  */
 
-import { cpSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { cpSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { createRequire } from 'node:module'
 import { join } from 'node:path'
+import { spawnSync } from 'node:child_process'
 import { createBuildManifest, type BuildManifest } from './build-manifest.ts'
 import { stageRuntimeClosure, type ClosureStageResult } from './closure.ts'
 import { installNodeTarget } from '../bundle-node.ts'
@@ -125,6 +127,75 @@ function stageLicenses(input: StagingInput, destination: string): void {
 }
 
 /**
+ * The closure's gyp-capable ABI-fragile native packages, rebuilt at staging
+ * against the bundled Node. fs-ext always compiles from source at install;
+ * node-pty ships N-API prebuilds but falls back to a source build, which
+ * carries the runner's ABI, so it is rebuilt unconditionally to make the
+ * shipped ABI independent of the install path. sharp's binding.gyp is not
+ * at its package root (prebuild-install supplies its N-API binary) and needs
+ * no rebuild.
+ */
+const GYP_AT_INSTALL_PACKAGES = ['fs-ext', 'node-pty'] as const
+
+/** The staged closure's `node_modules` roots, collision shadows included. */
+function stagedNodeModulesDirs(root: string): string[] {
+  const dirs: string[] = []
+  const modulesDir = join(root, 'node_modules')
+  if (existsSync(modulesDir)) dirs.push(modulesDir)
+  for (const entry of readdirSync(root, { withFileTypes: true })) {
+    if (entry.isDirectory() && entry.name !== 'node_modules') {
+      dirs.push(...stagedNodeModulesDirs(join(root, entry.name)))
+    }
+  }
+  return dirs
+}
+
+/** The `[dir, name]` pairs for every package directly under one modules root. */
+function stagedPackages(modulesDir: string): [string, string][] {
+  const pairs: [string, string][] = []
+  for (const entry of readdirSync(modulesDir, { withFileTypes: true })) {
+    if (!entry.isDirectory()) continue
+    if (entry.name.startsWith('@')) {
+      for (const child of readdirSync(join(modulesDir, entry.name), { withFileTypes: true })) {
+        if (child.isDirectory()) pairs.push([join(modulesDir, entry.name, child.name), `${entry.name}/${child.name}`])
+      }
+    } else {
+      pairs.push([join(modulesDir, entry.name), entry.name])
+    }
+  }
+  return pairs
+}
+
+/**
+ * Rebuild the staged closure's gyp-at-install native packages against the
+ * pinned bundled Node, so the packaged runtime's ABI matches its own Node
+ * instead of the runner's. A staged package with a root `binding.gyp` that
+ * is not in GYP_AT_INSTALL_PACKAGES fails staging, so a new ABI-fragile
+ * dependency is classified here rather than discovered by the boot smoke.
+ * @param runtimeDir - the staged runtime closure root.
+ * @param nodeVersion - the pinned bundled Node version without the `v`.
+ */
+function rebuildNativePackages(runtimeDir: string, nodeVersion: string): void {
+  const nodeGyp = createRequire(import.meta.url).resolve('node-gyp/bin/node-gyp.js')
+  let rebuilt = 0
+  for (const modulesDir of stagedNodeModulesDirs(runtimeDir)) {
+    for (const [pkgDir, name] of stagedPackages(modulesDir)) {
+      if (!existsSync(join(pkgDir, 'binding.gyp'))) continue
+      if (!(GYP_AT_INSTALL_PACKAGES as readonly string[]).includes(name)) {
+        throw new Error(`staging: ${name} carries a root binding.gyp but is not in GYP_AT_INSTALL_PACKAGES; classify its ABI before shipping`)
+      }
+      console.log(`staging: rebuilding ${name} against the bundled Node ${nodeVersion}`)
+      const result = spawnSync(process.execPath, [nodeGyp, 'rebuild', `--target=${nodeVersion}`], { cwd: pkgDir, stdio: 'inherit' })
+      if (result.status !== 0 || result.error !== undefined) {
+        throw new Error(`staging: the ${name} rebuild against the bundled Node ${nodeVersion} failed (exit ${String(result.status)})`)
+      }
+      rebuilt += 1
+    }
+  }
+  if (rebuilt > 0) console.log(`staging: rebuilt ${String(rebuilt)} native package(s) against the bundled Node`)
+}
+
+/**
  * Stage the complete release tree under `stagingDir`.
  * @param input - app dir, runtime source, repo root, staging root, target.
  * @returns the staged release description.
@@ -137,6 +208,7 @@ export async function stageRelease(input: StagingInput): Promise<StagedRelease> 
   const nodeManifest = JSON.parse(readFileSync(join(input.appDir, 'node-versions.json'), 'utf8')) as Parameters<typeof installNodeTarget>[0]
   await installNodeTarget(nodeManifest, input.target, join(input.stagingDir, 'node'))
   const runtime = stageRuntimeClosure(input.runtimeSourceDir, join(input.stagingDir, 'runtime'))
+  rebuildNativePackages(join(input.stagingDir, 'runtime'), nodeManifest.version.replace(/^v/, ''))
   const manifest = createBuildManifest({
     repoRoot: input.repoRoot,
     appDir: input.appDir,
