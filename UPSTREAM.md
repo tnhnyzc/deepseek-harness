@@ -9,103 +9,71 @@ release commit. See `ARCHITECTURE.md` and `SPEC.md`.
 ## Pinned revision
 
 - Upstream repository: `https://github.com/deepseek-ai/deepseek-harness`
-- Upstream SHA: `b150a551b8d465e31e418e1b2eaf5e79bbb7d28e`
-- Release tag: `dsh-v0.1.1-rc.2`
-- Pinned: 2026-08-22
-- The SHA was the live `master` HEAD at pin time (verified with
-  `git ls-remote`).
+- Upstream SHA: `d347e703908d0406b7a7ef80e3a0e594d86b2215`
+- Release tag: `dsh-v0.1.3-alpha.1` (the tag's commit is the pinned SHA;
+  verified with `git ls-remote`)
+- Pinned: 2026-10-03
+- Previous pin: `dsh-v0.1.1-rc.2`
+  (`b150a551b8d465e31e418e1b2eaf5e79bbb7d28e`, 2026-08-22), replaced by the
+  2026-10-02 re-pin, which validated the new SHA before flipping this file per
+  the procedure in `apps/desktop/docs/upstream-contract.md`.
 
 ## Toolchain at pin
 
 | Item | Value |
 | --- | --- |
-| Root package | `@deepseek-ai/dsh-root@0.1.1-rc.2` |
+| Root package | `@deepseek-ai/dsh-root@0.1.3-alpha.1` |
 | Node engine requirement | `^22.19.0 \|\| >=24.0.0` |
 | Node used for pin verification | `v22.23.2` |
 | pnpm pin (`packageManager`) | `pnpm@11.7.0` |
 | pnpm used for pin verification | `11.7.0` |
 
-## Baseline status at pin
+## Re-pin validation (2026-10-02 → 2026-10-03)
 
-Stage 0 task 0.2 (untouched upstream baseline), run 2026-08-22 on macOS
-arm64 with Node `v22.23.2` and pnpm `11.7.0`:
+The re-pin ran the contract's procedure — upstream change inspection,
+contract re-verification, the full authoritative suite against the new SHA,
+and flow testing — before this file changed. The new SHA moves the session
+format to v2 (v0/v1 remain readable through the adjacent migrations), the
+client tree to the Lexical composer and turn-process rendering, and the
+connection/module registries to the credential-wired, optional-webserver
+shape; the delta audit (which rc.2 patch was retained, replaced, or
+reclassified) is in `apps/desktop/docs/upstream-contract.md`.
 
-| Command | Result |
+| Gate | Evidence |
 | --- | --- |
-| `pnpm install --frozen-lockfile` | pass (lockfile unchanged). Two benign WARNs link unbuilt demo bins (`dsh-jsonrpc-agent`, `dsh-acp-demo`); `pnpm run build` resolves them |
-| `pnpm run build` | pass (21 s; vite prints informational chunk-size warnings) |
-| `pnpm run test` | pass: 863 files / 14593 tests; 9 files / 114 tests skipped |
-| `pnpm run test:gui` | pass: 284 files / 3997 tests; 1 skipped |
-| `pnpm run test:e2e` | pass: 32 files / 129 tests; 29 files / 75 tests self-skip (no `DEEPSEEK_API_KEY` / provider keys) |
-| `DSH_BUILD_CLIENT_PROFILE=official pnpm run build` | pass; build record carries `DSH_CLIENT_BUILD_PROFILE: official` |
-| `DSH_SNAPSHOT=replay pnpm run test:web:built` | pass: 83 files / 281 tests; 1 file / 15 tests skipped |
-| pre-push `pnpm run typecheck` (host + client `tsc -b`) | pass (72.9 s) |
-| `pnpm run dsh web --no-open --port 0` | booted `http://127.0.0.1:<port>`; `GET /` 200; clean shutdown |
+| Full desktop Layer C/D suite | 25 files / 229 tests green, including the event-correctness (5) and crash-recovery (9) suites re-expressed to the v2 durable semantics (no `assistant/chunk` records; settled `assistant/message` blocks, `interrupted` partials on graceful cancel, no fabricated partial on SIGKILL) |
+| Genuine A→B cross-artifact migration | `session-migration.spec.ts` (3) green: release A (`dsh-v0.1.1-rc.2`, built at `4327dc33`) creates a real v0 profile; release B (this tree) migrates v0→v1→v2 on reopen, restores the session `cwd`, and drives the production native-opener seam (`shell.openPath`) through the rendered "Show in folder" affordance |
+| Local package pipeline | exit 0: build, closure staging (ABI-fragile native packages rebuilt against the bundled Node v22.23.2), Electron packaging, fuses, ad-hoc signing, boot smoke, resolution smoke (78/78 edges), native-module smoke, packaged-app smoke |
+| Four-platform CI desktop jobs | run `37057856641` (head `91489b15`): `desktop / macos package (arm64)` (job `111006866311`), `desktop / macos package (x64)`, `desktop / linux package`, `desktop / windows package + D4 containment` — all success; the CI log confirms the staging rebuild path (`rebuilding fs-ext against the bundled Node 22.23.2`). darwin-arm64 zip SHA256 `ad3758dc778a9932e3085a33c913fe2de2fb0ff76186094868aa583b12424cc7` |
+| Typecheck + doc gates | `pnpm run typecheck` (host + client `tsc -b`) pass; `pnpm run test:docs` pass; `pnpm run rescope-vendor:check` pass (this re-pin removed two pre-rescope prose tokens from the fork's cordis agent preset) |
 
-`pnpm run check:ci` is the CI-owned primary gate matrix and was not
-rehearsed locally in full, per the repository's own AGENTS.md.
-
-### Environment prerequisites
-
-- `DEEPSEEK_API_KEY` is not set and no root `.env` exists, so every
-  real-model case self-skips (repo e2e convention, including the full-flow
-  `apps/web/tests/smoke-real.e2e.ts` smoke). Keyless replay lanes are the
-  deterministic baseline.
-- The web browser lane requires Playwright Chromium:
-  `pnpm --filter @deepseek-ai/dsh-web-frontend exec playwright install
-  chromium` (same step as CI).
-- The web browser lane reads **official-profile client artifacts**: CI's
-  `ciBuildGate` (`scripts/run-gates.ts`) sets
-  `DSH_BUILD_CLIENT_PROFILE=official` before the `web-snapshot` gate. A
-  dev-profile build omits the official brand slots
-  (`packages/client/ui-brand-official/src/client/index.ts`), which makes
-  `built-boot.snapshot.ts` fail. First local run with a dev-profile build
-  produced exactly that single failure; the CI-equivalent sequence above is
-  green.
-
-### Walkthrough mapping (SPEC task 0.2, steps 4-14)
-
-Driven by the upstream's own keyless browser e2e lane (real Chromium, real
-host boot per test file, recorded model traffic) plus the manual boot above.
-
-| Step | Evidence |
-| --- | --- |
-| 4. launch `dsh web` | manual boot/serve/shutdown (above); every web-lane file boots the same server |
-| 5. create a session | `cold-blank-session.e2e.ts`; `built-boot.snapshot.ts` (fixture session tree) |
-| 6. select a workspace | `workspace-management.e2e.ts` (12 tests, dialog add/rename/delete) |
-| 7. submit a prompt | `replay-round-trip.e2e.ts` "drives the recorded prompt to a settled turn" |
-| 8. verify streaming | `live-interactions.e2e.ts`, `chat-continuous-conversation.e2e.ts`, `chat-scroll-contract.e2e.ts` |
-| 9. exercise a tool | `cordis-tool-round.e2e.ts`, `code-mode-round.e2e.ts`, `web-search-round.e2e.ts`, `built-boot.snapshot.ts` (bash round + diff cards) |
-| 10. exercise an approval and answer it | `approval-composer.e2e.ts` "caps the long command, answers through the panel, and runs the escalated command" (real pending approval) |
-| 11. answer a user-question prompt | `question-composer.e2e.ts` "asks through the composer, answers, and completes with the answer logged" |
-| 12. cancel an active turn | `live-interactions.e2e.ts` "cancels a hung stream deterministically", `bash-abort-row.e2e.ts`, `subagent-interrupt.e2e.ts` |
-| 13. restart DSH | per-file host boot/teardown cycles across the lane; `subagent-conversation.e2e.ts` reload onto the restart baseline; manual boot/kill cycle |
-| 14. reopen the session | `built-boot.snapshot.ts` reopens the persisted fixture session end to end; `subagent-conversation.e2e.ts` restart-baseline lineage discovery after reload |
-
-No contradiction with SPEC.md or ARCHITECTURE.md was found. The one
-observed failure is an execution-prerequisite artifact (dev-profile build
-in a lane that requires official-profile artifacts), as documented above;
-the untouched upstream at the pin is green across all keyless lanes.
+Known fork-infra failures at the pin (not pin defects): the `Issue lifecycle`
+and `Issue policy` jobs stay red because the fork does not set
+`DSH_ISSUE_APP_CLIENT_ID`.
 
 ## Desktop patches
+
+Root-level fork patches (the package-level M/U delta against the pinned SHA
+is accounted in `apps/desktop/docs/upstream-contract.md`, sections "Applied
+local modifications (stage 4)" and "Shared upstream-generic modifications
+(stage 8)"):
 
 | File | Change | Stage |
 | --- | --- | --- |
 | `scripts/check-workspace-constraints.ts` | `privateAppDirectory` carve-out: `apps/desktop` and `apps/desktop-runtime` are private workspace members, exempt from the release-member publication rules and the app publication-files policy (fork-level gate amendment B1 from the upstream contract) | 1 |
 | `pnpm-workspace.yaml` | `allowBuilds.electron: true` (pinned Electron binary download); override pinning `@electron/rebuild` to 4.2.0 because the Forge packages' 3.x rebuild sub-dependency resolves node-gyp from a git repository, which `blockExoticSubdeps` rejects | 1 |
 | `tsdown.config.ts` | repo build workspace now includes `apps/desktop-runtime`, so the runtime's `dist/index.js` bundle is produced by `pnpm run build` (registration of the new private app; the app itself is fork-only) | 2 |
-| `tsconfig.host.json`, `knip.json`, `.gitignore` | workspace registration for `apps/desktop-runtime` (host-face reference, knip entry, build-output ignores) | 2 |
+| `tsconfig.host.json`, `tsconfig.client.json`, `knip.json`, `.gitignore` | workspace registration for the two private apps (host/client face references, knip entries, build-output ignores) | 2 |
+| six package manifests (`fs-local`, `directory-picker-native`, `sandbox-windows-acl`, `session-persistence-jsonl`, `subprocess-local`, `win32-process`) | `koffi` pinned `^3.1.0` → `3.1.1`: the 3.1.1 prebuild is the ABI-verified one for the bundled Node target (D4) | 11 |
+| `apps/desktop-runtime/config/agent-presets/cordis/agent.cordis.yml` | preset content migrated to the alpha.1 tool vocabulary; two pre-rescope prose tokens removed so `rescope-vendor:check` passes at the new pin | re-pin |
 
 ## Known incompatibilities
 
-- `pnpm run hygiene` is red **at the pin itself**:
-  `pnpm run rescope-vendor:check` fails with two stale exact edits in
-  `scripts/rescope-vendor.ts` (`knip-logger-console`,
-  `vendoring-cookbook-name-invariant-zh`) that point at files that no longer
-  exist in the tree. Verified in a clean detached worktree of the pin.
-  Pre-existing upstream defect in a gate the stage 0.2 baseline pass did not
-  exercise (recorded here on first discovery in stage 1); fork-level fix
-  deferred.
+- `pnpm run rescope-vendor:check` is green at this pin. At the previous pin
+  it was red with two stale exact edits in `scripts/rescope-vendor.ts`
+  (pre-existing upstream defect, fixed upstream by this pin); at this pin it
+  briefly tripped on pre-rescope prose tokens in the fork's cordis agent
+  preset, removed in the re-pin (table above).
 - Electron Forge 7.11.2's CLI system check requires a hoisted pnpm layout
   (or a custom hoist pattern), which this monorepo does not use;
   `skipSystemCheck` no longer exists in Forge 7. Stage 1 therefore verifies

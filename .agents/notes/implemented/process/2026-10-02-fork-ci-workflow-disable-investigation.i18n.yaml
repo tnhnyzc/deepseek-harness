@@ -2,5 +2,5 @@
 # side as of the last confirmed-consistent state. Both languages carry equal authority;
 # after editing either side, bring the other along and re-record with:
 #   pnpm run verify-translation-pairing --write .agents/notes/implemented/process/2026-10-02-fork-ci-workflow-disable-investigation.md
-2026-10-02-fork-ci-workflow-disable-investigation.md: 32ba56c9ea37cd3f471b2d9ba9e2d6efe16838c3
-2026-10-02-fork-ci-workflow-disable-investigation.zh.md: aafe95267501c1ff3d026bb944eeedb217dca814
+2026-10-02-fork-ci-workflow-disable-investigation.md: b24636486d1488c5ba2dfb743611252517314379
+2026-10-02-fork-ci-workflow-disable-investigation.zh.md: ed668baf9dd13b25fc411f784b70f478979fc721

@@ -1501,10 +1501,15 @@ architectural changes; (3) update this contract; (4) run the full authoritative
 suite against the new SHA; (5) manually test the agent / tool / approval /
 question flows; (6) only then change the pinned SHA in `UPSTREAM.md`.
 
-**Current readiness** (observation, 2026-09-03): `upstream-needs-adaptation` —
-upstream has advanced 1834 commits since the pin and changed files the desktop
-delta touches, so the delta does not apply cleanly. Stage 12 did **not** re-pin;
-the dedicated re-pin is the next task and runs its own full validation.
+**Re-pin record (2026-10-02).** The dedicated re-pin completed: the pin moved
+from `dsh-v0.1.1-rc.2` to `dsh-v0.1.3-alpha.1`
+(`d347e703908d0406b7a7ef80e3a0e594d86b2215`), following the procedure above —
+upstream change inspection, contract re-verification, the full authoritative
+suite against the new SHA (including the A→B cross-artifact migration gate),
+and flow testing before the pinned SHA changed. The delta accounting — which
+rc.2 patch was retained, replaced, reclassified, or dropped against the new
+SHA — is in the Desktop Extension Surface sections below. The observation
+track now runs from the new pin.
 
 ---
 
@@ -1568,30 +1573,71 @@ Classification of every anticipated desktop need:
 
 Stage 4 applied three Desktop-enablement modifications to the pinned
 source, each guarded so the web app's HTTP behavior is untouched (rationale
-in Agent Note `2026-08-25-desktop-dsh-client-boot`). They remain the full
-set of Desktop-carrier modifications; the separate shared upstream-generic
-set from stage 8 is accounted in the next section:
+in Agent Note `2026-08-25-desktop-dsh-client-boot`). At the re-pin to
+dsh-v0.1.3-alpha.1 the set was re-audited against the new SHA: M2's text was
+replaced, M3 carried over unchanged, and M1 was reclassified into the shared
+upstream-generic set as U4 (next section), leaving M2–M3 the complete
+Desktop-carrier modification set; the shared set is accounted in the next
+section:
 
 | # | File | Change |
 | --- | --- | --- |
-| M1 | `packages/client/modules/src/index.ts` | `ClientModuleRegistry` injects `['loader']` only; the `/plugins` bundle route and the `webserver/index-inject` rows register only when `ctx.get('webServer')` is present — the composed graph and bundle table serve non-HTTP carriers |
-| M2 | `packages/client/connection/src/index.ts` | `inject = []`; the `/api` route and the WebSocket downlinks register only when a webserver is present; the `HostConnectionService` and `createSharedFetchHandler` (in-process RPC dispatch) are provided unconditionally |
-| M3 | `packages/client/connection/src/rpc-host.ts` | `register()` returns a no-op disposer when no webserver exists: a channel on a non-HTTP host is unreachable over HTTP, not an error |
+| M1 | `packages/client/modules/src/index.ts` | **Superseded at the re-pin** — reclassified as U4. The rc.2 patch (inject `['loader']` only; the `/plugins` bundle route and `webserver/index-inject` rows register only when a webserver is present) survived the re-pin in effect, and the re-pin extended it with the public `fetchBundle(request)` serving face; upstream master has since absorbed the same no-Web serving face, so the whole remaining delta is upstream-generic, not Desktop-carrier |
+| M2 | `packages/client/connection/src/index.ts` | `inject = ['credentials']` (replaces the rc.2 `inject = []`: alpha.1 wires `credentials` into the connection row); the BrowserAuth row, the `/api` route, and the WebSocket downlinks register only when their services are present; the `HostConnectionService` and `createSharedFetchHandler` (in-process RPC dispatch) are provided unconditionally |
+| M3 | `packages/client/connection/src/rpc-host.ts` | `register()` returns a no-op disposer when no webserver exists: a channel on a non-HTTP host is unreachable over HTTP, not an error (`browserAuth` optional; without one, a rejected request answers 401) |
 
 ### Shared upstream-generic modifications (stage 8)
 
 Stage 8 resolved the stage 6 findings at their DSH seams rather than the
 carrier. Until upstream contains equivalent fixes, these shared packages are
-part of this fork's delta against the pinned SHA — distinct from M1–M3 (which
+part of this fork's delta against the pinned SHA — distinct from M2–M3 (which
 enable the Desktop carrier) and auditable the same way. Every one is a
 generic DSH fix that `dsh web` benefits from as well, and all are candidates
-for upstreaming (rationale and verification in the Stage 8 section below):
+for upstreaming (rationale and verification in the Stage 8 section below).
+At the re-pin to dsh-v0.1.3-alpha.1, U1–U3 were re-applied unchanged
+against the new SHA; the re-pin reclassified the rc.2 M1 into U4 and added
+U5:
 
 | # | File(s) | Change |
 | --- | --- | --- |
 | U1 | `packages/session/session-projection-cache/src/index.ts` | Projection-cache shutdown and write-order correctness: a per-session serialized write chain (an older in-flight store can no longer clobber a newer one), the registration-boundary checkpoint cut taken eagerly (a pre-cut write can no longer store after the cut), and the disposal drain registered as a close deferral on the domain |
 | U2 | `packages/storage/storage-domain/src/domain.ts`, `packages/storage/storage-domain/src/index.ts`, `packages/storage/storage/src/backend.ts`, `packages/storage/storage-json/src/index.ts`, `packages/storage/storage-sqlite/src/index.ts`, `packages/feedback/message-feedback/src/index.ts` | Storage close-deferral contract: `Domain.deferClose` (infrastructure-initiated closes await a registered settlement; the owner's own `close()` is never deferred), the deferral-aware facility `closeAll` forwarding to the routed backend, optional `StorageBackend.deferClose` implemented by json (run-once close) and sqlite, and the message-feedback drain registration. Generated consequence: the `tool-cordis` API catalog recompute (`packages/extensions/tool-cordis/src/api-catalog.ts`) |
 | U3 | `packages/extensions/cordis-client-runner/src/client/index.ts`, `packages/extensions/cordis-client-runner/src/client/inspect-registry.ts` | Inspect-manifest publication waits for the connection readiness seam: registrations stage while the registry is un-armed; `arm()` (first `connection/reset`; late runners probe the strict `connection` get the gateway checks) publishes |
+| U4 | `packages/client/modules/src/index.ts` | ClientModuleRegistry no-Web serving face (supersedes the rc.2 M1): the registry injects `['loader']` only, the `/plugins` bundle route and `webserver/index-inject` rows register only when a webserver is present, and the registry publishes a public `fetchBundle(request)` serving face that the HTTP route delegates to, so the desktop boot-graph carrier (`apps/desktop-runtime/src/boot-graph.ts`) serves the exact same bytes. Retained upstream-generic: upstream master has since absorbed the same face (conditional carrier registration plus a public `fetchBundle`); when a future pin carries it, this patch drops |
+| U5 | `packages/util/native-command/src/native-openers.ts`, `packages/api/session-controller/src/index.ts`, `packages/api/settings-controller/src/index.ts`, `scripts/gen-cordis-catalog.ts` | Native-opener capability seam: a `NativeOpeners` interface (`canOpenPath` / `openPath` / `openTextFile`) as a Context capability, deployment-injected openers taking precedence over the defaults in the session and settings controllers, and the generated catalog entry. Upstream-generic (any deployment can inject application openers); the Desktop production injection — `apps/desktop-runtime/src/index.ts` provides the Electron `shell.openPath`-backed opener — is carrier-side, not part of the shared set |
+
+**Re-pin delta accounting (dsh-v0.1.1-rc.2 → dsh-v0.1.3-alpha.1).**
+Against the frozen candidate `d347e703908d0406b7a7ef80e3a0e594d86b2215`, the
+entire rc.2 patch set was re-audited file by file:
+
+- **Retained, re-applied unchanged:** U1, U2, U3 (the candidate carries no
+  equivalent; the fork's delta re-applies the rc.2 patches verbatim).
+- **Replaced:** rc.2 M2 — the candidate's connection row wires
+  `credentials`, so the patch text changed from `inject = []` to
+  `inject = ['credentials']` with the BrowserAuth row made conditional (the
+  Desktop composition has no browser session auth); the in-process RPC
+  dispatch stays unconditional.
+- **Reclassified:** rc.2 M1 → U4 (above), extended at the re-pin with the
+  public `fetchBundle(request)` serving face the boot-graph carrier consumes.
+- **Retained, carried over unchanged:** M3.
+- **Added:** U5 (new capability the alpha.1 re-pin required for the
+  "Show in folder" affordance to reach a production opener).
+- **No rc.2 patch was dropped** — every one has a living successor in the
+  candidate delta.
+
+Not part of the M/U delta: the `koffi` pin `^3.1.0` → `3.1.1` in six
+package manifests (`fs-local`, `directory-picker-native`,
+`sandbox-windows-acl`, `session-persistence-jsonl`, `subprocess-local`,
+`win32-process`) is a fork-level dependency constraint (the 3.1.1 prebuild
+is the ABI-verified one for the bundled Node target, D4); and the fork
+tooling (`scripts/check-workspace-constraints.ts` B1,
+`scripts/release/families.ts` / `bump.ts`, the
+`scripts/upstream-observation.ts` docstring, `docs/subsystems/storage.*`
+U2 docs, root `UPSTREAM.md` / `ARCHITECTURE.md` / `SPEC.md` /
+`THIRD_PARTY_NOTICES.md` / `.gitignore` / `pnpm-workspace.yaml` /
+`pnpm-lock.yaml` / `tsconfig.{base,client,host}.json` /
+`tsdown.config.ts`) is fork infrastructure, not a pinned-source
+modification.
 
 ### Stage 6 parity resolution
 

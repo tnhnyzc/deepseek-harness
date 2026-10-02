@@ -2,6 +2,8 @@
 
 Status: implemented
 
+English | [中文](2026-09-15-desktop-native-opener-host-capability.zh.md)
+
 ## Problem
 
 The packaged desktop runs its DSH runtime as a supervised child process and routes every OS capability call — choosing a directory, opening a path, opening a text document — to Electron main over the closed native channel, because the child must not open OS files directly. Before the `dsh-v0.1.3-alpha.1` re-pin, the desktop injected its default-application opener into the gateway through an apiproxy that read the `nativeOpeners` host service.

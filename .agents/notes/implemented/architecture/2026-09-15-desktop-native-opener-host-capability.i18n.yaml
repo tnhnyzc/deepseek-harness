@@ -1,0 +1,6 @@
+# Bilingual-pair consistency record (docs/i18n/README.md): the git blob hash of each
+# side as of the last confirmed-consistent state. Both languages carry equal authority;
+# after editing either side, bring the other along and re-record with:
+#   pnpm run verify-translation-pairing --write .agents/notes/implemented/architecture/2026-09-15-desktop-native-opener-host-capability.md
+2026-09-15-desktop-native-opener-host-capability.md: 014861522c6cc101f8b49945d0a8c7d2e3754773
+2026-09-15-desktop-native-opener-host-capability.zh.md: c161bb21a5346392fa81464cebb46168ea6cdb85
