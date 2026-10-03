@@ -611,6 +611,12 @@ export const SERVICE_API: readonly ServiceApiEntry[] = [
         returns: 'the path, or undefined for an unknown id.',
       },
       {
+        signature: 'async fetchBundle(request: Request): Promise<Response>',
+        description: 'Serve one client bundle — a single advertised resource or a combo — from the registry\'s owned response state. This is the single authoritative serving face: the web composition\'s HTTP route and the shell/no-Web carrier (the desktop host plane) both consume it, so they cannot disagree about single/combo URLs, advertised revisions, source maps, method handling, or the prior-generation recomposition race window.',
+        parameters: [{ name: 'request', description: 'the fetch request for a `/plugins` resource.' }],
+        returns: 'the bundle response (200), a 405 for a non-GET/HEAD method, or a 404 for an unknown resource.',
+      },
+      {
         signature: 'artifactBaseline(id: string): ClientArtifactBaseline | undefined',
         description: 'Filesystem baseline captured before an entry\'s current bytes were read. HMR compares it with the live files when installing a watch, so a write between startup composition and watch installation cannot disappear into the watcher\'s initial state.',
         parameters: [{ name: 'id', description: 'entry id (package name).' }],
@@ -1600,7 +1606,7 @@ export const SERVICE_API: readonly ServiceApiEntry[] = [
   {
     key: 'sessionProjectionCache',
     summary: 'The persisted projection cache service.',
-    description: 'The persisted projection cache service. Opens the `session_projcache` domain at init, checkpoints live sessions on a throttled write-behind (count/interval triggers from Config) plus three mandatory points — session creation, `turn/end`, and session disposal (the live-to-cold moment) — and serves the cached rows for a session header. Every durable write is fail-soft: failures log a warning and the cache self-heals on the next write.',
+    description: 'The persisted projection cache service. Opens the `session_projcache` domain at init, checkpoints live sessions on a throttled write-behind (count/interval triggers from Config) plus three mandatory points — session creation, `turn/end`, and session disposal (the live-to-cold moment) — and serves the cached rows for a session header. Every durable write is fail-soft: failures log a warning and the cache self-heals on the next write. Plugin disposal drains the write-behind: it settles in-flight writes and durably flushes every still-dirty session, so a clean shutdown never leaves the final checkpoint (for example a rename after the last write) un-written and the cold list serving a stale row.',
     methods: [
       {
         signature: 'cachedSnapshot( meta: SessionHeader, inheritedEventCount: SessionLogOffset, keys?: readonly Extract<keyof SessionProjectionMap, string>[], ): ProjectionSnapshot | undefined',
@@ -1621,8 +1627,8 @@ export const SERVICE_API: readonly ServiceApiEntry[] = [
         returns: 'all projection values at the event cut.',
       },
       {
-        signature: 'async write(session: Session): Promise<void>',
-        description: 'Durably checkpoint one live session NOW (all mandatory points call this; tests and carriers may too). The registry cut is snapshotted at this boundary (states are live references), then the session\'s record is replaced on the domain\'s write chain. NOT fail-soft — callers on the fail-soft paths contain it.',
+        signature: 'write(session: Session): Promise<void>',
+        description: 'Durably checkpoint one live session NOW (all mandatory points call this; tests and carriers may too). The registry cut is snapshotted at this boundary (states are live references — a checkpoint taken later, after teardown retires the units\' registrations, would fold stale or partial state), then the store pass is queued on the session\'s write chain so concurrent stores land in the order their cuts were taken and a slow older cut can never clobber a newer one. NOT fail-soft — callers on the fail-soft paths contain it.',
         parameters: [{ name: 'session', description: 'the live session to checkpoint.' }],
         returns: 'resolution after durability and event emission.',
       },
@@ -2226,7 +2232,7 @@ export const SERVICE_API: readonly ServiceApiEntry[] = [
       },
       {
         signature: 'async closeAll(): Promise<void>',
-        description: 'Close every domain still open on this facility. The unmount path for consumers that never called `Domain.close()` themselves; closing is idempotent, so double-closing an already-closed domain is harmless.',
+        description: 'Close every domain still open on this facility. The unmount path for consumers that never called `Domain.close()` themselves; closing is idempotent, so double-closing an already-closed domain is harmless. Plugin fibers tear down concurrently, so a domain whose owner registered a drain deferral (its disposal drain still writes) is waited out before its close — a close that lands first would reject the owner\'s final writes. An owner that never deferred closes immediately as before.',
         parameters: [],
         returns: 'resolution after every unit is released.',
       },
@@ -4015,7 +4021,7 @@ export const TYPE_API: readonly TypeApiEntry[] = [
   },
   {
     name: 'Domain',
-    declaration: 'export interface Domain<S extends DomainSpec> {\n    readonly name: string;\n    readonly global: DomainGlobalHandleOf<S>;\n    table<N extends keyof S[\'tables\'] & string>(name: N): KvTable<TableKeyOf<S, N>, TableValueOf<S, N>>;\n    close(): Promise<void>;\n}',
+    declaration: 'export interface Domain<S extends DomainSpec> {\n    readonly name: string;\n    readonly global: DomainGlobalHandleOf<S>;\n    table<N extends keyof S[\'tables\'] & string>(name: N): KvTable<TableKeyOf<S, N>, TableValueOf<S, N>>;\n    close(): Promise<void>;\n    deferClose(settled: Promise<void>): void;\n}',
   },
   {
     name: 'DomainChanged',
@@ -4047,7 +4053,7 @@ export const TYPE_API: readonly TypeApiEntry[] = [
   },
   {
     name: 'DomainImpl',
-    declaration: 'export class DomainImpl {\n    readonly name: string;\n    constructor(private readonly ctx: Context, spec: DomainSpec, private readonly unit: KvUnit, records: Map<string, Map<string, unknown>>, globalValue: unknown, private readonly onClosed: () => void);\n    get global(): DomainGlobal<unknown>;\n    table(name: string): KvTable<string, unknown>;\n    close(): Promise<void>;\n}',
+    declaration: 'export class DomainImpl {\n    readonly name: string;\n    constructor(private readonly ctx: Context, spec: DomainSpec, private readonly unit: KvUnit, records: Map<string, Map<string, unknown>>, globalValue: unknown, private readonly onClosed: () => void, private readonly onDeferral: (settled: Promise<void>) => void);\n    get global(): DomainGlobal<unknown>;\n    table(name: string): KvTable<string, unknown>;\n    close(): Promise<void>;\n    deferClose(settled: Promise<void>): void;\n    closeDeferral(): Promise<void> | undefined;\n}',
   },
   {
     name: 'DomainSpec',
@@ -5567,7 +5573,7 @@ export const TYPE_API: readonly TypeApiEntry[] = [
   },
   {
     name: 'StorageBackend',
-    declaration: 'export interface StorageBackend {\n    readonly kv?: KvFacet;\n    close(): Promise<void>;\n}',
+    declaration: 'export interface StorageBackend {\n    readonly kv?: KvFacet;\n    close(): Promise<void>;\n    deferClose?(settled: Promise<void>): void;\n}',
   },
   {
     name: 'StorageForms',

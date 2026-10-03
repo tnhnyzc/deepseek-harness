@@ -131,6 +131,19 @@ graph(): WebBootGraph
 clientPath(id: string): string | undefined
 
 /**
+ * Serve one client bundle — a single advertised resource or a combo — from
+ * the registry's owned response state. This is the single authoritative
+ * serving face: the web composition's HTTP route and the shell/no-Web
+ * carrier (the desktop host plane) both consume it, so they cannot disagree
+ * about single/combo URLs, advertised revisions, source maps, method
+ * handling, or the prior-generation recomposition race window.
+ * @param request - the fetch request for a `/plugins` resource.
+ * @returns the bundle response (200), a 405 for a non-GET/HEAD method, or a
+ *   404 for an unknown resource.
+ */
+async fetchBundle(request: Request): Promise<Response>
+
+/**
  * Filesystem baseline captured before an entry's current bytes were read.
  * HMR compares it with the live files when installing a watch, so a write
  * between startup composition and watch installation cannot disappear into
