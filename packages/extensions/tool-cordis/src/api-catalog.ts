@@ -611,7 +611,7 @@ export const SERVICE_API: readonly ServiceApiEntry[] = [
         returns: 'the path, or undefined for an unknown id.',
       },
       {
-        signature: 'async fetchBundle(request: Request): Promise<Response>',
+        signature: 'fetchBundle(request: Request): Promise<Response>',
         description: 'Serve one client bundle — a single advertised resource or a combo — from the registry\'s owned response state. This is the single authoritative serving face: the web composition\'s HTTP route and the shell/no-Web carrier (the desktop host plane) both consume it, so they cannot disagree about single/combo URLs, advertised revisions, source maps, method handling, or the prior-generation recomposition race window.',
         parameters: [{ name: 'request', description: 'the fetch request for a `/plugins` resource.' }],
         returns: 'the bundle response (200), a 405 for a non-GET/HEAD method, or a 404 for an unknown resource.',

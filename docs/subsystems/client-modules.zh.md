@@ -141,7 +141,7 @@ clientPath(id: string): string | undefined
  * @returns the bundle response (200), a 405 for a non-GET/HEAD method, or a
  *   404 for an unknown resource.
  */
-async fetchBundle(request: Request): Promise<Response>
+fetchBundle(request: Request): Promise<Response>
 
 /**
  * Filesystem baseline captured before an entry's current bytes were read.
