@@ -1511,6 +1511,18 @@ rc.2 patch was retained, replaced, reclassified, or dropped against the new
 SHA — is in the Desktop Extension Surface sections below. The observation
 track now runs from the new pin.
 
+**Closure record (2026-10-03) — src-mode E2E persistence drop.** The non-CI
+src-mode drop (the driver exits 0 without materializing `.sessions`)
+reproduces on the untouched frozen candidate in the same built state: the
+same time-context driver and fixture run through tsx's ESM loader with
+`TSX_TSCONFIG_PATH` set create no session files, while the same launch
+without it — the CI-authoritative `DSH_EXAMPLE_MODE=lib` form — writes
+`session.v2.jsonl`. The attribution is frozen-candidate behavior (a hybrid
+source/lib module graph in which the JSONL persistence plugin is never
+constructed), not a fork delta and not an environmental condition; per the
+closure decision, candidate-only non-authoritative src-mode behavior is not
+fixed here.
+
 ---
 
 ## Desktop Extension Surface
