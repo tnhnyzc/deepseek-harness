@@ -62,7 +62,7 @@ fork 重新固定到 `d347e703908d0406b7a7ef80e3a0e594d86b2215`（发布标签 `
 - spill-local 启动清理边界抖动——浮点秒 `utimes` 伪影，已由 U6 回移（上游 `228f3aef83`）修复。
 - python 运行时环境泄漏断言——宿主机 pyenv shim 会向 python 子进程重新注入 `PATH`/`PYENV_*`；属宿主环境归类，无 shim 的 PATH 下绿（250 通过、2 跳过）。
 - `web-agent-presets.e2e.ts` 向真实 `~/.dsh/sessions/_no-cwd` 写固定名会话（设计上未固定，rc.2 时代）；本地运行需要清理残留，CI runner 是全新环境。
-- 运行 `37057856641` 中的 `python runtime / release-shaped matrix / node24-win-x64`——digest 不匹配，前一运行 `37047907732` 中绿；收尾时唯一允许的 rerun 仍被七个排队的企业池作业阻塞，记为基础设施限制而非产品失败。
+- 运行 `37057856641` 中的 `python runtime / release-shaped matrix / node24-win-x64`——digest 不匹配，前一运行 `37047907732` 中绿；收尾时唯一允许的 rerun 被 GitHub 拒绝（"run 37057856641 cannot be rerun; This workflow is already running"），当时运行仍有七个企业池作业排队，记为基础设施限制而非产品失败。
 - `Issue lifecycle` 与 `Issue policy` CI 作业保持红，因为 fork 未设置 `DSH_ISSUE_APP_CLIENT_ID`——既有的 fork 基础设施缺口，不是固定点缺陷。
 
 ## 环境与基础设施限制

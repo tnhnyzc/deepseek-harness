@@ -62,7 +62,7 @@ Against the frozen candidate the entire rc.2 patch set was re-audited file by fi
 - The spill-local startup-cleanup boundary flake — a float-seconds `utimes` artifact, fixed by the U6 backport (upstream `228f3aef83`).
 - The python-runtime environment-leak assertion — the host's pyenv shims re-inject `PATH`/`PYENV_*` into python children; host-environment classification, green under a shim-free PATH (250 passed, 2 skipped).
 - `web-agent-presets.e2e.ts` writes fixed-name sessions into the real `~/.dsh/sessions/_no-cwd` (unpinned by design, rc.2-era); local runs need residue cleanup, and CI runners are fresh.
-- `python runtime / release-shaped matrix / node24-win-x64` in run `37057856641` — digest-mismatch, green in the prior run `37047907732`; the single permitted rerun was still blocked at closure by seven queued enterprise-pool jobs and is recorded as an infrastructure limitation, not a product failure.
+- `python runtime / release-shaped matrix / node24-win-x64` in run `37057856641` — digest-mismatch, green in the prior run `37047907732`; the single permitted rerun was refused by GitHub at closure ("run 37057856641 cannot be rerun; This workflow is already running") while the run still had seven enterprise-pool jobs queued, and is recorded as an infrastructure limitation, not a product failure.
 - The `Issue lifecycle` and `Issue policy` CI jobs stay red because the fork does not set `DSH_ISSUE_APP_CLIENT_ID` — a pre-existing fork-infra gap, not a pin defect.
 
 ## Environment and infrastructure limitations
