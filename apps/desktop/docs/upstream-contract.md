@@ -1577,14 +1577,16 @@ in Agent Note `2026-08-25-desktop-dsh-client-boot`). At the re-pin to
 dsh-v0.1.3-alpha.1 the set was re-audited against the new SHA: M2's text was
 replaced, M3 carried over unchanged, and M1 was reclassified into the shared
 upstream-generic set as U4 (next section), leaving M2–M3 the complete
-Desktop-carrier modification set; the shared set is accounted in the next
-section:
+Desktop-carrier modification set; the re-pin closure recorded the Desktop
+CI adaptations M4–M5. The shared set is accounted in the next section:
 
 | # | File | Change |
 | --- | --- | --- |
 | M1 | `packages/client/modules/src/index.ts` | **Superseded at the re-pin** — reclassified as U4. The rc.2 patch (inject `['loader']` only; the `/plugins` bundle route and `webserver/index-inject` rows register only when a webserver is present) survived the re-pin in effect, and the re-pin extended it with the public `fetchBundle(request)` serving face; upstream master has since absorbed the same no-Web serving face, so the whole remaining delta is upstream-generic, not Desktop-carrier |
 | M2 | `packages/client/connection/src/index.ts` | `inject = ['credentials']` (replaces the rc.2 `inject = []`: alpha.1 wires `credentials` into the connection row); the BrowserAuth row, the `/api` route, and the WebSocket downlinks register only when their services are present; the `HostConnectionService` and `createSharedFetchHandler` (in-process RPC dispatch) are provided unconditionally |
 | M3 | `packages/client/connection/src/rpc-host.ts` | `register()` returns a no-op disposer when no webserver exists: a channel on a non-HTTP host is unreachable over HTTP, not an error (`browserAuth` optional; without one, a rejected request answers 401) |
+| M4 | `.github/workflows/ci.yml` | Fork CI workflow over the candidate's `ci.yml`: one required per-platform desktop packaging job per target (`desktop-macos` on macos-latest, `desktop-macos-x64` on macos-14, `desktop-linux` on ubuntu-latest with Xvfb, `desktop-windows` on windows-latest — the D4 acceptance and the Win32 Job Object ABI probe run only on native Windows), the fork's python runtime / release-shaped matrix, and the master-only standby split into `ci-master.yml`. Closure conformance: the four desktop jobs' `pnpm/action-setup` destinations moved from the bare `runner.temp/setup-pnpm` to the runner-and-run-private form the candidate's spec test (M5) requires |
+| M5 | `scripts/ci-workflow.spec.ts` | Fork addition to the candidate's CI-workflow spec: `keeps one required per-platform desktop packaging job per target, with D4 only on native Windows` — pins each job's runner, `all-checks-passed` requirement, frozen-lockfile install, full `package` pipeline, and release-archive artifact name, the Windows-only D4/ABI commands, and the Linux Xvfb display |
 
 ### Shared upstream-generic modifications (stage 8)
 
@@ -1596,15 +1598,17 @@ generic DSH fix that `dsh web` benefits from as well, and all are candidates
 for upstreaming (rationale and verification in the Stage 8 section below).
 At the re-pin to dsh-v0.1.3-alpha.1, U1–U3 were re-applied unchanged
 against the new SHA; the re-pin reclassified the rc.2 M1 into U4 and added
-U5:
+U5; the re-pin closure extended U4 with the catalog classification its
+`fetchBundle` signature requires and added U6 (a later-upstream backport):
 
 | # | File(s) | Change |
 | --- | --- | --- |
 | U1 | `packages/session/session-projection-cache/src/index.ts` | Projection-cache shutdown and write-order correctness: a per-session serialized write chain (an older in-flight store can no longer clobber a newer one), the registration-boundary checkpoint cut taken eagerly (a pre-cut write can no longer store after the cut), and the disposal drain registered as a close deferral on the domain |
 | U2 | `packages/storage/storage-domain/src/domain.ts`, `packages/storage/storage-domain/src/index.ts`, `packages/storage/storage/src/backend.ts`, `packages/storage/storage-json/src/index.ts`, `packages/storage/storage-sqlite/src/index.ts`, `packages/feedback/message-feedback/src/index.ts` | Storage close-deferral contract: `Domain.deferClose` (infrastructure-initiated closes await a registered settlement; the owner's own `close()` is never deferred), the deferral-aware facility `closeAll` forwarding to the routed backend, optional `StorageBackend.deferClose` implemented by json (run-once close) and sqlite, and the message-feedback drain registration. Generated consequence: the `tool-cordis` API catalog recompute (`packages/extensions/tool-cordis/src/api-catalog.ts`) |
 | U3 | `packages/extensions/cordis-client-runner/src/client/index.ts`, `packages/extensions/cordis-client-runner/src/client/inspect-registry.ts` | Inspect-manifest publication waits for the connection readiness seam: registrations stage while the registry is un-armed; `arm()` (first `connection/reset`; late runners probe the strict `connection` get the gateway checks) publishes |
-| U4 | `packages/client/modules/src/index.ts` | ClientModuleRegistry no-Web serving face (supersedes the rc.2 M1): the registry injects `['loader']` only, the `/plugins` bundle route and `webserver/index-inject` rows register only when a webserver is present, and the registry publishes a public `fetchBundle(request)` serving face that the HTTP route delegates to, so the desktop boot-graph carrier (`apps/desktop-runtime/src/boot-graph.ts`) serves the exact same bytes. Retained upstream-generic: upstream master has since absorbed the same face (conditional carrier registration plus a public `fetchBundle`); when a future pin carries it, this patch drops |
-| U5 | `packages/util/native-command/src/native-openers.ts`, `packages/api/session-controller/src/index.ts`, `packages/api/settings-controller/src/index.ts`, `scripts/gen-cordis-catalog.ts` | Native-opener capability seam: a `NativeOpeners` interface (`canOpenPath` / `openPath` / `openTextFile`) as a Context capability, deployment-injected openers taking precedence over the defaults in the session and settings controllers, and the generated catalog entry. Upstream-generic (any deployment can inject application openers); the Desktop production injection — `apps/desktop-runtime/src/index.ts` provides the Electron `shell.openPath`-backed opener — is carrier-side, not part of the shared set |
+| U4 | `packages/client/modules/src/index.ts`, `scripts/gen-cordis-catalog.ts` | ClientModuleRegistry no-Web serving face (supersedes the rc.2 M1): the registry injects `['loader']` only, the `/plugins` bundle route and `webserver/index-inject` rows register only when a webserver is present, and the registry publishes a public `fetchBundle(request)` serving face that the HTTP route delegates to, so the desktop boot-graph carrier (`apps/desktop-runtime/src/boot-graph.ts`) serves the exact same bytes. Closure consequence: the candidate's catalog type-link gate refuses the fork's `fetchBundle(request: Request): Promise<Response>` signature until the platform types are classified, so `Request` and `Response` join `FOUNDATION_TYPE_NAMES` (standard lib types, the bucket `AbortSignal` and `Uint8Array` occupy), and the committed catalog artifacts (`docs/subsystems/client-modules.*`, `docs/subsystems/session-projection.*`, `packages/extensions/tool-cordis/src/api-catalog.ts`) were regenerated against the frozen candidate — the re-pin had left them stale (no `fetchBundle` page entry; rc.2-era projection-cache prose). Retained upstream-generic: upstream master has since absorbed the same face (conditional carrier registration plus a public `fetchBundle`); when a future pin carries it, this patch drops |
+| U5 | `packages/util/native-command/src/native-openers.ts`, `packages/api/session-controller/src/index.ts`, `packages/api/settings-controller/src/index.ts`, `scripts/gen-cordis-catalog.ts` | Native-opener capability seam: a `NativeOpeners` interface (`canOpenPath` / `openPath` / `openTextFile`) as a Context capability, deployment-injected openers taking precedence over the defaults in the session and settings controllers, and the generated catalog entry (the `nativeOpeners` service-walk exemption in `scripts/gen-cordis-catalog.ts`). Upstream-generic (any deployment can inject application openers); the Desktop production injection — `apps/desktop-runtime/src/index.ts` provides the Electron `shell.openPath`-backed opener — is carrier-side, not part of the shared set |
+| U6 | `packages/spill/spill-local/tests/spill-local.spec.ts` | Later-upstream backport (upstream `228f3aef83`, a master commit after the frozen candidate): the startup-cleanup boundary test now uses the stored `mtimeMs` read back after `utimes` as the sweep cutoff. The candidate's form ages a file to a float-seconds value that `utimes` stores one millisecond under the integer-ms cutoff for roughly half of all cutoffs, so the sweep deletes the file the test asserts it keeps — a flake by construction, not a behavior change. Removal condition: drop the hunk when a future pin carries `228f3aef83` |
 
 **Re-pin delta accounting (dsh-v0.1.1-rc.2 → dsh-v0.1.3-alpha.1).**
 Against the frozen candidate `d347e703908d0406b7a7ef80e3a0e594d86b2215`, the
@@ -1624,6 +1628,24 @@ entire rc.2 patch set was re-audited file by file:
   "Show in folder" affordance to reach a production opener).
 - **No rc.2 patch was dropped** — every one has a living successor in the
   candidate delta.
+
+**Re-pin closure accounting (full-lane validation against the frozen
+candidate).** Running the repository's full test lane, doc gates, and CI
+spec against the pinned candidate plus the delta above exposed three
+additional deltas, all recorded above:
+
+- **Recorded, Desktop CI (M4, M5):** the fork's `ci.yml` desktop packaging
+  jobs and their spec validation; the closure moved the four desktop jobs'
+  `pnpm/action-setup` destinations to the runner-and-run-private form the
+  candidate's own spec test requires.
+- **Extended, upstream-generic (U4):** the `fetchBundle` signature's
+  `Request`/`Response` classification in `scripts/gen-cordis-catalog.ts`
+  and the catalog artifact regeneration — the candidate's committed
+  artifacts were stale against the candidate itself (the re-pin never
+  re-ran the generator).
+- **Added, later-upstream backport (U6):** the spill-local boundary
+  sweep's mtime read-back (upstream `228f3aef83`), with an explicit
+  removal condition on a future pin.
 
 Not part of the M/U delta: the `koffi` pin `^3.1.0` → `3.1.1` in six
 package manifests (`fs-local`, `directory-picker-native`,
