@@ -270,7 +270,7 @@ describe.skipIf(!guiAvailable() || !runtimeBuilt)('desktop UX', () => {
     // Startup auto-selection opens the seeded workspace's blank session.
     await win.waitForFunction(() => {
       const el = document.querySelector('[data-composer-input]') as HTMLElement | null
-      return el !== null && el.isContentEditable === true
+      return el !== null && el.isContentEditable
     }, undefined, { timeout: 60_000 })
   }, 240_000)
 

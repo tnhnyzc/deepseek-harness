@@ -631,23 +631,23 @@ export class ClientModuleRegistry extends Service {
    * @returns the bundle response (200), a 405 for a non-GET/HEAD method, or a
    *   404 for an unknown resource.
    */
-  async fetchBundle(request: Request): Promise<Response> {
+  fetchBundle(request: Request): Promise<Response> {
     if (request.method !== 'GET' && request.method !== 'HEAD') {
-      return new Response(null, { status: 405 })
+      return Promise.resolve(new Response(null, { status: 405 }))
     }
     const url = new URL(request.url)
     const resourceUrl = `${url.pathname}${url.search}`
     const response = this.responses.get(resourceUrl) ?? this.previousBatchResponses.get(resourceUrl)
     if (response === undefined) {
-      return new Response('not found', { status: 404 })
+      return Promise.resolve(new Response('not found', { status: 404 }))
     }
-    return new Response(request.method === 'HEAD' ? null : new Uint8Array(response.body), {
+    return Promise.resolve(new Response(request.method === 'HEAD' ? null : new Uint8Array(response.body), {
       status: 200,
       headers: {
         'content-type': response.contentType,
         'cache-control': IMMUTABLE_CACHE,
       },
-    })
+    }))
   }
 
   /**

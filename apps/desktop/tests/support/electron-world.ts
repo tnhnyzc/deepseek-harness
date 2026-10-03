@@ -140,7 +140,7 @@ function postRpc<T>(
   tag: string,
   signal?: AbortSignal,
 ): Promise<T> {
-  if (signal !== undefined && signal.aborted === true) {
+  if (signal !== undefined && signal.aborted) {
     return Promise.reject(new Error(`${endpoint} aborted before dispatch`))
   }
   return win.evaluate(async ({ m, p, t }: { m: string; p: unknown; t: string }) => {
@@ -177,7 +177,7 @@ export const currentDriver: DesktopDriver = {
   composerEditable: win =>
     win.evaluate(() => {
       const el = document.querySelector('[data-composer-input]') as HTMLElement | null
-      return el !== null && el.isContentEditable === true
+      return el !== null && el.isContentEditable
     }),
   composerSubmit: async (win, text) => {
     const input = win.locator('[data-composer-input]')
@@ -268,12 +268,14 @@ export async function workspaceFollowBaseline(win: Page, timeoutMs = 30_000): Pr
     const readBaseline = async (): Promise<WorkspaceFollowRow[]> => {
       for await (const frame of open('workspace/follow', { args: {} }, controller.signal)) {
         const value = frame as { type?: unknown; value?: { items?: WorkspaceFollowRow[] } }
-        if (value?.type === 'baseline' && Array.isArray(value.value?.items)) return value.value!.items
+        if (value?.type === 'baseline' && Array.isArray(value.value?.items)) return value.value.items
       }
       throw new Error('workspace/follow stream closed before its baseline frame')
     }
     const timeout = new Promise<never>((_, reject) => {
-      setTimeout(() => reject(new Error(`workspace/follow baseline did not arrive within ${boundMs}ms`)), boundMs)
+      setTimeout(() => {
+        reject(new Error(`workspace/follow baseline did not arrive within ${boundMs}ms`))
+      }, boundMs)
     })
     try {
       return await Promise.race([readBaseline(), timeout])
